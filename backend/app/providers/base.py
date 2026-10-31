@@ -19,12 +19,14 @@ class ReleaseItem:
         description: Optional[str] = None,
         guid: Optional[str] = None,
         source_feed_name: Optional[str] = None,
+        release_group: Optional[str] = None,
         raw_data: Optional[Dict[str, Any]] = None
     ):
         self.title = title.strip()
         self.link = link.strip()
         self.download_url = download_url.strip() if download_url else self.link
         self.series_name = series_name
+        self.release_group = release_group
         self.is_bundle = is_bundle
         self.volume_start = volume_start
         self.volume_end = volume_end
@@ -49,6 +51,7 @@ class ReleaseItem:
             "link": self.link,
             "download_url": self.download_url,
             "series_name": self.series_name,
+            "release_group": self.release_group,
             "is_bundle": self.is_bundle,
             "volume_start": self.volume_start,
             "volume_end": self.volume_end,

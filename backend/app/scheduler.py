@@ -12,6 +12,7 @@ from app.downloader.qbit import QBitClient
 from app.tagger.cbz_tagger import auto_tag_staging_cbz_files
 from app.providers.registry import create_provider
 from app.metadata.anilist import AniListMetadataService
+from app.parser import is_chapter_only
 
 logger = logging.getLogger("mangatrax.scheduler")
 
@@ -120,7 +121,13 @@ class MangaScheduler:
                 feed_requested = 0
 
                 for rel in releases:
+                    # Discard pure chapter updates
+                    if is_chapter_only(rel.title):
+                        continue
+
                     total_found += 1
+
+                    rel_group = getattr(rel, "release_group", None) or rel.to_dict().get("release_group")
 
                     # Canonical series metadata & cover resolution
                     canonical_series = rel.series_name
@@ -156,6 +163,7 @@ class MangaScheduler:
                         "guid": rel.guid,
                         "title": rel.title,
                         "series_name": canonical_series,
+                        "release_group": rel_group,
                         "is_bundle": rel.is_bundle,
                         "volume_start": rel.volume_start,
                         "volume_end": rel.volume_end,
@@ -317,7 +325,11 @@ class MangaScheduler:
                     if self.stop_backfill_requested:
                         break
 
+                    if is_chapter_only(rel.title):
+                        continue
+
                     total_processed += 1
+                    rel_group = getattr(rel, "release_group", None) or rel.to_dict().get("release_group")
 
                     # Canonical series metadata & cover resolution
                     canonical_series = rel.series_name
@@ -352,6 +364,7 @@ class MangaScheduler:
                         "guid": rel.guid,
                         "title": rel.title,
                         "series_name": canonical_series,
+                        "release_group": rel_group,
                         "is_bundle": rel.is_bundle,
                         "volume_start": rel.volume_start,
                         "volume_end": rel.volume_end,

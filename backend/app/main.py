@@ -123,6 +123,24 @@ async def releases_view(request: Request, status: Optional[str] = None, view: st
         }
     )
 
+@app.get("/prioritized", response_class=HTMLResponse)
+async def prioritized_view(request: Request, status: Optional[str] = None, view: str = Query("series")):
+    prioritized_groups = db.get_prioritized_groups()
+    releases = db.get_prioritized_releases(status=status, limit=500)
+    grouped_series = db.get_releases_grouped_by_series(status=status, prioritized_only=True)
+    return templates.TemplateResponse(
+        request=request,
+        name="prioritized.html",
+        context={
+            "active_page": "prioritized",
+            "prioritized_groups": prioritized_groups,
+            "releases": releases,
+            "grouped_series": grouped_series,
+            "current_status": status,
+            "current_view": view
+        }
+    )
+
 @app.get("/api/releases/grouped")
 async def api_releases_grouped(status: Optional[str] = None):
     groups = db.get_releases_grouped_by_series(status=status)
@@ -201,12 +219,14 @@ async def logs_view(request: Request):
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_view(request: Request):
     settings = db.get_all_settings()
+    prioritized_groups = db.get_prioritized_groups()
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
         context={
             "active_page": "settings",
-            "settings": settings
+            "settings": settings,
+            "prioritized_groups": prioritized_groups
         }
     )
 
@@ -410,6 +430,36 @@ async def api_delete_blacklist(blacklist_id: int):
     db.remove_from_blacklist(blacklist_id)
     db.log_activity("BLACKLIST_REMOVED", f"Removed series #{blacklist_id} from blacklist")
     return JSONResponse({"status": "success"})
+
+# --- Prioritized Release Groups Endpoints ---
+
+@app.get("/api/prioritized/groups")
+async def api_get_prioritized_groups():
+    groups = db.get_prioritized_groups()
+    return JSONResponse({"status": "success", "groups": groups})
+
+@app.post("/api/prioritized/groups")
+async def api_add_prioritized_group(payload: Dict[str, Any]):
+    name = payload.get("name")
+    notes = payload.get("notes", "")
+    priority = payload.get("priority", 1)
+    if not name:
+        return JSONResponse({"status": "error", "message": "Group name required"}, status_code=400)
+
+    success = db.add_prioritized_group(name, notes, priority)
+    db.log_activity("GROUP_PRIORITIZED", f"Added prioritized release group: {name}", notes)
+    return JSONResponse({"status": "success"})
+
+@app.delete("/api/prioritized/groups/{group_id}")
+async def api_delete_prioritized_group(group_id: int):
+    db.remove_prioritized_group(group_id)
+    db.log_activity("GROUP_UNPRIORITIZED", f"Removed prioritized group #{group_id}")
+    return JSONResponse({"status": "success"})
+
+@app.get("/api/prioritized/releases")
+async def api_get_prioritized_releases(status: Optional[str] = None):
+    releases = db.get_prioritized_releases(status=status)
+    return JSONResponse({"status": "success", "count": len(releases), "releases": releases})
 
 @app.post("/api/discovery/track")
 async def api_discovery_track(payload: Dict[str, Any]):

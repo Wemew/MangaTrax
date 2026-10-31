@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 from app.providers.base import BaseFeedProvider, ReleaseItem
-from app.parser import extract_manga_bundle_and_volumes
+from app.parser import extract_manga_bundle_and_volumes, is_chapter_only
 
 logger = logging.getLogger("mangatrax.providers.html_scraper")
 
@@ -65,6 +65,11 @@ class HtmlScraperProvider(BaseFeedProvider):
                     if not raw_title:
                         continue
 
+                    # Discard pure chapter updates
+                    if is_chapter_only(raw_title):
+                        logger.debug(f"Discarding chapter-only release from HTML scraper '{self.name}': {raw_title}")
+                        continue
+
                     # Details Link
                     link = ""
                     if self.link_selector:
@@ -113,6 +118,7 @@ class HtmlScraperProvider(BaseFeedProvider):
                         link=link,
                         download_url=download_url,
                         series_name=parsed["series_name"],
+                        release_group=parsed.get("release_group"),
                         is_bundle=parsed["is_bundle"],
                         volume_start=parsed["volume_start"],
                         volume_end=parsed["volume_end"],

@@ -3,7 +3,7 @@ import logging
 from typing import List, Dict, Any, Optional
 import feedparser
 from app.providers.base import BaseFeedProvider, ReleaseItem
-from app.parser import extract_manga_bundle_and_volumes
+from app.parser import extract_manga_bundle_and_volumes, is_chapter_only
 
 logger = logging.getLogger("mangatrax.providers.rss")
 
@@ -29,6 +29,11 @@ class RSSFeedProvider(BaseFeedProvider):
             title = entry.get("title", "")
             link = entry.get("link", "")
             if not title:
+                continue
+
+            # Discard pure chapter updates
+            if is_chapter_only(title):
+                logger.debug(f"Discarding chapter-only release from RSS feed '{self.name}': {title}")
                 continue
 
             pub_date = entry.get("published") or entry.get("updated")
@@ -87,6 +92,7 @@ class RSSFeedProvider(BaseFeedProvider):
                 link=link,
                 download_url=download_url,
                 series_name=parsed["series_name"],
+                release_group=parsed.get("release_group"),
                 is_bundle=parsed["is_bundle"],
                 volume_start=parsed["volume_start"],
                 volume_end=parsed["volume_end"],

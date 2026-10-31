@@ -377,6 +377,119 @@ def test_series_grouping_and_metadata():
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+def test_chapters_and_mixed_updates():
+    print("--> Testing Chapter-Only Discard & Mixed Volume/Chapter Parsing...")
+    from app.parser import is_chapter_only, extract_manga_bundle_and_volumes, extract_release_group
+
+    # 1. Pure chapters must be flagged as chapter-only (to be discarded)
+    assert is_chapter_only("One Piece Chapter 1110 [Digital]") is True
+    assert is_chapter_only("[TCB] One Piece Ch. 1110") is True
+    assert is_chapter_only("Chainsaw Man c150") is True
+    assert is_chapter_only("Jujutsu Kaisen Chapter 250-255") is True
+    assert is_chapter_only("[Group] Bleach Ch. 01 - 10") is True
+    assert is_chapter_only("Oshi no Ko c140 [English]") is True
+
+    # 2. Volumes must NOT be flagged as chapter-only
+    assert is_chapter_only("One Piece Vol. 108") is False
+    assert is_chapter_only("Bleach v01-v07") is False
+    assert is_chapter_only("[danke-Empire] Bleach v01-v20 [Digital]") is False
+
+    # 3. Mixed releases must NOT be flagged as chapter-only, and only volume info extracted
+    assert is_chapter_only("Bleach Vol. 1 (Ch. 1-7)") is False
+    r_mixed1 = extract_manga_bundle_and_volumes("Bleach Vol. 1 (Ch. 1-7)")
+    assert r_mixed1["series_name"] == "Bleach"
+    assert r_mixed1["volume_start"] == 1.0
+    assert r_mixed1["volumes"] == [1.0]
+    assert r_mixed1["is_bundle"] is False
+
+    r_mixed2 = extract_manga_bundle_and_volumes("One Piece v108 (c1080-c1090)")
+    assert r_mixed2["series_name"] == "One Piece"
+    assert r_mixed2["volume_start"] == 108.0
+    assert r_mixed2["volumes"] == [108.0]
+
+    r_mixed3 = extract_manga_bundle_and_volumes("[Group] Chainsaw Man Vol. 01-03 (Ch. 1-26)")
+    assert r_mixed3["series_name"] == "Chainsaw Man"
+    assert r_mixed3["is_bundle"] is True
+    assert r_mixed3["volumes"] == [1.0, 2.0, 3.0]
+
+    print("    [PASSED] Chapter-only releases correctly discarded; mixed releases isolate volume data.")
+
+def test_prioritized_release_groups():
+    print("--> Testing Prioritized Release Groups Management & Filtering...")
+    from app.parser import extract_release_group
+    temp_dir = tempfile.mkdtemp(prefix="mangatrax_test_prioritized_")
+    db_file = os.path.join(temp_dir, "mangatrax_prioritized_test.db")
+
+    try:
+        # 1. Group extraction
+        assert extract_release_group("[danke-Empire] Bleach v01-v20 [Digital] [1080p] [CBZ]") == "danke-Empire"
+        assert extract_release_group("[Lu自主规制] Chainsaw Man Vol. 01-11 [Digital] [HD]") == "Lu自主规制"
+        assert extract_release_group("[1R0N] One Piece Vol. 108") == "1R0N"
+        assert extract_release_group("Bleach v01-v20 (danke-Empire)") == "danke-Empire"
+        assert extract_release_group("One Piece Vol 108 [Digital] [CBZ]") is None
+
+        db = MangaDatabase(db_file)
+
+        # 2. Database prioritized groups
+        groups = db.get_prioritized_groups()
+        assert len(groups) >= 4  # Default seeded groups
+        assert db.is_group_prioritized("danke-Empire") is True
+        assert db.is_group_prioritized("unknown-group") is False
+
+        # Add custom group
+        db.add_prioritized_group("CustomGroup", "High quality scanlations", priority=2)
+        assert db.is_group_prioritized("CustomGroup") is True
+
+        # Insert releases: one from prioritized group, one from regular group
+        rel1 = {
+            "guid": "guid-csm-danke-1",
+            "title": "[danke-Empire] Chainsaw Man Vol. 01 [Digital]",
+            "series_name": "Chainsaw Man",
+            "release_group": "danke-Empire",
+            "is_bundle": False,
+            "volume_start": 1.0,
+            "volume_end": 1.0,
+            "volumes": [1.0],
+            "missing_volumes": [],
+            "status": "REQUESTED"
+        }
+        rel2 = {
+            "guid": "guid-csm-random-1",
+            "title": "[RandomGroup] Chainsaw Man Vol. 01 [Scan]",
+            "series_name": "Chainsaw Man",
+            "release_group": "RandomGroup",
+            "is_bundle": False,
+            "volume_start": 1.0,
+            "volume_end": 1.0,
+            "volumes": [1.0],
+            "missing_volumes": [],
+            "status": "REQUESTED"
+        }
+        db.upsert_release(rel1)
+        db.upsert_release(rel2)
+
+        # 3. Query all vs prioritized
+        all_releases = db.get_releases()
+        assert len(all_releases) == 2
+        danke_rel = next(r for r in all_releases if r["guid"] == "guid-csm-danke-1")
+        random_rel = next(r for r in all_releases if r["guid"] == "guid-csm-random-1")
+        assert danke_rel["is_prioritized"] is True
+        assert random_rel["is_prioritized"] is False
+
+        prioritized_releases = db.get_prioritized_releases()
+        assert len(prioritized_releases) == 1
+        assert prioritized_releases[0]["guid"] == "guid-csm-danke-1"
+
+        # 4. Grouped by series prioritized_only
+        p_series_groups = db.get_releases_grouped_by_series(prioritized_only=True)
+        assert len(p_series_groups) == 1
+        assert len(p_series_groups[0]["releases"]) == 1
+        assert p_series_groups[0]["releases"][0]["release_group"] == "danke-Empire"
+
+        print("    [PASSED] Prioritized groups extracted, stored, and filtered with complete accuracy.")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
 if __name__ == "__main__":
     print("==================================================")
     print("Running MangaTrax Comprehensive Integration Suite")
@@ -386,6 +499,8 @@ if __name__ == "__main__":
     test_cbz_tagger_and_comicinfo()
     test_database_and_blacklist_workflow()
     test_series_grouping_and_metadata()
+    test_chapters_and_mixed_updates()
+    test_prioritized_release_groups()
     print("==================================================")
     print("ALL TESTS PASSED SUCCESSFULLY! (100% VERIFIED)")
     print("==================================================")
