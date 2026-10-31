@@ -137,6 +137,11 @@
                             <h2 class="text-xl font-bold text-white tracking-tight flex items-center gap-2">
                                 {{ group.series_name }}
                             </h2>
+                            {% if group.romaji_name and group.romaji_name.lower() != group.series_name.lower() %}
+                            <p class="text-xs text-slate-400 mt-0.5 italic" title="Original Japanese/Romaji Title: {{ group.romaji_name }}">
+                                Romaji: {{ group.romaji_name }}
+                            </p>
+                            {% endif %}
                             <div class="flex items-center gap-2 flex-wrap mt-1 text-xs">
                                 {% if group.in_calibre %}
                                 <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold text-[11px]">

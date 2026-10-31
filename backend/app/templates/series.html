@@ -150,10 +150,10 @@ async function toggleMonitored(seriesId) {
 async function backfillSeries(seriesId, seriesName, btn) {
     const origHtml = btn.innerHTML;
     btn.disabled = true;
-    btn.innerHTML = `<i data-lucide="refresh-cw" class="w-3.5 h-3.5 animate-spin text-brand-400"></i> <span>Searching...</span>`;
+    btn.innerHTML = `<i data-lucide="refresh-cw" class="w-3.5 h-3.5 animate-spin text-brand-400"></i> <span>Starting...</span>`;
     if (window.lucide) lucide.createIcons();
     
-    showToast(`Searching Nyaa for past releases of "${seriesName}"...`, 'info');
+    showToast(`Starting historical search for "${seriesName}"...`, 'info');
 
     try {
         const res = await fetch(`/api/series/${seriesId}/backfill`, {
@@ -162,17 +162,22 @@ async function backfillSeries(seriesId, seriesName, btn) {
             body: JSON.stringify({ max_pages: 3 })
         });
         const data = await res.json();
-        if (data.status === 'success') {
-            showToast(data.message || `Found ${data.releases_found} releases!`, 'success');
+        if (data.status === 'started' || data.status === 'success') {
+            showToast(data.message || `Backfill for "${seriesName}" started in background!`, 'success');
+            if (typeof initGlobalBackfillPolling === 'function') {
+                initGlobalBackfillPolling();
+            }
         } else {
-            showToast(data.message || 'Backfill failed', 'error');
+            showToast(data.message || 'Backfill failed to start', 'error');
         }
     } catch (err) {
         showToast('Error backfilling series: ' + err, 'error');
     } finally {
-        btn.disabled = false;
-        btn.innerHTML = origHtml;
-        if (window.lucide) lucide.createIcons();
+        setTimeout(() => {
+            btn.disabled = false;
+            btn.innerHTML = origHtml;
+            if (window.lucide) lucide.createIcons();
+        }, 800);
     }
 }
 

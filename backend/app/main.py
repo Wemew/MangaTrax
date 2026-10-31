@@ -127,13 +127,22 @@ async def series_view(request: Request):
 @app.get("/releases", response_class=HTMLResponse)
 async def releases_view(request: Request, status: Optional[str] = None, view: str = Query("series")):
     releases = db.get_releases(status=status, limit=500)
+    # Deduplicate flat releases by release signature
+    seen_sigs = set()
+    deduped_releases = []
+    for r in releases:
+        sig = r.get("guid") or (r.get("download_url") or r.get("link") or r.get("title"), tuple(sorted(r.get("volumes", []))), (r.get("release_group") or "").lower())
+        if sig not in seen_sigs:
+            seen_sigs.add(sig)
+            deduped_releases.append(r)
+
     grouped_series = db.get_releases_grouped_by_series(status=status)
     return templates.TemplateResponse(
         request=request,
         name="releases.html",
         context={
             "active_page": "releases",
-            "releases": releases,
+            "releases": deduped_releases,
             "grouped_series": grouped_series,
             "current_status": status,
             "current_view": view
@@ -493,7 +502,7 @@ async def api_update_series_link(series_id: int, payload: Dict[str, Any]):
 
 @app.post("/api/series/{series_id}/backfill")
 async def api_series_backfill(series_id: int, payload: Optional[Dict[str, Any]] = None):
-    """Executes a targeted Nyaa search backfill specifically for a tracked series."""
+    """Executes a targeted Nyaa search backfill in background for a tracked series."""
     series_list = db.get_all_series()
     target = next((s for s in series_list if s["id"] == series_id), None)
     if not target:
@@ -501,17 +510,17 @@ async def api_series_backfill(series_id: int, payload: Optional[Dict[str, Any]] 
 
     p = payload or {}
     max_pages = int(p.get("max_pages", 3))
-    res = scheduler.backfill_series(target["name"], max_pages=max_pages)
+    res = scheduler.run_series_backfill_async(target["name"], max_pages=max_pages)
     return JSONResponse(res)
 
 @app.post("/api/series/backfill")
 async def api_series_backfill_by_name(payload: Dict[str, Any]):
-    """Executes a targeted Nyaa search backfill by series name."""
+    """Executes a targeted Nyaa search backfill in background by series name."""
     series_name = payload.get("series_name")
     if not series_name:
         return JSONResponse({"status": "error", "message": "Series name required"}, status_code=400)
     max_pages = int(payload.get("max_pages", 3))
-    res = scheduler.backfill_series(series_name, max_pages=max_pages)
+    res = scheduler.run_series_backfill_async(series_name, max_pages=max_pages)
     return JSONResponse(res)
 
 @app.post("/api/releases/{release_id}/status")

@@ -143,6 +143,28 @@
 
     <!-- Main Content Body -->
     <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <!-- Global Active Backfill Progress Banner (Visible across all pages) -->
+        <div id="global-backfill-banner" class="hidden mb-6 bg-brand-500/10 border border-brand-500/30 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-lg">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-lg bg-brand-500/20 text-brand-400 flex items-center justify-center animate-spin shrink-0">
+                    <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+                </div>
+                <div class="min-w-0">
+                    <p class="text-xs font-bold text-white flex items-center gap-2 flex-wrap">
+                        <span id="global-backfill-title">Historical Manga Feed Backfill in Progress</span>
+                        <span class="text-[10px] px-2 py-0.5 rounded-full bg-brand-500/20 text-brand-300 font-semibold shrink-0">Background Worker</span>
+                    </p>
+                    <p class="text-[11px] text-slate-400 mt-0.5 break-words-anywhere" id="global-backfill-status-text">
+                        Processing historical releases...
+                    </p>
+                </div>
+            </div>
+            <button onclick="globalStopBackfill()" class="text-xs px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 font-semibold flex items-center gap-1.5 transition-all shrink-0">
+                <i data-lucide="square" class="w-3.5 h-3.5"></i>
+                <span>Stop Backfill</span>
+            </button>
+        </div>
+
         {% block content %}{% endblock %}
     </main>
 
@@ -286,6 +308,52 @@
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') closeImageModal();
         });
+
+        let globalBackfillPollTimer = null;
+
+        async function globalStopBackfill() {
+            try {
+                await fetch('/api/backfill/stop', { method: 'POST' });
+                showToast('Stopping backfill...', 'info');
+            } catch (e) {
+                showToast('Error stopping backfill: ' + e, 'error');
+            }
+        }
+
+        function initGlobalBackfillPolling() {
+            const banner = document.getElementById('global-backfill-banner');
+            const statusText = document.getElementById('global-backfill-status-text');
+            if (!banner || !statusText) return;
+
+            async function checkStatus() {
+                try {
+                    const res = await fetch('/api/backfill/status');
+                    const data = await res.json();
+                    if (data && data.running) {
+                        banner.classList.remove('hidden');
+                        statusText.innerText = data.progress || 'Processing historical releases...';
+                        if (!globalBackfillPollTimer) {
+                            globalBackfillPollTimer = setInterval(checkStatus, 2500);
+                        }
+                    } else {
+                        if (!banner.classList.contains('hidden')) {
+                            banner.classList.add('hidden');
+                            if (data && data.status === 'idle') {
+                                showToast('Backfill completed successfully!', 'success');
+                            }
+                        }
+                        if (globalBackfillPollTimer) {
+                            clearInterval(globalBackfillPollTimer);
+                            globalBackfillPollTimer = null;
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            checkStatus();
+        }
+
+        window.addEventListener('DOMContentLoaded', initGlobalBackfillPolling);
     </script>
     {% block scripts %}{% endblock %}
 </body>

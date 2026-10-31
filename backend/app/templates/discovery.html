@@ -28,28 +28,6 @@
         </div>
     </div>
 
-    <!-- Active Backfill Progress Banner -->
-    <div id="backfill-progress-banner" class="hidden bg-brand-500/10 border border-brand-500/30 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
-        <div class="flex items-center gap-3">
-            <div class="w-8 h-8 rounded-lg bg-brand-500/20 text-brand-400 flex items-center justify-center animate-spin">
-                <i data-lucide="refresh-cw" class="w-4 h-4"></i>
-            </div>
-            <div>
-                <p class="text-xs font-bold text-white flex items-center gap-2">
-                    <span>Polite Historical Feed Backfill in Progress</span>
-                    <span class="text-[10px] px-2 py-0.5 rounded-full bg-brand-500/20 text-brand-300">Rate Limited &bull; 2s Delay</span>
-                </p>
-                <p class="text-[11px] text-slate-400 mt-0.5" id="backfill-status-text">
-                    Initializing...
-                </p>
-            </div>
-        </div>
-        <button onclick="stopBackfill()" class="text-xs px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 font-semibold flex items-center gap-1.5 transition-all">
-            <i data-lucide="square" class="w-3.5 h-3.5"></i>
-            <span>Stop Backfill</span>
-        </button>
-    </div>
-
     <!-- Tab Navigation -->
     <div class="flex border-b border-slate-800 space-x-6 text-sm font-semibold">
         <button onclick="switchTab('discovery')" id="tab-btn-discovery" class="pb-3 border-b-2 border-brand-500 text-brand-400 flex items-center gap-2 transition-colors">
@@ -538,8 +516,6 @@
         }
     }
 
-    let backfillPollTimer = null;
-
     async function toggleBackfill() {
         const pagesInput = prompt("How many historical pages on Nyaa to crawl? (Each page is 75 releases; 15 pages ≈ 1,125 releases):", "15");
         if (pagesInput === null) return;
@@ -553,7 +529,9 @@
             const data = await res.json();
             if (data.status === 'started' || data.status === 'in_progress') {
                 showToast(`Historical backfill started (${maxPages} pages)...`, 'info');
-                pollBackfill();
+                if (typeof initGlobalBackfillPolling === 'function') {
+                    initGlobalBackfillPolling();
+                }
             } else {
                 showToast(data.message || 'Backfill failed to start', 'error');
             }
@@ -561,47 +539,5 @@
             showToast('Error: ' + err, 'error');
         }
     }
-
-    async function stopBackfill() {
-        try {
-            await fetch('/api/backfill/stop', { method: 'POST' });
-            showToast('Stopping backfill...', 'info');
-        } catch (err) {
-            showToast('Error: ' + err, 'error');
-        }
-    }
-
-    async function pollBackfill() {
-        if (backfillPollTimer) clearInterval(backfillPollTimer);
-        const banner = document.getElementById('backfill-progress-banner');
-        const statusText = document.getElementById('backfill-status-text');
-
-        backfillPollTimer = setInterval(async () => {
-            try {
-                const res = await fetch('/api/backfill/status');
-                const data = await res.json();
-                if (data.running) {
-                    banner.classList.remove('hidden');
-                    statusText.innerText = data.progress || 'Processing...';
-                } else {
-                    banner.classList.add('hidden');
-                    clearInterval(backfillPollTimer);
-                    backfillPollTimer = null;
-                    if (data.status === 'idle') {
-                        showToast('Backfill completed successfully!', 'success');
-                        setTimeout(() => location.reload(), 1200);
-                    }
-                }
-            } catch (e) {
-                console.error(e);
-            }
-        }, 2000);
-    }
-
-    window.addEventListener('DOMContentLoaded', () => {
-        fetch('/api/backfill/status').then(r => r.json()).then(data => {
-            if (data && data.running) pollBackfill();
-        }).catch(() => {});
-    });
 </script>
 {% endblock %}

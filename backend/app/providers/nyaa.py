@@ -4,7 +4,7 @@ import logging
 import urllib.parse
 import urllib.request
 import urllib.error
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from datetime import datetime
 
 from bs4 import BeautifulSoup
@@ -37,7 +37,13 @@ class NyaaMangaProvider(BaseFeedProvider):
         """Fetches releases according to configured query and max_pages."""
         return self.crawl_pages(max_pages=self.max_pages, query=self.query)
 
-    def search_series(self, series_name: str, max_pages: int = 3, alt_names: Optional[List[str]] = None) -> List[ReleaseItem]:
+    def search_series(
+        self,
+        series_name: str,
+        max_pages: int = 3,
+        alt_names: Optional[List[str]] = None,
+        stop_check: Optional[Callable[[], bool]] = None
+    ) -> List[ReleaseItem]:
         """
         Executes a targeted search on Nyaa for a specific series.
         Also searches any alternate names (e.g. Romaji or English aliases) if given.
@@ -49,8 +55,11 @@ class NyaaMangaProvider(BaseFeedProvider):
         all_results = []
         seen_links = set()
 
+        if stop_check and stop_check():
+            return []
+
         # Search primary series title
-        primary_results = self.crawl_pages(max_pages=max_pages, query=clean_name)
+        primary_results = self.crawl_pages(max_pages=max_pages, query=clean_name, stop_check=stop_check)
         for r in primary_results:
             if r.link not in seen_links:
                 seen_links.add(r.link)
@@ -59,10 +68,14 @@ class NyaaMangaProvider(BaseFeedProvider):
         # Search alt names if provided
         if alt_names:
             for alt in alt_names:
+                if stop_check and stop_check():
+                    break
                 alt_clean = (alt or "").strip()
                 if alt_clean and alt_clean.lower() != clean_name.lower():
                     time.sleep(self.delay_seconds)
-                    alt_res = self.crawl_pages(max_pages=max(1, max_pages - 1), query=alt_clean)
+                    if stop_check and stop_check():
+                        break
+                    alt_res = self.crawl_pages(max_pages=max(1, max_pages - 1), query=alt_clean, stop_check=stop_check)
                     for r in alt_res:
                         if r.link not in seen_links:
                             seen_links.add(r.link)

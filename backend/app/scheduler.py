@@ -445,13 +445,20 @@ class MangaScheduler:
 
         # 3. Query Nyaa targeted series search
         nyaa = NyaaMangaProvider(name=f"Nyaa: {english_name}", config={"delay_seconds": 1.0})
-        releases = nyaa.search_series(english_name, max_pages=max_pages, alt_names=alt_names)
+        releases = nyaa.search_series(
+            english_name,
+            max_pages=max_pages,
+            alt_names=alt_names,
+            stop_check=lambda: self.stop_backfill_requested
+        )
 
         total_found = 0
         total_requested = 0
         total_sent_to_downloader = 0
 
         for rel in releases:
+            if self.stop_backfill_requested:
+                break
             is_new, status, missing_vols, rel_id, _ = self._process_release(rel, f"Nyaa: {english_name}", matcher)
             if status in ("CHAPTER_ONLY", "LIGHT_NOVEL"):
                 continue
@@ -492,6 +499,35 @@ class MangaScheduler:
             "requested": total_requested,
             "sent_to_downloader": total_sent_to_downloader
         }
+
+    def run_series_backfill_async(self, series_name: str, max_pages: int = 3) -> Dict[str, Any]:
+        """
+        Launches targeted series backfill in a background daemon thread,
+        allowing the user to navigate pages while tracking live progress globally.
+        """
+        if self.is_backfilling:
+            return {"status": "in_progress", "message": "Another backfill is already running"}
+
+        self.is_backfilling = True
+        self.stop_backfill_requested = False
+
+        def _worker():
+            self.db.set_setting("backfill_status", "running")
+            self.db.set_setting("backfill_progress", f"Backfilling '{series_name}' on Nyaa (up to {max_pages} pages)...")
+            try:
+                res = self.backfill_series(series_name, max_pages=max_pages)
+                self.db.set_setting("backfill_status", "idle")
+                self.db.set_setting("backfill_progress", res.get("message", f"Backfill for '{series_name}' complete."))
+            except Exception as e:
+                logger.error(f"Error in async series backfill: {e}")
+                self.db.set_setting("backfill_status", "error")
+                self.db.set_setting("backfill_progress", f"Backfill failed: {e}")
+            finally:
+                self.is_backfilling = False
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        return {"status": "started", "message": f"Historical backfill for '{series_name}' started in background."}
 
     def run_polite_backfill(self, max_pages: Optional[int] = None, delay_seconds: Optional[float] = None) -> Dict[str, Any]:
         """

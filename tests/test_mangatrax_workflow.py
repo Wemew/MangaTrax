@@ -374,6 +374,40 @@ def test_series_grouping_and_metadata():
         assert csm_group["releases_count"] == 1
         assert csm_group["all_volumes"] == [1.0]
 
+        # 4. Test Romaji alias & English canonical series deduplication in releases view
+        db.cache_manga_metadata("shingeki no kyojin", {
+            "canonical_title": "Attack on Titan",
+            "romaji_title": "Shingeki no Kyojin",
+            "cover_url": "https://example.com/aot.jpg"
+        })
+        rel_aot1 = {
+            "guid": "guid-snk-romaji-1",
+            "title": "[Group] Shingeki no Kyojin Vol. 01 [Digital]",
+            "series_name": "Shingeki no Kyojin",
+            "volumes": [1.0],
+            "missing_volumes": [],
+            "status": "REQUESTED"
+        }
+        rel_aot2 = {
+            "guid": "guid-aot-english-2",
+            "title": "[Group] Attack on Titan Vol. 02 [Digital]",
+            "series_name": "Attack on Titan",
+            "volumes": [2.0],
+            "missing_volumes": [],
+            "status": "REQUESTED"
+        }
+        db.upsert_release(rel_aot1)
+        db.upsert_release(rel_aot2)
+
+        # Both releases should collapse under single canonical "Attack on Titan" card
+        updated_groups = db.get_releases_grouped_by_series()
+        aot_group = next((g for g in updated_groups if g["series_name"] == "Attack on Titan"), None)
+        assert aot_group is not None
+        assert aot_group["romaji_name"] == "Shingeki no Kyojin"
+        assert aot_group["all_volumes"] == [1.0, 2.0]
+        # Ensure no orphan "Shingeki no Kyojin" series card remains
+        assert not any(g["series_name"] == "Shingeki no Kyojin" for g in updated_groups)
+
         print("    [PASSED] Series grouping and metadata cache properly aggregate all bundle volumes.")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -857,6 +891,14 @@ def test_nyaa_historical_crawl_and_series_backfill():
             assert len(db_releases) == 1
             assert db_releases[0]["series_name"] == "Chainsaw Man"
             assert db_releases[0]["missing_volumes"] == [4.0, 5.0, 6.0]
+
+            # 3. Test async background series backfill
+            async_res = sched.run_series_backfill_async("Chainsaw Man", max_pages=1)
+            assert async_res["status"] == "started"
+            import time
+            time.sleep(0.3)
+            status_info = sched.get_backfill_status()
+            assert status_info["status"] in ("running", "idle")
 
         print("    [PASSED] Nyaa historical paginated crawl and series backfill verified 100%.")
     finally:

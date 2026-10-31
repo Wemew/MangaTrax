@@ -533,11 +533,26 @@ class MangaDatabase:
                     LIMIT ?;
                 """, (limit,))
             rows = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("SELECT search_term, canonical_title, romaji_title, cover_url FROM manga_metadata_cache;")
+            meta_cache = {row["search_term"].lower(): dict(row) for row in cur.fetchall()}
+
             for r in rows:
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
                 r["missing_volumes"] = json.loads(r["missing_vols_json"] or "[]")
                 r_group = (r.get("release_group") or "").strip().lower()
                 r["is_prioritized"] = r_group in p_groups if r_group else False
+
+                s_name = (r.get("series_name") or "").strip()
+                match = meta_cache.get(s_name.lower()) if s_name else None
+                if match:
+                    if match.get("canonical_title"):
+                        r["canonical_series_name"] = match["canonical_title"]
+                        r["series_name"] = match["canonical_title"]
+                    if match.get("romaji_title"):
+                        r["romaji_name"] = match["romaji_title"]
+                    if match.get("cover_url") and not r.get("cover_url"):
+                        r["cover_url"] = match["cover_url"]
             return rows
 
     def get_pending_requests(self) -> List[Dict[str, Any]]:
@@ -979,23 +994,30 @@ class MangaDatabase:
 
             for rel in raw_releases:
                 s_name = (rel.get("series_name") or "Uncategorized").strip()
-                s_key = normalize_text(s_name) or "uncategorized"
+                s_norm = normalize_text(s_name) or "uncategorized"
 
-                if s_key not in groups_dict:
-                    calibre_match = None
-                    for t_name_lower, t_row in tracked_map.items():
-                        if normalize_text(t_name_lower) == s_key:
-                            calibre_match = t_row
-                            break
+                meta_match = cache_map.get(s_norm) or cache_map.get(s_name.lower()) or {}
 
-                    meta_match = cache_map.get(s_key) or cache_map.get(s_name.lower()) or {}
+                calibre_match = None
+                for t_name_lower, t_row in tracked_map.items():
+                    if normalize_text(t_name_lower) == s_norm or (meta_match.get("canonical_title") and normalize_text(t_name_lower) == normalize_text(meta_match.get("canonical_title"))):
+                        calibre_match = t_row
+                        break
 
-                    canonical_title = (
-                        meta_match.get("canonical_title")
-                        or (calibre_match.get("name") if calibre_match else None)
-                        or s_name
-                    )
+                canonical_title = (
+                    meta_match.get("canonical_title")
+                    or (calibre_match.get("name") if calibre_match else None)
+                    or s_name
+                )
+                canonical_key = normalize_text(canonical_title) or "uncategorized"
+                romaji_title = meta_match.get("romaji_title") or (s_name if s_name.lower() != canonical_title.lower() else "")
 
+                # Decorate release itself
+                rel["canonical_series_name"] = canonical_title
+                rel["series_name"] = canonical_title
+                rel["romaji_name"] = romaji_title
+
+                if canonical_key not in groups_dict:
                     cover = (
                         meta_match.get("cover_url")
                         or rel.get("cover_url")
@@ -1003,9 +1025,10 @@ class MangaDatabase:
                         or ""
                     )
 
-                    groups_dict[s_key] = {
-                        "series_key": s_key,
+                    groups_dict[canonical_key] = {
+                        "series_key": canonical_key,
                         "series_name": canonical_title,
+                        "romaji_name": romaji_title,
                         "raw_name": s_name,
                         "cover_url": cover,
                         "in_calibre": calibre_match is not None,
@@ -1017,6 +1040,7 @@ class MangaDatabase:
                         "status": meta_match.get("status", "UNKNOWN"),
                         "synopsis": meta_match.get("synopsis", "") or (calibre_match.get("description", "") if calibre_match else ""),
                         "releases": [],
+                        "seen_release_sigs": set(),
                         "all_volumes_set": set(),
                         "missing_volumes_set": set(),
                         "has_wanted": False,
@@ -1025,8 +1049,17 @@ class MangaDatabase:
                         "has_prioritized": False
                     }
 
-                group = groups_dict[s_key]
-                group["releases"].append(rel)
+                group = groups_dict[canonical_key]
+                if not group.get("romaji_name") and romaji_title:
+                    group["romaji_name"] = romaji_title
+                if not group.get("cover_url") and rel.get("cover_url"):
+                    group["cover_url"] = rel["cover_url"]
+
+                # Deduplicate releases in group: same guid or (download_url, volume set, group)
+                sig = rel.get("guid") or (rel.get("download_url") or rel.get("link") or rel.get("title"), tuple(sorted(rel.get("volumes", []))), (rel.get("release_group") or "").lower())
+                if sig not in group["seen_release_sigs"]:
+                    group["seen_release_sigs"].add(sig)
+                    group["releases"].append(rel)
 
                 for v in rel["volumes"]:
                     group["all_volumes_set"].add(v)
@@ -1056,6 +1089,7 @@ class MangaDatabase:
                 # Remove temporary sets before passing to Jinja templates
                 del group["all_volumes_set"]
                 del group["missing_volumes_set"]
+                del group["seen_release_sigs"]
                 result_groups.append(group)
 
             def sort_key(g):
