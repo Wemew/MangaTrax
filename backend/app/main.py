@@ -549,6 +549,20 @@ async def api_update_release_status(release_id: int, payload: Dict[str, Any]):
     db.update_release_status(release_id, status)
     return JSONResponse({"status": "success"})
 
+@app.post("/api/releases/{release_id}/ignore")
+async def api_ignore_release(release_id: int):
+    """Marks a release as IGNORED."""
+    db.update_release_status(release_id, "IGNORED")
+    db.log_activity("RELEASE_IGNORED", f"Ignored release #{release_id}")
+    return JSONResponse({"status": "success", "message": "Release marked as ignored"})
+
+@app.post("/api/releases/{release_id}/unignore")
+async def api_unignore_release(release_id: int):
+    """Restores an IGNORED release to REQUESTED."""
+    db.update_release_status(release_id, "REQUESTED")
+    db.log_activity("RELEASE_RESTORED", f"Restored release #{release_id} from ignored")
+    return JSONResponse({"status": "success", "message": "Release restored from ignored"})
+
 @app.post("/api/blacklist")
 async def api_add_blacklist(payload: Dict[str, Any]):
     """Add a series to the blacklist and purge pending requests for it."""
@@ -697,12 +711,21 @@ async def api_backfill_start(payload: Optional[Dict[str, Any]] = None):
     delay = p.get("delay")
     if delay is not None:
         delay = float(delay)
+    start_page = p.get("start_page")
+    if start_page is not None:
+        try:
+            start_page = max(1, int(start_page))
+        except (ValueError, TypeError):
+            start_page = 1
+    else:
+        start_page = 1
 
     scheduler.run_polite_backfill(
         max_pages=max_pages,
-        delay_seconds=delay
+        delay_seconds=delay,
+        start_page=start_page
     )
-    return JSONResponse({"status": "started", "message": "Polite backfill started in background"})
+    return JSONResponse({"status": "started", "message": f"Polite backfill started from page {start_page} in background"})
 
 @app.post("/api/backfill/stop")
 async def api_backfill_stop():

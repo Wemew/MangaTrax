@@ -315,10 +315,15 @@ class MangaScheduler:
         self.db.set_setting("backfill_progress", "Stop requested, finishing current item...")
 
     def get_backfill_status(self) -> Dict[str, Any]:
+        try:
+            last_p = int(self.db.get_setting("backfill_last_page", "1"))
+        except (ValueError, TypeError):
+            last_p = 1
         return {
             "running": self.is_backfilling,
             "status": self.db.get_setting("backfill_status", "idle"),
-            "progress": self.db.get_setting("backfill_progress", "Idle")
+            "progress": self.db.get_setting("backfill_progress", "Idle"),
+            "last_page": last_p
         }
 
     def _process_release(self, rel, feed_name: str, matcher: MangaCalibreMatcher) -> tuple:
@@ -529,26 +534,27 @@ class MangaScheduler:
         t.start()
         return {"status": "started", "message": f"Historical backfill for '{series_name}' started in background."}
 
-    def run_polite_backfill(self, max_pages: Optional[int] = None, delay_seconds: Optional[float] = None) -> Dict[str, Any]:
+    def run_polite_backfill(self, max_pages: Optional[int] = None, delay_seconds: Optional[float] = None, start_page: int = 1) -> Dict[str, Any]:
         """
         Runs a polite historical backfill in a background daemon thread:
-        Paginates backwards through Nyaa Manga releases (p=1, 2, ... N) and configured feeds,
+        Paginates backwards through Nyaa Manga releases (starting from start_page up to max_pages) and configured feeds,
         populating newly discovered series (Vol. 1 & standalones) and missing volumes for tracked series.
         """
         if self.is_backfilling:
             return {"status": "in_progress", "message": "Backfill already running"}
 
+        start_p = max(1, int(start_page or 1))
         self.is_backfilling = True
         self.stop_backfill_requested = False
         t = threading.Thread(
             target=self._run_polite_backfill_worker,
-            args=(max_pages, delay_seconds),
+            args=(max_pages, delay_seconds, start_p),
             daemon=True
         )
         t.start()
-        return {"status": "started", "message": "Polite backfill started in background"}
+        return {"status": "started", "message": f"Polite backfill started from page {start_p} in background"}
 
-    def _run_polite_backfill_worker(self, max_pages: Optional[int] = None, delay_seconds: Optional[float] = None):
+    def _run_polite_backfill_worker(self, max_pages: Optional[int] = None, delay_seconds: Optional[float] = None, start_page: int = 1):
         if max_pages is None:
             try:
                 max_pages = int(self.db.get_setting("backfill_max_pages", "15"))
@@ -562,7 +568,9 @@ class MangaScheduler:
                 delay_seconds = 2.0
 
         effective_max = 9999 if max_pages <= 0 else max_pages
-        target_pages_text = f"up to {max_pages} pages (~{max_pages * 75} releases)" if max_pages > 0 else "unlimited pages until end of feed"
+        start_p = max(1, int(start_page or 1))
+        end_p = (start_p + effective_max - 1) if max_pages > 0 else 9999
+        target_pages_text = f"{max_pages} pages (pages {start_p} to {end_p})" if max_pages > 0 else f"unlimited pages starting from page {start_p}"
 
         self.db.set_setting("backfill_status", "running")
         self.db.set_setting("backfill_progress", f"Starting polite manga historical backfill ({target_pages_text})...")
@@ -580,13 +588,15 @@ class MangaScheduler:
 
             nyaa_provider = NyaaMangaProvider(name="Nyaa Manga Backfill", config={"delay_seconds": delay_seconds})
 
-            for page_num in range(1, effective_max + 1):
+            for page_num in range(start_p, end_p + 1):
                 if self.stop_backfill_requested:
+                    self.db.set_setting("backfill_last_page", str(page_num))
                     break
 
+                self.db.set_setting("backfill_last_page", str(page_num))
                 self.db.set_setting(
                     "backfill_progress",
-                    f"Crawling Nyaa Manga Page {page_num} of {effective_max} (Found {total_discovered} discoveries, {total_processed} processed)..."
+                    f"Crawling Nyaa Manga Page {page_num} of {end_p} (Found {total_discovered} discoveries, {total_processed} processed)..."
                 )
 
                 page_releases = nyaa_provider.crawl_pages(
@@ -613,10 +623,10 @@ class MangaScheduler:
                         total_discovered += 1
 
                 # Polite delay between pages
-                if page_num < effective_max and delay_seconds > 0 and not self.stop_backfill_requested:
+                if page_num < end_p and delay_seconds > 0 and not self.stop_backfill_requested:
                     time.sleep(delay_seconds)
 
-            summary = f"Historical backfill complete: crawled {page_num if 'page_num' in locals() else 0} pages, processed {total_processed} releases, found {total_discovered} new discoveries."
+            summary = f"Historical backfill complete: crawled up to page {page_num if 'page_num' in locals() else start_p}, processed {total_processed} releases, found {total_discovered} new discoveries."
             self.db.set_setting("backfill_status", "idle")
             self.db.set_setting("backfill_progress", summary)
             self.db.log_activity("BACKFILL_COMPLETED", summary)

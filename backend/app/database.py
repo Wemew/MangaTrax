@@ -542,6 +542,8 @@ class MangaDatabase:
             else:
                 cur.execute("""
                     SELECT * FROM releases 
+                    WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
+                      AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                     ORDER BY 
                         CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                         updated_at DESC 
@@ -976,7 +978,9 @@ class MangaDatabase:
                 else:
                     cur.execute("""
                         SELECT * FROM releases 
-                        WHERE lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                        WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
+                          AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
+                          AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
                         ORDER BY 
                             CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                             updated_at DESC;
@@ -987,6 +991,8 @@ class MangaDatabase:
                 else:
                     cur.execute("""
                         SELECT * FROM releases 
+                        WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
+                          AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                         ORDER BY 
                             CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                             updated_at DESC;
@@ -1180,7 +1186,9 @@ class MangaDatabase:
             else:
                 cur.execute("""
                     SELECT * FROM releases 
-                    WHERE lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                    WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
+                      AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
+                      AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
                     ORDER BY 
                         CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                         updated_at DESC 

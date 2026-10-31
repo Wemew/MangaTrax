@@ -35,7 +35,7 @@
 
             <!-- Status Filter Pills -->
             <div class="flex items-center gap-1.5 bg-slate-900/60 p-1 rounded-xl border border-slate-800">
-                <a href="/releases?view={{ current_view }}{% if not current_status %}{% endif %}" 
+                <a href="/releases?view={{ current_view }}" 
                    class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if not current_status %}bg-slate-700 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
                     All
                 </a>
@@ -50,6 +50,10 @@
                 <a href="/releases?view={{ current_view }}&status=DISCOVERY" 
                    class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'DISCOVERY' %}bg-amber-600 text-white{% else %}text-slate-400 hover:text-amber-400{% endif %}">
                     Discovery
+                </a>
+                <a href="/releases?view={{ current_view }}&status=IGNORED" 
+                   class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'IGNORED' %}bg-slate-700 text-amber-300 border border-amber-500/40{% else %}text-slate-400 hover:text-amber-300{% endif %}" title="View ignored releases">
+                    Ignored
                 </a>
             </div>
         </div>
@@ -131,12 +135,28 @@
                             </div>
                         </div>
 
-                        <!-- Accordion Trigger Button -->
-                        <button onclick="toggleReleasesAccordion('accordion-{{ loop.index }}')" 
-                                class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-colors self-start sm:self-auto">
-                            <span>Releases ({{ group.releases_count }})</span>
-                            <i data-lucide="chevron-down" id="icon-accordion-{{ loop.index }}" class="w-3.5 h-3.5 transition-transform duration-200"></i>
-                        </button>
+                        <!-- Series Quick Actions: Track, Backfill, Blacklist & Releases Accordion -->
+                        <div class="flex items-center gap-1.5 flex-wrap self-start sm:self-auto">
+                            {% if not group.in_calibre and not group.is_monitored %}
+                            <button type="button" onclick="handleTrackSeries('{{ group.series_name|escape }}', this)" title="Track upcoming releases of {{ group.series_name }}" class="px-2.5 py-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm">
+                                <i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i>
+                                <span class="hidden sm:inline">Track</span>
+                            </button>
+                            {% endif %}
+                            <button type="button" onclick="backfillSeriesGlobal('{{ group.series_name|escape }}', this)" title="Search Nyaa for all past releases of {{ group.series_name }}" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-brand-600/30 text-slate-300 hover:text-brand-300 border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm">
+                                <i data-lucide="history" class="w-3.5 h-3.5 text-brand-400"></i>
+                                <span class="hidden sm:inline">Backfill</span>
+                            </button>
+                            <button type="button" onclick="blacklistSeriesGlobal('{{ group.series_name|escape }}', this)" title="Blacklist {{ group.series_name }} (hide all releases & stop tracking)" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm">
+                                <i data-lucide="ban" class="w-3.5 h-3.5 text-rose-400"></i>
+                                <span class="hidden sm:inline">Blacklist</span>
+                            </button>
+                            <button type="button" onclick="toggleReleasesAccordion('accordion-{{ loop.index }}')" 
+                                    class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                                <span>Releases ({{ group.releases_count }})</span>
+                                <i data-lucide="chevron-down" id="icon-accordion-{{ loop.index }}" class="w-3.5 h-3.5 transition-transform duration-200"></i>
+                            </button>
+                        </div>
                     </div>
 
                     <!-- Volume Coverage Grid (All distinct volumes from all batches) -->
@@ -259,12 +279,21 @@
                         </div>
 
                         <!-- Actions for Release -->
-                        <div class="flex items-center gap-2 self-end md:self-center">
+                        <div class="flex items-center gap-1.5 self-end md:self-center">
                             {% if r.download_url %}
                             <button onclick="downloadRelease({{ r.id }})" title="Send to qBittorrent" 
-                                    class="px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-sm">
+                                    class="px-2.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-sm">
                                 <i data-lucide="download" class="w-3.5 h-3.5"></i>
                                 <span>Download</span>
+                            </button>
+                            {% endif %}
+                            {% if r.status != 'IGNORED' %}
+                            <button type="button" onclick="ignoreReleaseGlobal({{ r.id }}, this)" title="Ignore this specific release batch" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-amber-300 border border-slate-700 text-xs flex items-center transition-colors">
+                                <i data-lucide="eye-off" class="w-3.5 h-3.5"></i>
+                            </button>
+                            {% else %}
+                            <button type="button" onclick="unignoreReleaseGlobal({{ r.id }}, this)" title="Un-ignore and restore release" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-700 text-xs flex items-center transition-colors">
+                                <i data-lucide="eye" class="w-3.5 h-3.5"></i>
                             </button>
                             {% endif %}
                             {% if r.link %}
@@ -444,10 +473,24 @@
                             {% endif %}
                         </td>
                         <td class="py-3 px-4 text-right">
-                            <div class="flex items-center justify-end gap-2">
+                            <div class="flex items-center justify-end gap-1.5">
                                 {% if r.download_url %}
                                 <button onclick="downloadRelease({{ r.id }})" title="Send to qBittorrent" class="p-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-medium text-xs flex items-center gap-1 transition-colors">
                                     <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                                </button>
+                                {% endif %}
+                                {% if r.status != 'IGNORED' %}
+                                <button type="button" onclick="ignoreReleaseGlobal({{ r.id }}, this)" title="Ignore this release batch" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-amber-300 border border-slate-700 text-xs flex items-center transition-colors">
+                                    <i data-lucide="eye-off" class="w-3.5 h-3.5"></i>
+                                </button>
+                                {% else %}
+                                <button type="button" onclick="unignoreReleaseGlobal({{ r.id }}, this)" title="Un-ignore and restore release" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-700 text-xs flex items-center transition-colors">
+                                    <i data-lucide="eye" class="w-3.5 h-3.5"></i>
+                                </button>
+                                {% endif %}
+                                {% if r.series_name %}
+                                <button type="button" onclick="blacklistSeriesGlobal('{{ r.series_name|escape }}', this)" title="Blacklist series: {{ r.series_name }}" class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 border border-slate-700 text-xs flex items-center transition-colors">
+                                    <i data-lucide="ban" class="w-3.5 h-3.5"></i>
                                 </button>
                                 {% endif %}
                                 {% if r.link %}
@@ -626,6 +669,29 @@ function filterReleases() {
         counter.textContent = query ? `${visible} matches` : '';
     }
     if (window.lucide) lucide.createIcons();
+}
+
+async function handleTrackSeries(name, btn) {
+    if (!name) return;
+    if (btn) btn.disabled = true;
+    try {
+        const res = await fetch('/api/discovery/track', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ series_name: name })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast(`Tracking "${name}"! Releases added to wishlist.`, 'success');
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            showToast(data.message || 'Error tracking series', 'error');
+            if (btn) btn.disabled = false;
+        }
+    } catch (e) {
+        showToast('Error tracking series: ' + e, 'error');
+        if (btn) btn.disabled = false;
+    }
 }
 
 async function quickPrioritizeGroup(name) {

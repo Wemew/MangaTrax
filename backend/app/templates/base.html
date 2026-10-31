@@ -179,6 +179,46 @@
         </div>
     </div>
 
+    <!-- Modal: Polite Historical Backfill Setup (Start Page & Max Pages) -->
+    <div id="modal-backfill-setup" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+        <div class="bg-darkcard border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div class="flex items-center justify-between">
+                <h3 class="text-base font-bold text-white flex items-center gap-2">
+                    <i data-lucide="history" class="w-4 h-4 text-brand-400"></i>
+                    Start Historical Backfill
+                </h3>
+                <button onclick="closeBackfillModal()" class="text-slate-400 hover:text-white">
+                    <i data-lucide="x" class="w-4 h-4"></i>
+                </button>
+            </div>
+            <p class="text-xs text-slate-400 leading-relaxed">
+                Paginates backwards through Nyaa Manga releases to detect missing bundle volumes and newly published Volume 1s.
+            </p>
+            <div class="space-y-3 pt-1">
+                <div>
+                    <div class="flex items-center justify-between mb-1.5">
+                        <label class="block text-xs font-semibold uppercase tracking-wider text-slate-300">Start from Page</label>
+                        <span id="backfill-resume-hint" class="text-[11px] text-brand-400 cursor-pointer hover:underline hidden" onclick="useResumePage()"></span>
+                    </div>
+                    <input type="number" id="backfill-input-start-page" min="1" value="1" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500 font-mono">
+                    <p class="text-[10px] text-slate-500 mt-1">Page 1 is most recent. If a previous run stopped or failed at page N, you can resume directly from there.</p>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">Max Pages to Crawl</label>
+                    <input type="number" id="backfill-input-max-pages" min="1" max="500" value="15" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500 font-mono">
+                    <p class="text-[10px] text-slate-500 mt-1">Number of sequential pages to process (~75 releases per page).</p>
+                </div>
+            </div>
+            <div class="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
+                <button type="button" onclick="closeBackfillModal()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors">Cancel</button>
+                <button type="button" onclick="submitBackfillStart()" class="px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold transition-all shadow-md shadow-brand-600/30 flex items-center gap-1.5">
+                    <i data-lucide="play" class="w-3.5 h-3.5"></i>
+                    Start Backfill
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- Main Content Body -->
     <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <!-- Global Active Backfill Progress Banner (Visible across all pages) -->
@@ -392,6 +432,182 @@
         }
 
         window.addEventListener('DOMContentLoaded', initGlobalBackfillPolling);
+
+        // Historical Backfill Modal & Start-Page Controller
+        let lastKnownBackfillPage = 1;
+
+        async function openBackfillModal() {
+            try {
+                const res = await fetch('/api/backfill/status');
+                const data = await res.json();
+                if (data && data.running) {
+                    showToast('Backfill is already running! Stop it first if you wish to change settings.', 'info');
+                    return;
+                }
+                if (data && data.last_page) {
+                    lastKnownBackfillPage = data.last_page;
+                    const hintEl = document.getElementById('backfill-resume-hint');
+                    if (hintEl && lastKnownBackfillPage > 1) {
+                        hintEl.innerText = `Resume from Page ${lastKnownBackfillPage} \u2192`;
+                        hintEl.classList.remove('hidden');
+                    }
+                }
+            } catch (e) {}
+
+            const modal = document.getElementById('modal-backfill-setup');
+            if (modal) {
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+                if (window.lucide) lucide.createIcons();
+            }
+        }
+
+        function closeBackfillModal() {
+            const modal = document.getElementById('modal-backfill-setup');
+            if (modal) {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+            }
+        }
+
+        function useResumePage() {
+            const input = document.getElementById('backfill-input-start-page');
+            if (input && lastKnownBackfillPage) {
+                input.value = lastKnownBackfillPage;
+            }
+        }
+
+        async function submitBackfillStart() {
+            const startPage = parseInt(document.getElementById('backfill-input-start-page')?.value || '1', 10);
+            const maxPages = parseInt(document.getElementById('backfill-input-max-pages')?.value || '15', 10);
+            closeBackfillModal();
+            try {
+                const res = await fetch('/api/backfill/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ start_page: startPage, max_pages: maxPages })
+                });
+                const data = await res.json();
+                if (data.status === 'started') {
+                    showToast(`Backfill started from page ${startPage}!`, 'success');
+                    const banner = document.getElementById('global-backfill-banner');
+                    if (banner) banner.classList.remove('hidden');
+                    initGlobalBackfillPolling();
+                } else {
+                    showToast(data.message || 'Could not start backfill', 'error');
+                }
+            } catch (err) {
+                showToast('Error starting backfill: ' + err, 'error');
+            }
+        }
+
+        // Shared blacklist series function across Discover, Series, Releases & Prioritized
+        async function blacklistSeriesGlobal(seriesName, targetElement = null) {
+            if (!seriesName) return;
+            try {
+                const res = await fetch('/api/blacklist', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: seriesName, reason: 'Blacklisted from UI' })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    showToast(`Blacklisted "${seriesName}" (can be undone in Discovery > Blacklist)`, 'success');
+                    if (targetElement) {
+                        const card = targetElement.closest('.series-card, .discovery-card, tr, .release-row');
+                        if (card) {
+                            card.style.transition = 'all 0.3s ease';
+                            card.style.opacity = '0';
+                            card.style.transform = 'scale(0.95)';
+                            setTimeout(() => card.remove(), 300);
+                        }
+                    } else {
+                        setTimeout(() => location.reload(), 800);
+                    }
+                } else {
+                    showToast(data.message || 'Error blacklisting series', 'error');
+                }
+            } catch (err) {
+                showToast('Error: ' + err, 'error');
+            }
+        }
+
+        // Shared ignore release function
+        async function ignoreReleaseGlobal(releaseId, targetElement = null) {
+            if (!releaseId) return;
+            try {
+                const res = await fetch(`/api/releases/${releaseId}/ignore`, { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    showToast('Release marked as ignored', 'success');
+                    if (targetElement) {
+                        const row = targetElement.closest('tr, .release-row, [data-release-id]');
+                        if (row) {
+                            row.style.transition = 'all 0.3s ease';
+                            row.style.opacity = '0.35';
+                            targetElement.disabled = true;
+                        }
+                    } else {
+                        setTimeout(() => location.reload(), 800);
+                    }
+                } else {
+                    showToast(data.message || 'Error ignoring release', 'error');
+                }
+            } catch (err) {
+                showToast('Error: ' + err, 'error');
+            }
+        }
+
+        // Shared unignore release function
+        async function unignoreReleaseGlobal(releaseId, targetElement = null) {
+            if (!releaseId) return;
+            try {
+                const res = await fetch(`/api/releases/${releaseId}/unignore`, { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    showToast('Release restored to active', 'success');
+                    setTimeout(() => location.reload(), 600);
+                } else {
+                    showToast(data.message || 'Error restoring release', 'error');
+                }
+            } catch (err) {
+                showToast('Error: ' + err, 'error');
+            }
+        }
+
+        // Shared single series backfill trigger across Series, Releases & Prioritized
+        async function backfillSeriesGlobal(seriesName, btn = null) {
+            if (!seriesName) return;
+            if (btn) {
+                const icon = btn.querySelector('i');
+                if (icon) icon.classList.add('animate-spin');
+                btn.disabled = true;
+            }
+            try {
+                const res = await fetch('/api/series/backfill', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ series_name: seriesName, max_pages: 3 })
+                });
+                const data = await res.json();
+                if (data.status === 'started') {
+                    showToast(`Searching Nyaa for past releases of "${seriesName}"...`, 'success');
+                    const banner = document.getElementById('global-backfill-banner');
+                    if (banner) banner.classList.remove('hidden');
+                    initGlobalBackfillPolling();
+                } else {
+                    showToast(data.message || 'Backfill already in progress', 'info');
+                }
+            } catch (err) {
+                showToast('Error: ' + err, 'error');
+            } finally {
+                if (btn) {
+                    const icon = btn.querySelector('i');
+                    if (icon) icon.classList.remove('animate-spin');
+                    btn.disabled = false;
+                }
+            }
+        }
 
         // Global Navigation Progress Bar & Instant Click Feedback
         const ProgressBar = {
