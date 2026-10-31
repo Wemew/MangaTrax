@@ -91,7 +91,20 @@ class MangaUpdatesService:
         # 2. Query MangaUpdates API
         info = self._fetch_from_api(clean_name)
 
-        # If not found with full string and contains subtitles or hyphens, try main title
+        # If not found or missing total_volumes, try candidate parts from delimiters
+        if not info or not info.get("total_volumes"):
+            raw_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;|:", clean_name) if p.strip()]
+            if len(raw_parts) > 1:
+                for p in raw_parts:
+                    if len(p) >= 3 and p.lower() != clean_name.lower():
+                        alt_info = self._fetch_from_api(p)
+                        if alt_info:
+                            if alt_info.get("total_volumes") or not info:
+                                info = alt_info
+                            if info.get("total_volumes"):
+                                break
+
+        # If still not found and contains subtitles or hyphens, try main title
         if not info and ("-" in clean_name or ":" in clean_name):
             simplified = re.split(r"[-:]", clean_name)[0].strip()
             if len(simplified) >= 3 and simplified.lower() != clean_name.lower():

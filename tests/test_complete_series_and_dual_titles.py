@@ -254,6 +254,64 @@ def test_dynamic_expansion_of_unexpanded_releases():
         pass
     print(" [PASSED] Dynamic expansion and DB persistence of legacy unexpanded complete releases verified.")
 
+def test_fast_init_db_and_background_scheduler_expansion():
+    import time
+    tf = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    tf.close()
+    db = MangaDatabase(tf.name)
+    db.init_db()
+
+    # Pre-populate database with an unexpanded complete release
+    db.upsert_release({
+        "guid": "test_bg_expand",
+        "title": "Hataraku Maou-sama! | The Devil is a Part-Timer! (Complete)",
+        "series_name": "Hataraku Maou-sama! | The Devil is a Part-Timer!",
+        "status": "DISCOVERY",
+        "is_complete": 1,
+        "volumes": []
+    })
+
+    # Cache metadata for The Devil is a Part-Timer!
+    db.cache_manga_metadata("hataraku maou-sama!", {
+        "canonical_title": "The Devil is a Part-Timer!",
+        "romaji_title": "Hataraku Maou-sama!",
+        "total_volumes": 24,
+        "status": "FINISHED"
+    })
+
+    # Verify that init_db() runs virtually instantly with zero blocking network calls
+    t0 = time.time()
+    db.init_db()
+    init_duration = time.time() - t0
+    assert init_duration < 1.0, f"init_db took too long ({init_duration:.3f}s), should be instantaneous without network calls!"
+
+    # Run background scheduler volume expansion
+    covers_dir = tempfile.mkdtemp()
+    cover_cache = CoverCache(covers_dir)
+    scheduler = MangaScheduler(db, cover_cache)
+    matcher = MangaCalibreMatcher([], {})
+
+    expanded = scheduler.expand_unresolved_complete_releases(matcher=matcher)
+    assert expanded >= 1, "Scheduler should have expanded the unexpanded complete release"
+
+    # Verify that release in DB now has 24 volumes
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT volumes_json, volume_start, volume_end FROM releases WHERE guid = 'test_bg_expand';")
+        row = cur.fetchone()
+        vols = json.loads(row["volumes_json"])
+        assert len(vols) == 24
+        assert row["volume_start"] == 1.0
+        assert row["volume_end"] == 24.0
+
+    del db
+    gc.collect()
+    try:
+        os.unlink(tf.name)
+    except Exception:
+        pass
+    print(" [PASSED] Instant init_db and background scheduler expansion verified.")
+
 if __name__ == "__main__":
     print("\n==================================================")
     print("Running MangaTrax Complete Series & Dual Title Suite")
@@ -265,6 +323,7 @@ if __name__ == "__main__":
     test_completed_category_filter()
     test_dual_titles_detection_during_backfill()
     test_dynamic_expansion_of_unexpanded_releases()
+    test_fast_init_db_and_background_scheduler_expansion()
     print("==================================================")
     print("ALL COMPLETE SERIES AND DUAL TITLE TESTS PASSED!")
     print("==================================================\n")

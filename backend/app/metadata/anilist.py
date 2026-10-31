@@ -45,7 +45,7 @@ def clean_query_term(raw: str) -> str:
     s = re.sub(r'\b(?:v|vol|volume|book|ch|chapter)\.?\s*\d+.*$', ' ', s, flags=re.IGNORECASE)
     # Strip common release descriptors
     s = re.sub(r'\b(?:digital|colored|complete|edition|hd|1080p|720p|manga|raw|webrip|scanlation|retail)\b', ' ', s, flags=re.IGNORECASE)
-    s = re.sub(r'[-–—:_/\\]+', ' ', s)
+    s = re.sub(r'[-–—:_/\\|;]+', ' ', s)
     return " ".join(s.split())
 
 class AniListMetadataService:
@@ -86,7 +86,7 @@ class AniListMetadataService:
                 if cached and cached.get("source") not in ("fallback", "cleaned") and cached.get("total_volumes"):
                     return cached
                 # Check candidate parts from delimiters in cache
-                raw_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|:", raw_series_name) if p.strip()]
+                raw_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;|:", raw_series_name) if p.strip()]
                 if len(raw_parts) > 1:
                     for p in raw_parts:
                         p_clean = clean_query_term(p)
@@ -100,16 +100,19 @@ class AniListMetadataService:
         # 2. Query AniList
         metadata = self._fetch_from_anilist(cleaned_term)
 
-        # 3. If AniList didn't match with full string, try candidate parts from delimiters (|, /, //, -, —)
-        if not metadata:
-            raw_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|:", raw_series_name) if p.strip()]
+        # 3. If AniList didn't match or returned no volume count with full string, try candidate parts from delimiters
+        if not metadata or not metadata.get("total_volumes"):
+            raw_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;|:", raw_series_name) if p.strip()]
             if len(raw_parts) > 1:
                 for p in raw_parts:
                     p_clean = clean_query_term(p)
                     if len(p_clean) >= 3 and p_clean.lower() != cleaned_term.lower():
-                        metadata = self._fetch_from_anilist(p_clean)
-                        if metadata:
-                            break
+                        alt_meta = self._fetch_from_anilist(p_clean)
+                        if alt_meta:
+                            if alt_meta.get("total_volumes") or not metadata:
+                                metadata = alt_meta
+                            if metadata.get("total_volumes"):
+                                break
 
         if not metadata and ("-" in cleaned_term or ":" in cleaned_term):
             simplified = re.split(r"[-:]", cleaned_term)[0].strip()

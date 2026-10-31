@@ -2,6 +2,7 @@ import time
 import logging
 import threading
 import re
+import json
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
@@ -88,6 +89,12 @@ class MangaScheduler:
                         notifier.notify_acquired(rel_row)
                 except Exception as e:
                     logger.debug(f"Webhook notification failed for acquired release: {e}")
+
+            # Auto-expand any unexpanded complete releases against freshly synced Calibre library
+            try:
+                self.expand_unresolved_complete_releases(matcher=matcher)
+            except Exception as e:
+                logger.debug(f"Complete releases expansion error during Calibre sync: {e}")
 
             summary = f"Synced {synced_count} manga series from Calibre; auto-resolved {len(resolved)} acquired requests."
             logger.info(summary)
@@ -842,9 +849,134 @@ class MangaScheduler:
                 )
         return filtered_count
 
+    def expand_unresolved_complete_releases(self, matcher: Optional[MangaCalibreMatcher] = None) -> int:
+        """
+        Scans releases in the database that are complete series compilations
+        but have no parsed volume numbers. Queries AniList/MangaUpdates for total volume count,
+        expands into individual volumes [1.0 .. N], and matches against Calibre to calculate
+        missing volumes and accurate status (e.g. IN_CALIBRE, REQUESTED, DISCOVERY).
+        """
+        try:
+            with self.db.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT id, guid, title, series_name, volumes_json, missing_vols_json, status, download_url, link, cover_url
+                    FROM releases
+                    WHERE is_complete = 1 OR lower(title) LIKE '%(complete)%' OR lower(title) LIKE '%[complete]%' OR lower(title) LIKE '%complete series%';
+                """)
+                rows = [dict(r) for r in cur.fetchall()]
+        except Exception as e:
+            logger.error(f"Error querying unexpanded complete releases: {e}")
+            return 0
+
+        unexpanded = []
+        for r in rows:
+            v_raw = r.get("volumes_json")
+            v_list = []
+            if v_raw:
+                try:
+                    v_list = json.loads(v_raw)
+                except Exception:
+                    v_list = []
+            if not v_list:
+                unexpanded.append(r)
+
+        if not unexpanded:
+            return 0
+
+        logger.info(f"Checking {len(unexpanded)} complete series release(s) for volume expansion in background...")
+
+        if not matcher:
+            calibre_path = self.db.get_setting("calibre_path", "/calibre")
+            scanner = CalibreMangaScanner(calibre_path)
+            series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
+            volumes_map = scanner.get_all_volumes_per_series() if scanner.is_available() else {}
+            meta_cache = self.db.get_all_manga_metadata_cache()
+            matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
+
+        expanded_count = 0
+        for r in unexpanded:
+            rel_id = r["id"]
+            title = r["title"]
+            s_name = (r.get("series_name") or "").strip()
+
+            candidates = []
+            if s_name:
+                candidates.append(s_name)
+                detected = self.detect_series_titles(s_name)
+                for d in detected:
+                    if d not in candidates:
+                        candidates.append(d)
+            candidates.append(title)
+
+            tot = None
+            resolved_meta = None
+            for cand in candidates:
+                try:
+                    m = self.anilist.resolve_manga_series(cand)
+                    if m and m.get("total_volumes"):
+                        tot = int(m["total_volumes"])
+                        resolved_meta = m
+                        break
+                except Exception:
+                    pass
+
+            if not tot and s_name:
+                try:
+                    for cand in candidates:
+                        mu = self.mangaupdates.get_series_info(cand)
+                        if mu and mu.get("total_volumes"):
+                            tot = int(mu["total_volumes"])
+                            break
+                except Exception:
+                    pass
+
+            if tot and tot > 0:
+                vols = [float(v) for v in range(1, tot + 1)]
+                v_json = json.dumps(vols)
+
+                # Match against Calibre
+                payload = {
+                    "series_name": (resolved_meta.get("canonical_title") if resolved_meta else None) or s_name,
+                    "title": title,
+                    "is_bundle": True,
+                    "is_complete": True,
+                    "volumes": vols,
+                    "volume_start": 1.0,
+                    "volume_end": float(tot)
+                }
+                match_res = matcher.check_release(payload, alt_series_names=candidates)
+                new_status = match_res.get("status", r.get("status") or "DISCOVERY")
+                missing_vols = match_res.get("missing_volumes", vols)
+                m_json = json.dumps(missing_vols)
+
+                try:
+                    with self.db.get_connection() as conn:
+                        cur = conn.cursor()
+                        cur.execute("""
+                            UPDATE releases
+                            SET is_bundle = 1, is_complete = 1, volume_start = 1.0, volume_end = ?,
+                                volumes_json = ?, missing_vols_json = ?, status = ?
+                            WHERE id = ?;
+                        """, (float(tot), v_json, m_json, new_status, rel_id))
+                        conn.commit()
+
+                    expanded_count += 1
+                    logger.info(f"Expanded complete series '{title}' to {tot} volumes (Status: {new_status}, Missing: {len(missing_vols)} vols).")
+                except Exception as e:
+                    logger.error(f"Error updating expanded complete release {rel_id}: {e}")
+
+        return expanded_count
+
     # --- Background Loop ---
     def _worker_loop(self):
         logger.info("MangaTrax background worker loop started.")
+        # Asynchronously expand any complete series releases that need volume counts from AniList/MangaUpdates
+        try:
+            self.expand_unresolved_complete_releases()
+        except Exception as e:
+            logger.debug(f"Initial complete releases expansion error: {e}")
+
         last_calibre_sync = 0
         last_feed_check = 0
         last_tag_check = 0

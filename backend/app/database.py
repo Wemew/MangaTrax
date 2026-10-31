@@ -134,58 +134,15 @@ class MangaDatabase:
             if "is_complete" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN is_complete INTEGER DEFAULT 0;")
 
-            # Backfill is_complete and expand volumes for existing complete releases
+            # Backfill is_complete for existing releases matching complete indicators (local SQL/regex only, NO network calls)
             try:
                 from app.parser import is_complete_series_release
-                from app.metadata.anilist import AniListMetadataService
-                from app.metadata.mangaupdates import MangaUpdatesService
-                anilist_srv = AniListMetadataService(db=self)
-                mu_srv = MangaUpdatesService(db=self)
-
-                cur.execute("SELECT id, title, series_name, volumes_json, status FROM releases WHERE is_complete = 1 OR title LIKE '%(complete)%' OR title LIKE '%[complete]%';")
+                cur.execute("SELECT id, title FROM releases WHERE is_complete = 0 OR is_complete IS NULL;")
                 for r_row in cur.fetchall():
-                    r_id = r_row["id"]
-                    r_title = r_row["title"]
-                    r_series = (r_row["series_name"] or "").strip()
-                    r_vols = json.loads(r_row["volumes_json"] or "[]")
-
-                    cur.execute("UPDATE releases SET is_complete = 1 WHERE id = ?;", (r_id,))
-
-                    if not r_vols:
-                        cands = []
-                        if r_series:
-                            cands.append(r_series)
-                            dual_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+", r_series) if p.strip()]
-                            if len(dual_parts) > 1:
-                                cands.extend(dual_parts)
-                        cands.append(r_title)
-
-                        tot = None
-                        for c in cands:
-                            m = anilist_srv.resolve_manga_series(c)
-                            if m and m.get("total_volumes"):
-                                tot = int(m["total_volumes"])
-                                break
-                        if not tot and r_series:
-                            try:
-                                mu = mu_srv.get_series_info(r_series)
-                                if mu and mu.get("total_volumes"):
-                                    tot = int(mu["total_volumes"])
-                            except Exception:
-                                pass
-
-                        if tot and tot > 0:
-                            new_vols = [float(v) for v in range(1, tot + 1)]
-                            v_json = json.dumps(new_vols)
-                            m_json = v_json if r_row["status"] in ("REQUESTED", "DISCOVERY") else "[]"
-                            cur.execute("""
-                                UPDATE releases 
-                                SET is_bundle = 1, volume_start = 1.0, volume_end = ?, 
-                                    volumes_json = ?, missing_vols_json = ? 
-                                WHERE id = ?;
-                            """, (float(tot), v_json, m_json, r_id))
-            except Exception as e:
-                logger.debug(f"Complete releases expansion error: {e}")
+                    if is_complete_series_release(r_row["title"]):
+                        cur.execute("UPDATE releases SET is_complete = 1 WHERE id = ?;", (r_row["id"],))
+            except Exception:
+                pass
 
             # Upgrade any Nyaa links pointing to raw torrent downloads to their web post view URLs
             cur.execute("""
@@ -1238,18 +1195,7 @@ class MangaDatabase:
                             if cand_meta.get("total_volumes"):
                                 break
 
-                # Live query fallback if total_volumes is missing for complete release
-                if (not meta_match or not meta_match.get("total_volumes")) and (rel.get("is_complete") or "complete" in rel.get("title", "").lower()):
-                    try:
-                        from app.metadata.anilist import AniListMetadataService
-                        anilist_srv = AniListMetadataService(db=self)
-                        for cand in (candidate_parts or [s_name])[:3]:
-                            m_res = anilist_srv.resolve_manga_series(cand)
-                            if m_res and m_res.get("total_volumes"):
-                                meta_match = m_res
-                                break
-                    except Exception:
-                        pass
+                # Use local cache for metadata matching (no synchronous network calls during page load)
 
                 calibre_match = norm_tracked_map.get(s_norm)
                 if not calibre_match and meta_match.get("canonical_title"):
