@@ -910,6 +910,88 @@ def test_in_app_bittorrent_downloader_setup():
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+def test_light_novel_filtering():
+    print("--> Testing Light Novel Detection, Filtering & Auto-Purging...")
+    from app.parser import is_light_novel
+    from app.providers.base import ReleaseItem
+    from app.scheduler import MangaScheduler
+    from app.covers import CoverCache
+    from app.calibre.matcher import MangaCalibreMatcher
+
+    # 1. Pattern matching and classification
+    assert is_light_novel("The Tale of a Little Alchemist Blessed by the Spirits v01-04 [Seven Seas] [Stick]") is True
+    assert is_light_novel("Reincarnated as a Sword v01-12 [Seven Seas] [Stick]") is True
+    assert is_light_novel("Overlord v01-14 [Yen On] [Lu自主规制]") is True
+    assert is_light_novel("Ascendance of a Bookworm Part 1-5 [J-Novel Club] [Stick]") is True
+    assert is_light_novel("Mushoku Tensei - Jobless Reincarnation (Novel) v01-26") is True
+    assert is_light_novel("Sword Art Online [LN] Vol. 01-25") is True
+    assert is_light_novel("Classroom of the Elite [Light Novel] v01-11") is True
+    assert is_light_novel("That Time I Got Reincarnated as a Slime v01-18 [EPUB]") is True
+    assert is_light_novel("Toradora! v01-10 [Airship] [Stick]") is True
+    assert is_light_novel("Solo Leveling [Web Novel] Complete") is True
+    assert is_light_novel("The Tale of a Little Alchemist Blessed by the Spirits v01-02 [Audiobook] [Seven Seas Siren] [Stick & Oak]") is True
+
+    # 2. Legitimate manga must NOT be classified as light novels
+    assert is_light_novel("[danke-Empire] Bleach v01-v20 [Digital] [CBZ]") is False
+    assert is_light_novel("[Lu自主规制] Chainsaw Man Vol. 01-11") is False
+    assert is_light_novel("[Manga] Ore ga Ojousama Gakkou ni Shomin Sample Toshite Rachirareta Ken v01-15") is False
+    assert is_light_novel("The Tale of a Little Alchemist Blessed by the Spirits (Manga) v01-03 [Seven Seas] [Digital]") is False
+    assert is_light_novel("The Tale of a Little Alchemist Blessed by the Spirits v01 [CBZ]") is False
+    assert is_light_novel("Frieren - Beyond Journey's End v01-10 (Digital) (1080p)") is False
+    assert is_light_novel("One Piece Vol. 108 [1R0N]") is False
+    assert is_light_novel("Dandadan Vol. 1-8 [Viz Media] [CBZ]") is False
+    assert is_light_novel("Chainsaw Man Vol. 1 [Manga] [Seven Seas] [Stick]") is False
+
+    temp_dir = tempfile.mkdtemp(prefix="mangatrax_test_ln_")
+    db_file = os.path.join(temp_dir, "mangatrax_ln_test.db")
+
+    try:
+        db = MangaDatabase(db_file)
+        cover_cache = CoverCache(temp_dir)
+        scheduler = MangaScheduler(db, cover_cache)
+        matcher = MangaCalibreMatcher([], {})
+
+        # 3. Scheduler processing rejects Light Novels
+        ln_rel = ReleaseItem(
+            title="The Tale of a Little Alchemist Blessed by the Spirits v01-04 [Seven Seas] [Stick]",
+            link="https://nyaa.si/view/999999",
+            series_name="The Tale of a Little Alchemist Blessed by the Spirits",
+            release_group="Stick",
+            is_bundle=True,
+            volume_start=1.0,
+            volume_end=4.0,
+            volumes=[1.0, 2.0, 3.0, 4.0]
+        )
+        is_new, status, missing, rel_id, canonical = scheduler._process_release(ln_rel, "Nyaa Manga", matcher)
+        assert status == "LIGHT_NOVEL"
+        assert is_new is False
+        assert rel_id is None
+
+        # 4. Database auto-purge on startup
+        # Manually force-insert a light novel into releases table
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO releases (guid, title, series_name, status)
+                VALUES ('ln-manual-1', 'The Tale of a Little Alchemist Blessed by the Spirits v01-04 [Seven Seas] [Stick]', 'The Tale of a Little Alchemist Blessed by the Spirits', 'DISCOVERY');
+            """)
+            conn.commit()
+
+        # Verify it exists
+        releases_before = db.get_discovery_releases()
+        assert any(r["guid"] == "ln-manual-1" for r in releases_before)
+
+        # Trigger database init/purge
+        db.init_db()
+
+        # Verify it was purged from the database
+        releases_after = db.get_discovery_releases()
+        assert not any(r["guid"] == "ln-manual-1" for r in releases_after)
+
+        print("    [PASSED] Light novels detected, rejected by scheduler, and purged from database.")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
 if __name__ == "__main__":
     print("==================================================")
     print("Running MangaTrax Comprehensive Integration Suite")
@@ -925,6 +1007,7 @@ if __name__ == "__main__":
     test_romaji_to_english_titles_conversion()
     test_nyaa_historical_crawl_and_series_backfill()
     test_in_app_bittorrent_downloader_setup()
+    test_light_novel_filtering()
     print("==================================================")
     print("ALL TESTS PASSED SUCCESSFULLY! (100% VERIFIED)")
     print("==================================================")

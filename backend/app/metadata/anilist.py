@@ -11,8 +11,9 @@ ANILIST_GRAPHQL_ENDPOINT = "https://graphql.anilist.co"
 
 ANILIST_QUERY = """
 query ($search: String) {
-  Media(search: $search, type: MANGA) {
+  Media(search: $search, type: MANGA, format_in: [MANGA, ONE_SHOT]) {
     id
+    format
     title {
       english
       romaji
@@ -159,6 +160,10 @@ class AniListMetadataService:
                 result = json.loads(resp.read().decode("utf-8"))
                 media = result.get("data", {}).get("Media")
                 if not media:
+                    return None
+
+                format_val = (media.get("format") or "").upper()
+                if format_val in ("NOVEL",):
                     return None
 
                 titles = media.get("title", {})

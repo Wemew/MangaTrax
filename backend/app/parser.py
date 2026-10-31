@@ -78,6 +78,73 @@ def extract_release_group(raw_title: str) -> Optional[str]:
 
     return None
 
+KNOWN_PUBLISHERS = {
+    'seven seas', 'seven seas entertainment', 'airship', 'ghost ship',
+    'yen press', 'yen on', 'j-novel club', 'j-novel heart',
+    'one peace books', 'cross infinite world', 'tentai books', 'hanashi media',
+    'square enix', 'square enix manga & books', 'kodansha', 'kodansha comics',
+    'kodansha usa', 'viz', 'viz media', 'tokyopop', 'dark horse', 'dark horse comics',
+    'titan', 'titan comics', 'titan manga', 'kaiten books', 'denpa', 'vertical',
+    'seven seas siren', 'monogatari'
+}
+
+def is_light_novel(raw_title: str) -> bool:
+    """
+    Returns True if the release is identified as a Light Novel or Web Novel, not a Manga.
+    MangaTrax exclusively tracks Manga releases (CBZ/CBR format).
+    Detects:
+      1. Explicit LN / Novel / Audiobook tags e.g. [LN], (LN), [Light Novel], [Novel], (Web Novel).
+      2. Dedicated Light Novel imprints e.g. Yen On, Airship, Cross Infinite World.
+      3. Ebook container formats without manga tags e.g. EPUB, MOBI, AZW3.
+      4. Bracket pattern [Publisher] [ReleaseGroup] without manga tags:
+         e.g. 'The Tale of a Little Alchemist Blessed by the Spirits v01-04 [Seven Seas] [Stick]'
+      5. Standalone [Stick] release group tag without manga tags.
+    """
+    if not raw_title:
+        return False
+    t_lower = raw_title.lower()
+
+    # If title explicitly specifies Manga or CBZ/CBR comic format, it's a valid manga release
+    has_manga_marker = bool(re.search(r'\b(?:manga|cbz|cbr|comic)\b', t_lower))
+
+    # 1. Explicit LN / Novel / Audiobook tags
+    if re.search(r'\[(?:ln|light\s*novel|wn|web\s*novel|novel|novels|audiobook)\]|\((?:ln|light\s*novel|wn|web\s*novel|novel|novels|audiobook)\)', t_lower):
+        if not has_manga_marker:
+            return True
+    if re.search(r'\b(?:light\s*novels?|web\s*novels?|audiobooks?)\b', t_lower):
+        if not has_manga_marker:
+            return True
+
+    # 2. Dedicated Light Novel Imprints (Yen On is exclusively LN, Airship is Seven Seas LN line, etc.)
+    if re.search(r'\b(?:yen\s*on|airship|cross\s*infinite\s*world|tentai\s*books|hanashi\s*media|seven\s*seas\s*siren)\b', t_lower):
+        if not has_manga_marker:
+            return True
+
+    # 3. Dedicated ebook extensions without manga marker
+    if re.search(r'\b(?:epub|mobi|azw3?)\b|\.(?:epub|mobi|azw3?)$', t_lower):
+        if not has_manga_marker:
+            return True
+
+    # 4. Pattern: [Publisher] [ReleaseGroup] or (Publisher) [ReleaseGroup] without manga marker
+    # e.g., 'The Tale of a Little Alchemist Blessed by the Spirits v01-04 [Seven Seas] [Stick]'
+    bracket_pairs = re.findall(r'\[([^\]]+)\]|\(([^\)]+)\)', raw_title)
+    clean_brackets = [b[0].strip() if b[0] else b[1].strip() for b in bracket_pairs if (b[0] or b[1])]
+    if len(clean_brackets) >= 2 and not has_manga_marker:
+        for i in range(len(clean_brackets) - 1):
+            cand_pub = clean_brackets[i].lower()
+            cand_grp = clean_brackets[i+1].lower()
+            if cand_pub in KNOWN_PUBLISHERS:
+                # Ensure the second bracket is not just a format buzzword or volume tag
+                if cand_grp not in {'cbz', 'cbr', 'manga'} and not re.match(r'^(?:v|vol)\.?\s*\d+', cand_grp):
+                    return True
+
+    # 5. Standalone [Stick] release group without manga/cbz marker
+    # 'Stick' exclusively rips light novels / audiobooks in EPUB format
+    if re.search(r'\[(?:stick)\]|\((?:stick)\)', t_lower) and not has_manga_marker:
+        return True
+
+    return False
+
 def is_chapter_only(raw_title: str) -> bool:
     """
     Returns True if the release is purely a chapter update with no volume information.
@@ -179,6 +246,7 @@ def extract_manga_bundle_and_volumes(raw_title: str) -> Dict[str, Any]:
         "clean_title": cleaned,
         "series_name": cleaned,
         "release_group": release_group,
+        "is_light_novel": is_light_novel(raw_title),
         "is_bundle": False,
         "volume_start": None,
         "volume_end": None,

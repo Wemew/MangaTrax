@@ -8,7 +8,7 @@ except ImportError:
     httpx = None
 from bs4 import BeautifulSoup
 from app.providers.base import BaseFeedProvider, ReleaseItem
-from app.parser import extract_manga_bundle_and_volumes, is_chapter_only
+from app.parser import extract_manga_bundle_and_volumes, is_chapter_only, is_light_novel
 
 logger = logging.getLogger("mangatrax.providers.html_scraper")
 
@@ -71,6 +71,11 @@ class HtmlScraperProvider(BaseFeedProvider):
                     # Discard pure chapter updates
                     if is_chapter_only(raw_title):
                         logger.debug(f"Discarding chapter-only release from HTML scraper '{self.name}': {raw_title}")
+                        continue
+
+                    # Discard light novels and non-manga literature
+                    if is_light_novel(raw_title):
+                        logger.debug(f"Discarding light novel release from HTML scraper '{self.name}': {raw_title}")
                         continue
 
                     # Details Link

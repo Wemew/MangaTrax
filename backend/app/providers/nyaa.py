@@ -10,7 +10,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 
 from app.providers.base import BaseFeedProvider, ReleaseItem
-from app.parser import extract_manga_bundle_and_volumes, is_chapter_only
+from app.parser import extract_manga_bundle_and_volumes, is_chapter_only, is_light_novel
 
 logger = logging.getLogger("mangatrax.providers.nyaa")
 
@@ -154,6 +154,11 @@ class NyaaMangaProvider(BaseFeedProvider):
 
                 # 2. Discard pure chapter-only releases
                 if is_chapter_only(raw_title):
+                    continue
+
+                # 3. Discard Light Novels and non-manga literature
+                if is_light_novel(raw_title):
+                    logger.debug(f"Discarding light novel release: {raw_title}")
                     continue
 
                 # 3. Parse Download & Magnet links from 3rd Column

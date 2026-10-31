@@ -140,6 +140,17 @@ class MangaDatabase:
             except Exception:
                 pass
 
+            # Purge any light novel / non-manga releases inadvertently stored in database
+            try:
+                cur.execute("SELECT id, title FROM releases;")
+                all_releases = cur.fetchall()
+                from app.parser import is_light_novel
+                ln_ids = [r["id"] for r in all_releases if is_light_novel(r["title"])]
+                if ln_ids:
+                    cur.executemany("DELETE FROM releases WHERE id = ?;", [(lid,) for lid in ln_ids])
+            except Exception:
+                pass
+
             # Prioritized Release Groups table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS prioritized_groups (

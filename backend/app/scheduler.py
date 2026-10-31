@@ -14,7 +14,7 @@ from app.providers.registry import create_provider
 from app.providers.nyaa import NyaaMangaProvider
 from app.metadata.anilist import AniListMetadataService
 from app.metadata.mangaupdates import MangaUpdatesService
-from app.parser import is_chapter_only
+from app.parser import is_chapter_only, is_light_novel
 
 logger = logging.getLogger("mangatrax.scheduler")
 
@@ -129,8 +129,8 @@ class MangaScheduler:
                 feed_requested = 0
 
                 for rel in releases:
-                    # Discard pure chapter updates
-                    if is_chapter_only(rel.title):
+                    # Discard pure chapter updates and light novels
+                    if is_chapter_only(rel.title) or is_light_novel(rel.title):
                         continue
 
                     total_found += 1
@@ -300,6 +300,8 @@ class MangaScheduler:
         """
         if is_chapter_only(rel.title):
             return (False, "CHAPTER_ONLY", [], None, None)
+        if is_light_novel(rel.title):
+            return (False, "LIGHT_NOVEL", [], None, None)
 
         rel_group = getattr(rel, "release_group", None) or rel.to_dict().get("release_group")
 
@@ -422,7 +424,7 @@ class MangaScheduler:
 
         for rel in releases:
             is_new, status, missing_vols, rel_id, _ = self._process_release(rel, f"Nyaa: {english_name}", matcher)
-            if status == "CHAPTER_ONLY":
+            if status in ("CHAPTER_ONLY", "LIGHT_NOVEL"):
                 continue
 
             total_found += 1
@@ -526,7 +528,7 @@ class MangaScheduler:
                         break
 
                     is_new, status, missing_vols, _, _ = self._process_release(rel, "Nyaa Manga", matcher)
-                    if status == "CHAPTER_ONLY":
+                    if status in ("CHAPTER_ONLY", "LIGHT_NOVEL"):
                         continue
 
                     total_processed += 1
