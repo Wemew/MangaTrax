@@ -653,7 +653,7 @@ class MangaScheduler:
         with self.db.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, title, series_name, torrent_hash, download_url, volumes, missing_volumes, is_bundle
+                SELECT id, title, series_name, torrent_hash, download_url, volumes_json AS volumes, missing_vols_json AS missing_volumes, is_bundle
                 FROM releases
                 WHERE download_status = 'DOWNLOADING' AND is_bundle = 1;
             """)

@@ -196,9 +196,64 @@ def test_all_python_files_syntax():
         compile(code, py_file, "exec")
     print(" [PASSED] All backend Python files compile cleanly with zero syntax errors.")
 
+def test_pending_requests_and_bundle_download_filter():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        db_path = os.path.join(tmpdir, "test_reqs.db")
+        db = MangaDatabase(db_path)
+        db.init_db()
+
+        # Add requested releases
+        for i in range(15):
+            db.upsert_release({
+                "guid": f"guid-req-{i}",
+                "title": f"Manga Item {i} v01",
+                "series_name": f"Series {i}",
+                "status": "REQUESTED"
+            })
+
+        # Test get_pending_requests with and without limit
+        p_10 = db.get_pending_requests(limit=10)
+        assert len(p_10) == 10
+
+        p_all = db.get_pending_requests()
+        assert len(p_all) == 15
+
+        # Add a downloading bundle release
+        db.upsert_release({
+            "guid": "guid-bundle-dl",
+            "title": "Bleach v01-05 [Digital]",
+            "series_name": "Bleach",
+            "is_bundle": 1,
+            "volume_start": 1.0,
+            "volume_end": 5.0,
+            "volumes": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "missing_volumes": [4.0, 5.0],
+            "download_status": "DOWNLOADING",
+            "torrent_hash": "abcdef1234567890abcdef1234567890abcdef12"
+        })
+
+        scheduler = MangaScheduler(db=db, cover_cache=CoverCache(tmpdir))
+
+        # Enable mock qbit to exercise the SQL query
+        mock_qbit = MagicMock()
+        mock_qbit.enabled = True
+        mock_qbit.extract_torrent_hash = MagicMock(return_value="abcdef1234567890abcdef1234567890abcdef12")
+        mock_qbit.filter_torrent_bundle_files = MagicMock(return_value={"kept_volumes": [4.0, 5.0], "skipped_volumes": [1.0, 2.0, 3.0]})
+        scheduler.get_qbit_client = MagicMock(return_value=mock_qbit)
+
+        # Test check_and_filter_active_downloads executes query and filtering cleanly
+        filtered = scheduler.check_and_filter_active_downloads()
+        assert filtered == 1
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    print(" [PASSED] get_pending_requests(limit) and bundle download filter query verified.")
+
 if __name__ == "__main__":
     test_ignore_and_unignore_release_lifecycle()
     test_backfill_start_page_and_resume()
     test_template_features_and_modal()
+    test_pending_requests_and_bundle_download_filter()
     test_all_python_files_syntax()
     print("\nALL IGNORE, RESUME, AND PARITY TESTS PASSED!")

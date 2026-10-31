@@ -572,8 +572,8 @@ class MangaDatabase:
                         r["cover_url"] = match["cover_url"]
             return rows
 
-    def get_pending_requests(self) -> List[Dict[str, Any]]:
-        return self.get_releases(status="REQUESTED", limit=1000)
+    def get_pending_requests(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        return self.get_releases(status="REQUESTED", limit=limit)
 
     def get_release_by_id(self, release_id: int) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:
