@@ -134,15 +134,58 @@ class MangaDatabase:
             if "is_complete" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN is_complete INTEGER DEFAULT 0;")
 
-            # Backfill is_complete for existing releases matching complete indicators
+            # Backfill is_complete and expand volumes for existing complete releases
             try:
                 from app.parser import is_complete_series_release
-                cur.execute("SELECT id, title FROM releases WHERE is_complete = 0 OR is_complete IS NULL;")
+                from app.metadata.anilist import AniListMetadataService
+                from app.metadata.mangaupdates import MangaUpdatesService
+                anilist_srv = AniListMetadataService(db=self)
+                mu_srv = MangaUpdatesService(db=self)
+
+                cur.execute("SELECT id, title, series_name, volumes_json, status FROM releases WHERE is_complete = 1 OR title LIKE '%(complete)%' OR title LIKE '%[complete]%';")
                 for r_row in cur.fetchall():
-                    if is_complete_series_release(r_row["title"]):
-                        cur.execute("UPDATE releases SET is_complete = 1 WHERE id = ?;", (r_row["id"],))
-            except Exception:
-                pass
+                    r_id = r_row["id"]
+                    r_title = r_row["title"]
+                    r_series = (r_row["series_name"] or "").strip()
+                    r_vols = json.loads(r_row["volumes_json"] or "[]")
+
+                    cur.execute("UPDATE releases SET is_complete = 1 WHERE id = ?;", (r_id,))
+
+                    if not r_vols:
+                        cands = []
+                        if r_series:
+                            cands.append(r_series)
+                            dual_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+", r_series) if p.strip()]
+                            if len(dual_parts) > 1:
+                                cands.extend(dual_parts)
+                        cands.append(r_title)
+
+                        tot = None
+                        for c in cands:
+                            m = anilist_srv.resolve_manga_series(c)
+                            if m and m.get("total_volumes"):
+                                tot = int(m["total_volumes"])
+                                break
+                        if not tot and r_series:
+                            try:
+                                mu = mu_srv.get_series_info(r_series)
+                                if mu and mu.get("total_volumes"):
+                                    tot = int(mu["total_volumes"])
+                            except Exception:
+                                pass
+
+                        if tot and tot > 0:
+                            new_vols = [float(v) for v in range(1, tot + 1)]
+                            v_json = json.dumps(new_vols)
+                            m_json = v_json if r_row["status"] in ("REQUESTED", "DISCOVERY") else "[]"
+                            cur.execute("""
+                                UPDATE releases 
+                                SET is_bundle = 1, volume_start = 1.0, volume_end = ?, 
+                                    volumes_json = ?, missing_vols_json = ? 
+                                WHERE id = ?;
+                            """, (float(tot), v_json, m_json, r_id))
+            except Exception as e:
+                logger.debug(f"Complete releases expansion error: {e}")
 
             # Upgrade any Nyaa links pointing to raw torrent downloads to their web post view URLs
             cur.execute("""
@@ -1157,6 +1200,14 @@ class MangaDatabase:
                 cache_map[c_lower] = c_row
                 norm_cache_map[normalize_text(c_term)] = c_row
                 norm_cache_map[c_lower] = c_row
+                if c_row.get("canonical_title"):
+                    ct = c_row["canonical_title"].lower()
+                    cache_map[ct] = c_row
+                    norm_cache_map[normalize_text(ct)] = c_row
+                if c_row.get("romaji_title"):
+                    rt = c_row["romaji_title"].lower()
+                    cache_map[rt] = c_row
+                    norm_cache_map[normalize_text(rt)] = c_row
 
             groups_dict: Dict[str, Dict[str, Any]] = {}
 
@@ -1164,26 +1215,45 @@ class MangaDatabase:
                 s_name = (rel.get("series_name") or "Uncategorized").strip()
                 s_norm = normalize_text(s_name) or "uncategorized"
 
-                meta_match = norm_cache_map.get(s_norm) or cache_map.get(s_name.lower()) or {}
-
-                calibre_match = norm_tracked_map.get(s_norm)
-                if not calibre_match and meta_match.get("canonical_title"):
-                    calibre_match = norm_tracked_map.get(normalize_text(meta_match["canonical_title"])) or tracked_map.get(meta_match["canonical_title"].lower())
-
-                # Check sub-parts if dual title separated by |, /, //, -, —, etc.
+                # Extract candidate parts from delimiters (|, /, //, -, —) and parentheses
                 candidate_parts = []
-                if not calibre_match:
-                    parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+", s_name) if p.strip()]
-                    if len(parts) > 1:
-                        candidate_parts.extend(parts)
+                parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", s_name) if p.strip()]
+                if len(parts) > 1:
+                    candidate_parts.extend(parts)
 
-                # Check parentheses e.g. "English Title (Romaji Title)"
-                if not calibre_match and "(" in s_name and ")" in s_name:
+                if "(" in s_name and ")" in s_name:
                     m_paren = re.findall(r"\((.*?)\)", s_name)
                     base_name = re.sub(r"\(.*?\)", "", s_name).strip()
                     if base_name:
                         candidate_parts.append(base_name)
                     candidate_parts.extend([p.strip() for p in m_paren if p.strip()])
+
+                meta_match = norm_cache_map.get(s_norm) or cache_map.get(s_name.lower()) or {}
+                if (not meta_match or not meta_match.get("total_volumes")) and candidate_parts:
+                    for cand in candidate_parts:
+                        cand_norm = normalize_text(cand)
+                        cand_meta = norm_cache_map.get(cand_norm) or cache_map.get(cand.lower())
+                        if cand_meta and (cand_meta.get("total_volumes") or not meta_match):
+                            meta_match = cand_meta
+                            if cand_meta.get("total_volumes"):
+                                break
+
+                # Live query fallback if total_volumes is missing for complete release
+                if (not meta_match or not meta_match.get("total_volumes")) and (rel.get("is_complete") or "complete" in rel.get("title", "").lower()):
+                    try:
+                        from app.metadata.anilist import AniListMetadataService
+                        anilist_srv = AniListMetadataService(db=self)
+                        for cand in (candidate_parts or [s_name])[:3]:
+                            m_res = anilist_srv.resolve_manga_series(cand)
+                            if m_res and m_res.get("total_volumes"):
+                                meta_match = m_res
+                                break
+                    except Exception:
+                        pass
+
+                calibre_match = norm_tracked_map.get(s_norm)
+                if not calibre_match and meta_match.get("canonical_title"):
+                    calibre_match = norm_tracked_map.get(normalize_text(meta_match["canonical_title"])) or tracked_map.get(meta_match["canonical_title"].lower())
 
                 if not calibre_match and candidate_parts:
                     for cand in candidate_parts:
@@ -1195,14 +1265,11 @@ class MangaDatabase:
                             calibre_match = tracked_map[cand.lower()]
                             break
                         cand_meta = norm_cache_map.get(cand_norm) or cache_map.get(cand.lower())
-                        if cand_meta:
-                            if not meta_match:
-                                meta_match = cand_meta
-                            if cand_meta.get("canonical_title"):
-                                cand_canon_norm = normalize_text(cand_meta["canonical_title"])
-                                if cand_canon_norm in norm_tracked_map:
-                                    calibre_match = norm_tracked_map[cand_canon_norm]
-                                    break
+                        if cand_meta and cand_meta.get("canonical_title"):
+                            cand_canon_norm = normalize_text(cand_meta["canonical_title"])
+                            if cand_canon_norm in norm_tracked_map:
+                                calibre_match = norm_tracked_map[cand_canon_norm]
+                                break
 
                 # Substring containment fallback against tracked series
                 if not calibre_match and len(s_norm) >= 4:
@@ -1273,6 +1340,28 @@ class MangaDatabase:
                 if rel.get("is_complete"):
                     group["is_complete"] = True
                     group["has_complete_release"] = True
+
+                    # Dynamically expand volumes for complete series releases if empty
+                    if not rel["volumes"]:
+                        tot_v = group.get("total_volumes") or meta_match.get("total_volumes")
+                        if tot_v and int(tot_v) > 0:
+                            v_count = int(tot_v)
+                            rel["volume_start"] = 1.0
+                            rel["volume_end"] = float(v_count)
+                            rel["volumes"] = [float(v) for v in range(1, v_count + 1)]
+                            rel["is_bundle"] = True
+                            if not rel["missing_volumes"] and rel["status"] in ("REQUESTED", "DISCOVERY"):
+                                rel["missing_volumes"] = list(rel["volumes"])
+                            try:
+                                cur.execute("""
+                                    UPDATE releases 
+                                    SET is_bundle = 1, is_complete = 1, volume_start = 1.0, volume_end = ?, 
+                                        volumes_json = ?, missing_vols_json = ? 
+                                    WHERE id = ?;
+                                """, (float(v_count), json.dumps(rel["volumes"]), json.dumps(rel["missing_volumes"]), rel["id"]))
+                                conn.commit()
+                            except Exception:
+                                pass
 
                 # Deduplicate releases in group: same guid or (download_url, volume set, group)
                 sig = rel.get("guid") or (rel.get("download_url") or rel.get("link") or rel.get("title"), tuple(sorted(rel.get("volumes", []))), (rel.get("release_group") or "").lower())

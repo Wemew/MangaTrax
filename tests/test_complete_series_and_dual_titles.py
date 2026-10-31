@@ -205,6 +205,55 @@ def test_dual_titles_detection_during_backfill():
         pass
     print(" [PASSED] Dual title detection and backfill title isolation verified.")
 
+def test_dynamic_expansion_of_unexpanded_releases():
+    tf = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    tf.close()
+    db = MangaDatabase(tf.name)
+    db.init_db()
+
+    # Seed metadata for Hatamou Maou-sama
+    db.cache_manga_metadata("hataraku maou sama!", {
+        "canonical_title": "The Devil is a Part-Timer!",
+        "romaji_title": "Hataraku Maou-sama!",
+        "total_volumes": 24,
+        "status": "FINISHED"
+    })
+
+    # Simulate release that was stored with empty volumes prior to complete compilation logic
+    db.upsert_release({
+        "guid": "test_unexpanded",
+        "title": "Hataraku Maou-sama! | The Devil is a Part-Timer! (2015-2026) (Digital) (1r0n, Ushi) (complete)",
+        "series_name": "Hataraku Maou sama! | The Devil is a Part Timer!",
+        "status": "REQUESTED",
+        "release_group": "1r0n, Ushi",
+        "is_complete": 1,
+        "volumes": []
+    })
+
+    # Query grouped releases
+    groups = db.get_releases_grouped_by_series()
+    assert len(groups) == 1
+    g = groups[0]
+    assert g["series_name"] == "The Devil is a Part-Timer!"
+    assert len(g["all_volumes"]) == 24
+    assert len(g["releases"][0]["volumes"]) == 24
+    assert g["all_volumes"][0] == 1.0
+    assert g["all_volumes"][-1] == 24.0
+
+    # Ensure it was persisted to DB
+    persisted = db.get_release_by_id(g["releases"][0]["id"])
+    assert len(persisted["volumes"]) == 24
+    assert persisted["volume_start"] == 1.0
+    assert persisted["volume_end"] == 24.0
+
+    del db
+    gc.collect()
+    try:
+        os.unlink(tf.name)
+    except Exception:
+        pass
+    print(" [PASSED] Dynamic expansion and DB persistence of legacy unexpanded complete releases verified.")
+
 if __name__ == "__main__":
     print("\n==================================================")
     print("Running MangaTrax Complete Series & Dual Title Suite")
@@ -215,6 +264,7 @@ if __name__ == "__main__":
     test_calibre_partial_ownership_for_complete_release()
     test_completed_category_filter()
     test_dual_titles_detection_during_backfill()
+    test_dynamic_expansion_of_unexpanded_releases()
     print("==================================================")
     print("ALL COMPLETE SERIES AND DUAL TITLE TESTS PASSED!")
     print("==================================================\n")

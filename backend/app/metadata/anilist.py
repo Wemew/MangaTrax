@@ -79,11 +79,11 @@ class AniListMetadataService:
 
         cache_key = cleaned_term.lower()
 
-        # 1. Check local DB cache
+        # 1. Check local DB cache (ignore failed fallback cache entries)
         if self.db:
             try:
                 cached = self.db.get_cached_manga_metadata(cache_key)
-                if cached:
+                if cached and cached.get("source") not in ("fallback", "cleaned") and cached.get("total_volumes"):
                     return cached
                 # Check candidate parts from delimiters in cache
                 raw_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|:", raw_series_name) if p.strip()]
@@ -92,7 +92,7 @@ class AniListMetadataService:
                         p_clean = clean_query_term(p)
                         if p_clean and p_clean.lower() != cache_key:
                             p_cached = self.db.get_cached_manga_metadata(p_clean.lower())
-                            if p_cached and p_cached.get("canonical_title"):
+                            if p_cached and p_cached.get("canonical_title") and p_cached.get("source") not in ("fallback", "cleaned") and p_cached.get("total_volumes"):
                                 return p_cached
             except Exception as e:
                 logger.debug(f"Cache lookup failed for '{cache_key}': {e}")
@@ -128,8 +128,8 @@ class AniListMetadataService:
                 "source": "cleaned"
             }
 
-        # 4. Save to DB cache
-        if self.db:
+        # 4. Save to DB cache if authoritative metadata
+        if self.db and metadata.get("source") not in ("fallback", "cleaned"):
             try:
                 self.db.cache_manga_metadata(cache_key, metadata)
                 # Also cross-cache under romaji and canonical titles if different
