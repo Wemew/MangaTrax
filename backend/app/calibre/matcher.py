@@ -85,13 +85,18 @@ class MangaCalibreMatcher:
                 }
 
         # Not in Calibre
-        # If Volume 1 or unnumbered -> DISCOVERY candidate
-        if volumes == [1.0] or not volumes:
+        # If Volume 1, complete compilation, or unnumbered -> DISCOVERY candidate
+        if (
+            volumes == [1.0]
+            or not volumes
+            or release.get("is_complete")
+            or (release.get("volume_start") == 1.0 and is_bundle)
+        ):
             return {
                 "status": "DISCOVERY",
                 "matched_series": None,
                 "missing_volumes": volumes,
-                "reason": "Potential new manga series (Vol. 1 or standalone)"
+                "reason": "Potential new manga series (Vol. 1, complete compilation, or standalone)"
             }
 
         return {

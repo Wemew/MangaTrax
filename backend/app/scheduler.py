@@ -15,7 +15,7 @@ from app.providers.registry import create_provider
 from app.providers.nyaa import NyaaMangaProvider
 from app.metadata.anilist import AniListMetadataService
 from app.metadata.mangaupdates import MangaUpdatesService
-from app.parser import is_chapter_only, is_light_novel
+from app.parser import is_chapter_only, is_light_novel, is_complete_series_release
 from app.notifier.webhook import NotificationService
 
 logger = logging.getLogger("mangatrax.scheduler")
@@ -346,11 +346,16 @@ class MangaScheduler:
             return (False, "LIGHT_NOVEL", [], None, None)
 
         rel_group = getattr(rel, "release_group", None) or rel.to_dict().get("release_group")
+        is_comp = getattr(rel, "is_complete", False) or is_complete_series_release(rel.title)
+        if is_comp:
+            rel.is_complete = True
+            rel.is_bundle = True
 
         # 1. Canonical English series metadata & cover resolution
         canonical_series = rel.series_name
         cover_url = rel.cover_url
         alt_names = []
+        meta = None
         if rel.series_name:
             meta = self.anilist.resolve_manga_series(rel.series_name)
             english_title = (meta.get("canonical_title") or meta.get("english_title") or "").strip()
@@ -375,6 +380,34 @@ class MangaScheduler:
                 if calibre_match_name:
                     canonical_series = calibre_match_name
 
+        # If release is marked (complete) and has no volume labels, fetch total volume count from external sources
+        if is_comp and not rel.volumes:
+            total_vols = meta.get("total_volumes") if meta else None
+            # If not yet resolved, query AniList with candidate alternate titles
+            if not total_vols and alt_names:
+                for alt in alt_names:
+                    alt_meta = self.anilist.resolve_manga_series(alt)
+                    if alt_meta and alt_meta.get("total_volumes"):
+                        total_vols = alt_meta["total_volumes"]
+                        if not meta or not meta.get("canonical_title"):
+                            meta = alt_meta
+                        break
+            # If still not resolved, query MangaUpdates
+            if not total_vols and canonical_series:
+                try:
+                    mu_info = self.mangaupdates.get_series_info(canonical_series)
+                    if mu_info and mu_info.get("total_volumes"):
+                        total_vols = mu_info["total_volumes"]
+                except Exception as e:
+                    logger.debug(f"MangaUpdates volume count lookup failed for '{canonical_series}': {e}")
+
+            if total_vols and int(total_vols) > 0:
+                v_count = int(total_vols)
+                rel.volume_start = 1.0
+                rel.volume_end = float(v_count)
+                rel.volumes = [float(v) for v in range(1, v_count + 1)]
+                logger.info(f"Resolved complete series '{canonical_series}' to {v_count} volumes from external metadata.")
+
         if cover_url:
             self.cover_cache.cache_sync(cover_url)
 
@@ -386,6 +419,7 @@ class MangaScheduler:
         else:
             match_payload = rel.to_dict()
             match_payload["series_name"] = canonical_series
+            match_payload["is_complete"] = is_comp
             match_res = matcher.check_release(match_payload, alt_series_names=alt_names)
             status = match_res["status"]
             missing_vols = match_res.get("missing_volumes", [])
@@ -411,6 +445,7 @@ class MangaScheduler:
             "series_name": canonical_series,
             "release_group": rel_group,
             "is_bundle": rel.is_bundle,
+            "is_complete": 1 if is_comp else 0,
             "volume_start": rel.volume_start,
             "volume_end": rel.volume_end,
             "volumes": rel.volumes,
@@ -428,25 +463,116 @@ class MangaScheduler:
         is_new, rel_id = self.db.upsert_release(rel_dict)
         return (is_new, status, missing_vols, rel_id, canonical_series)
 
+    def detect_series_titles(self, series_name: str) -> List[str]:
+        """
+        Detects and extracts all distinct titles for a series (e.g. English canonical title,
+        Romaji alias, parts separated by delimiters like | or /, and titles from DB releases).
+        """
+        from app.parser import normalize_text
+
+        clean_name = series_name.strip()
+        if not clean_name:
+            return []
+
+        candidates = []
+
+        # 1. Delimiters in the provided series name (| , / , // , - , — , ;)
+        parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", clean_name) if p.strip()]
+        if len(parts) > 1:
+            candidates.extend(parts)
+
+        # 2. Parentheses e.g. "English Title (Romaji Title)"
+        if "(" in clean_name and ")" in clean_name:
+            m_paren = re.findall(r"\((.*?)\)", clean_name)
+            base = re.sub(r"\(.*?\)", "", clean_name).strip()
+            if base:
+                candidates.append(base)
+            candidates.extend(m_paren)
+
+        # 3. Inspect existing releases in database under this series
+        try:
+            with self.db.get_connection() as conn:
+                cur = conn.cursor()
+                prefix = clean_name[:25].strip()
+                cur.execute("""
+                    SELECT title, series_name FROM releases 
+                    WHERE lower(series_name) = lower(?)
+                       OR lower(series_name) LIKE ?
+                       OR lower(title) LIKE ?
+                    LIMIT 20;
+                """, (clean_name, f"%{prefix.lower()}%", f"%{prefix.lower()}%"))
+                for row in cur.fetchall():
+                    for field in [row["series_name"], row["title"]]:
+                        if not field:
+                            continue
+                        sub_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", field) if p.strip()]
+                        if len(sub_parts) > 1:
+                            candidates.extend(sub_parts)
+        except Exception as e:
+            logger.debug(f"Failed to inspect DB releases for dual titles: {e}")
+
+        # 4. Check AniList metadata cache or query AniList
+        initial_check = list(candidates) if candidates else [clean_name]
+        for term in initial_check[:3]:
+            try:
+                meta = self.anilist.resolve_manga_series(term)
+                if meta:
+                    canon = (meta.get("canonical_title") or meta.get("english_title") or "").strip()
+                    romaji = (meta.get("romaji_title") or "").strip()
+                    if canon:
+                        candidates.append(canon)
+                    if romaji:
+                        candidates.append(romaji)
+            except Exception:
+                pass
+
+        # 5. Clean, strip volume keywords, and deduplicate
+        search_titles: List[str] = []
+        seen_norms = set()
+        for c in candidates or [clean_name]:
+            c_clean = re.sub(r"\[.*?\]|\(.*?\)", "", c).strip(" -–—:,|./")
+            c_clean = re.sub(r"\b(?:volumes?|volume|vol|book|v)\b\.?\s*\d+.*$", "", c_clean, flags=re.IGNORECASE).strip(" -–—:,|./")
+            norm = normalize_text(c_clean)
+            if norm and len(norm) >= 3 and norm not in seen_norms:
+                seen_norms.add(norm)
+                search_titles.append(c_clean)
+
+        # If multiple distinct sub-titles exist, drop any giant combined concatenation string
+        if len(search_titles) > 1:
+            filtered = []
+            for t in search_titles:
+                t_norm = normalize_text(t)
+                is_combined = False
+                for other in search_titles:
+                    if t != other and len(t) > len(other) and normalize_text(other) in t_norm:
+                        if len(t) >= len(other) + 15:
+                            is_combined = True
+                            break
+                if not is_combined:
+                    filtered.append(t)
+            if filtered:
+                search_titles = filtered
+
+        return search_titles or [clean_name]
+
     def backfill_series(self, series_name: str, max_pages: int = 3) -> Dict[str, Any]:
         """
         Targeted historical backfill for an individual manga series on Nyaa.
         Queries all past volume releases & bundles on Nyaa for the series and resolves them against Calibre.
+        When multiple titles are detected (e.g. Romaji and English), searches both titles on Nyaa.
         """
         clean_name = series_name.strip()
         if not clean_name:
             return {"status": "error", "message": "Series name required"}
 
-        # 1. Resolve canonical English title and Romaji alias
-        meta = self.anilist.resolve_manga_series(clean_name)
-        english_name = (meta.get("canonical_title") or meta.get("english_title") or clean_name).strip()
-        romaji_name = (meta.get("romaji_title") or "").strip()
+        # 1. Detect all distinct series titles (e.g. English title, Romaji title, delimiter parts)
+        detected_titles = self.detect_series_titles(clean_name)
+        primary_title = detected_titles[0]
+        alt_titles = detected_titles[1:]
 
-        alt_names = []
-        if romaji_name and romaji_name.lower() != english_name.lower():
-            alt_names.append(romaji_name)
-        if clean_name.lower() != english_name.lower():
-            alt_names.append(clean_name)
+        title_display = " & ".join(f"'{t}'" for t in detected_titles)
+        self.db.set_setting("backfill_progress", f"Backfilling {title_display} on Nyaa (up to {max_pages} pages each)...")
+        logger.info(f"Starting targeted backfill for {title_display} on Nyaa (max_pages={max_pages})")
 
         # 2. Build Calibre matcher context
         calibre_path = self.db.get_setting("calibre_path", "/calibre")
@@ -460,12 +586,12 @@ class MangaScheduler:
         staging_dir = self.db.get_setting("staging_dir", "/staging")
         qbit = self.get_qbit_client()
 
-        # 3. Query Nyaa targeted series search
-        nyaa = NyaaMangaProvider(name=f"Nyaa: {english_name}", config={"delay_seconds": 1.0})
+        # 3. Query Nyaa targeted series search across primary and alternate titles
+        nyaa = NyaaMangaProvider(name=f"Nyaa: {primary_title}", config={"delay_seconds": 1.0})
         releases = nyaa.search_series(
-            english_name,
+            primary_title,
             max_pages=max_pages,
-            alt_names=alt_names,
+            alt_names=alt_titles,
             stop_check=lambda: self.stop_backfill_requested
         )
 
@@ -476,7 +602,7 @@ class MangaScheduler:
         for rel in releases:
             if self.stop_backfill_requested:
                 break
-            is_new, status, missing_vols, rel_id, _ = self._process_release(rel, f"Nyaa: {english_name}", matcher)
+            is_new, status, missing_vols, rel_id, _ = self._process_release(rel, f"Nyaa: {primary_title}", matcher)
             if status in ("CHAPTER_ONLY", "LIGHT_NOVEL"):
                 continue
 
@@ -506,12 +632,13 @@ class MangaScheduler:
                         if torrent_h and rel.is_bundle and missing_vols and len(missing_vols) < len(rel.volumes):
                             qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing_vols])
 
-        summary = f"Backfilled '{english_name}': found {total_found} releases ({total_requested} wanted/missing volumes, {total_sent_to_downloader} sent to downloader)."
+        summary = f"Backfilled {title_display}: found {total_found} releases ({total_requested} wanted/missing volumes, {total_sent_to_downloader} sent to downloader)."
         self.db.log_activity("SERIES_BACKFILLED", summary)
         return {
             "status": "success",
             "message": summary,
-            "series_name": english_name,
+            "series_name": primary_title,
+            "searched_titles": detected_titles,
             "releases_found": total_found,
             "requested": total_requested,
             "sent_to_downloader": total_sent_to_downloader

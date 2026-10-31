@@ -56,6 +56,16 @@
                         </span>
                         {% endif %}
 
+                        {% if group.has_complete_release or group.is_complete %}
+                        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-teal-500/10 text-teal-300 border border-teal-500/20 font-semibold text-[11px]" title="Complete series compilation / all volumes available">
+                            <i data-lucide="check-check" class="w-3 h-3 text-teal-400"></i> Completed Series
+                        </span>
+                        {% elif group.is_publishing_finished %}
+                        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-500/10 text-sky-300 border border-sky-500/20 font-semibold text-[11px]" title="Publishing status: Finished on AniList">
+                            <i data-lucide="flag" class="w-3 h-3 text-sky-400"></i> Publishing Complete
+                        </span>
+                        {% endif %}
+
                         <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-purple-500/10 text-purple-300 border border-purple-500/20 font-semibold text-[11px]">
                             {{ group.releases_count }} {{ 'Release' if group.releases_count == 1 else 'Releases / Batches' }}
                         </span>
@@ -157,7 +167,11 @@
                         {% endif %}
                         {% endif %}
 
-                        {% if r.is_bundle %}
+                        {% if r.is_complete %}
+                        <span class="px-2 py-0.5 rounded bg-teal-500/15 border border-teal-500/30 text-teal-300 text-[10px] font-bold flex items-center gap-1">
+                            <i data-lucide="check-check" class="w-2.5 h-2.5"></i> Complete ({{ r.volumes|length }} Vols{% if r.volume_start and r.volume_end %}: Vol {{ r.volume_start|int }}-{{ r.volume_end|int }}{% endif %})
+                        </span>
+                        {% elif r.is_bundle %}
                         <span class="px-2 py-0.5 rounded bg-purple-500/15 border border-purple-500/30 text-purple-300 text-[10px] font-bold">
                             Bundle ({{ r.volumes|length }} Volumes: Vol {{ r.volume_start|int }}-{{ r.volume_end|int }})
                         </span>

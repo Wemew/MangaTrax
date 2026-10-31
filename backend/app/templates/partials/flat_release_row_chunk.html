@@ -61,7 +61,11 @@
             {% endif %}
         </div>
         <div class="mt-1 flex items-center gap-1.5 flex-wrap">
-            {% if r.is_bundle %}
+            {% if r.is_complete %}
+            <span class="px-1.5 py-0.5 rounded bg-teal-500/15 border border-teal-500/30 text-teal-300 text-[10px] font-bold flex items-center gap-1">
+                <i data-lucide="check-check" class="w-2.5 h-2.5"></i> Complete ({{ r.volumes|length }} vols)
+            </span>
+            {% elif r.is_bundle %}
             <span class="px-1.5 py-0.5 rounded bg-purple-500/10 border border-purple-500/20 text-purple-300 text-[10px] font-bold">
                 Bundle Vol {{ r.volume_start|int if r.volume_start is not none else '?' }}-{{ r.volume_end|int if r.volume_end is not none else '?' }} ({{ r.volumes|length }} vols)
             </span>

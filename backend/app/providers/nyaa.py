@@ -75,7 +75,7 @@ class NyaaMangaProvider(BaseFeedProvider):
                     time.sleep(self.delay_seconds)
                     if stop_check and stop_check():
                         break
-                    alt_res = self.crawl_pages(max_pages=max(1, max_pages - 1), query=alt_clean, stop_check=stop_check)
+                    alt_res = self.crawl_pages(max_pages=max_pages, query=alt_clean, stop_check=stop_check)
                     for r in alt_res:
                         if r.link not in seen_links:
                             seen_links.add(r.link)
@@ -228,6 +228,7 @@ class NyaaMangaProvider(BaseFeedProvider):
                     series_name=parsed["series_name"],
                     release_group=parsed.get("release_group"),
                     is_bundle=parsed["is_bundle"],
+                    is_complete=parsed.get("is_complete", False),
                     volume_start=parsed["volume_start"],
                     volume_end=parsed["volume_end"],
                     volumes=parsed["volumes"],

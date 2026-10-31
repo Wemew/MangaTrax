@@ -11,6 +11,7 @@ class ReleaseItem:
         download_url: Optional[str] = None,
         series_name: Optional[str] = None,
         is_bundle: bool = False,
+        is_complete: bool = False,
         volume_start: Optional[float] = None,
         volume_end: Optional[float] = None,
         volumes: Optional[List[float]] = None,
@@ -28,6 +29,7 @@ class ReleaseItem:
         self.series_name = series_name
         self.release_group = release_group
         self.is_bundle = is_bundle
+        self.is_complete = is_complete
         self.volume_start = volume_start
         self.volume_end = volume_end
         self.volumes = volumes or []
@@ -53,6 +55,7 @@ class ReleaseItem:
             "series_name": self.series_name,
             "release_group": self.release_group,
             "is_bundle": self.is_bundle,
+            "is_complete": self.is_complete,
             "volume_start": self.volume_start,
             "volume_end": self.volume_end,
             "volumes": self.volumes,

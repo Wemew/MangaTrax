@@ -81,6 +81,7 @@ class MangaUpdatesService:
                         "url": url,
                         "cover_url": cached.get("cover_url", ""),
                         "genres": [],
+                        "total_volumes": cached.get("total_volumes"),
                         "year": None,
                         "source": "cache"
                     }
@@ -103,6 +104,7 @@ class MangaUpdatesService:
                 "url": f"https://www.mangaupdates.com/series.html?search={urllib.parse.quote_plus(clean_name)}",
                 "cover_url": "",
                 "genres": [],
+                "total_volumes": None,
                 "year": None,
                 "source": "fallback"
             }
@@ -114,7 +116,7 @@ class MangaUpdatesService:
                     "canonical_title": info.get("title") or clean_name,
                     "romaji_title": info.get("url") or "",
                     "cover_url": info.get("cover_url") or "",
-                    "total_volumes": None,
+                    "total_volumes": info.get("total_volumes"),
                     "status": "UNKNOWN",
                     "synopsis": info.get("description", ""),
                     "source": "mangaupdates"
@@ -159,12 +161,33 @@ class MangaUpdatesService:
                 genres = [g.get("genre") for g in record.get("genres", []) if g.get("genre")]
                 year = record.get("year")
 
+                series_id = record.get("series_id")
+                total_volumes = None
+                if series_id:
+                    try:
+                        s_req = urllib.request.Request(
+                            f"https://api.mangaupdates.com/v1/series/{series_id}",
+                            headers={
+                                "User-Agent": "MangaTrax/1.0 (+https://github.com/Wemew/MangaTrax)"
+                            }
+                        )
+                        with urllib.request.urlopen(s_req, timeout=self.timeout) as s_resp:
+                            if s_resp.status == 200:
+                                s_data = json.loads(s_resp.read().decode("utf-8"))
+                                st = s_data.get("status") or ""
+                                m_vol = re.search(r'(\d+)\s*Volumes?', st, re.IGNORECASE)
+                                if m_vol:
+                                    total_volumes = int(m_vol.group(1))
+                    except Exception:
+                        pass
+
                 return {
                     "title": title,
                     "description": clean_desc,
                     "url": url,
                     "cover_url": image_url,
                     "genres": genres,
+                    "total_volumes": total_volumes,
                     "year": year,
                     "source": "mangaupdates"
                 }

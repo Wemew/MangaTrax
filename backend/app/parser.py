@@ -197,6 +197,23 @@ def is_light_novel(raw_title: str) -> bool:
 
     return False
 
+def is_complete_series_release(raw_title: str) -> bool:
+    """
+    Returns True if the title indicates a complete manga series compilation/batch.
+    e.g., '(complete)', '[complete]', '(completed)', '[completed]', '(complete series)', '[complete series]',
+    '(all volumes)', '[all volumes]', '(full series)', '[full series]'.
+    """
+    if not raw_title:
+        return False
+    t_lower = raw_title.lower()
+    # Explicit bracketed tags
+    if re.search(r'[\(\[]\s*(?:complete|completed|complete\s*series|completed\s*series|all\s*volumes?|full\s*series)\s*[\)\]]', t_lower):
+        return True
+    # Word boundary complete series or complete collection at end or after separator
+    if re.search(r'(?:[-–—|/]\s*|\b)(?:complete\s*series|completed\s*series|full\s*series)\b', t_lower):
+        return True
+    return False
+
 def is_chapter_only(raw_title: str) -> bool:
     """
     Returns True if the release is purely a chapter update with no volume information.
@@ -204,6 +221,10 @@ def is_chapter_only(raw_title: str) -> bool:
     Releases without a 'v' or 'vol' in front of numbers indicate chapters, not volumes.
     """
     if not raw_title:
+        return False
+
+    # Complete series compilations are never chapters
+    if is_complete_series_release(raw_title):
         return False
 
     title = raw_title.lower()
@@ -329,6 +350,7 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
     """
     cleaned = clean_manga_title(raw_title)
     release_group = extract_release_group(raw_title, known_groups=known_groups)
+    is_comp = is_complete_series_release(raw_title)
 
     if release_group:
         # Strip extracted release group from cleaned title if present (e.g. from scene format -Group)
@@ -341,11 +363,12 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
         "series_name": cleaned,
         "release_group": release_group,
         "is_light_novel": is_light_novel(raw_title),
-        "is_bundle": False,
-        "volume_start": None,
+        "is_bundle": is_comp,
+        "is_complete": is_comp,
+        "volume_start": 1.0 if is_comp else None,
         "volume_end": None,
         "volumes": [],
-        "confidence": 0.0
+        "confidence": 0.9 if is_comp else 0.0
     }
 
     if not cleaned or is_chapter_only(raw_title):
@@ -382,6 +405,7 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
                 "series_name": series,
                 "release_group": release_group,
                 "is_bundle": True,
+                "is_complete": is_comp,
                 "volume_start": start_vol,
                 "volume_end": end_vol,
                 "volumes": vols,
@@ -410,6 +434,7 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
                 "series_name": series,
                 "release_group": release_group,
                 "is_bundle": True,
+                "is_complete": is_comp,
                 "volume_start": parsed_vols[0],
                 "volume_end": parsed_vols[-1],
                 "volumes": parsed_vols,
@@ -435,6 +460,7 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
                 "series_name": series,
                 "release_group": release_group,
                 "is_bundle": False,
+                "is_complete": is_comp,
                 "volume_start": vol,
                 "volume_end": vol,
                 "volumes": [vol],

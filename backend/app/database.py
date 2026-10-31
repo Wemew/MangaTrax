@@ -122,7 +122,7 @@ class MangaDatabase:
                 );
             """)
 
-            # Add release_group, description, mangaupdates_url columns if missing on upgrade
+            # Add release_group, description, mangaupdates_url, is_complete columns if missing on upgrade
             cur.execute("PRAGMA table_info(releases);")
             r_cols = [r["name"] for r in cur.fetchall()]
             if "release_group" not in r_cols:
@@ -131,6 +131,18 @@ class MangaDatabase:
                 cur.execute("ALTER TABLE releases ADD COLUMN description TEXT DEFAULT '';")
             if "mangaupdates_url" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN mangaupdates_url TEXT DEFAULT '';")
+            if "is_complete" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN is_complete INTEGER DEFAULT 0;")
+
+            # Backfill is_complete for existing releases matching complete indicators
+            try:
+                from app.parser import is_complete_series_release
+                cur.execute("SELECT id, title FROM releases WHERE is_complete = 0 OR is_complete IS NULL;")
+                for r_row in cur.fetchall():
+                    if is_complete_series_release(r_row["title"]):
+                        cur.execute("UPDATE releases SET is_complete = 1 WHERE id = ?;", (r_row["id"],))
+            except Exception:
+                pass
 
             # Upgrade any Nyaa links pointing to raw torrent downloads to their web post view URLs
             cur.execute("""
@@ -489,6 +501,8 @@ class MangaDatabase:
         guid = rel["guid"]
         vols_json = json.dumps(rel.get("volumes") or [])
         missing_json = json.dumps(rel.get("missing_volumes") or [])
+        from app.parser import is_complete_series_release
+        is_comp_val = 1 if (rel.get("is_complete") or is_complete_series_release(rel.get("title", ""))) else 0
 
         with self.get_connection() as conn:
             cur = conn.cursor()
@@ -505,6 +519,7 @@ class MangaDatabase:
                         description = CASE WHEN ? != '' AND ? IS NOT NULL THEN ? ELSE description END,
                         mangaupdates_url = CASE WHEN ? != '' AND ? IS NOT NULL THEN ? ELSE mangaupdates_url END,
                         is_bundle = ?,
+                        is_complete = ?,
                         volume_start = ?,
                         volume_end = ?,
                         volumes_json = ?,
@@ -525,6 +540,7 @@ class MangaDatabase:
                     rel.get("mangaupdates_url"),
                     rel.get("mangaupdates_url", ""),
                     1 if rel.get("is_bundle") else 0,
+                    is_comp_val,
                     rel.get("volume_start"),
                     rel.get("volume_end"),
                     vols_json,
@@ -541,9 +557,9 @@ class MangaDatabase:
                 cur.execute("""
                     INSERT INTO releases (
                         guid, title, series_name, release_group, description, mangaupdates_url,
-                        is_bundle, volume_start, volume_end, volumes_json, missing_vols_json,
+                        is_bundle, is_complete, volume_start, volume_end, volumes_json, missing_vols_json,
                         download_url, link, cover_url, source_feed_name, status, download_status, torrent_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     guid,
                     rel["title"],
@@ -552,6 +568,7 @@ class MangaDatabase:
                     rel.get("description") or "",
                     rel.get("mangaupdates_url") or "",
                     1 if rel.get("is_bundle") else 0,
+                    is_comp_val,
                     rel.get("volume_start"),
                     rel.get("volume_end"),
                     vols_json,
@@ -594,7 +611,15 @@ class MangaDatabase:
             cur.execute("SELECT lower(name) FROM prioritized_groups;")
             p_groups = {row[0] for row in cur.fetchall()}
 
-            if status:
+            if status == "COMPLETED":
+                cur.execute("""
+                    SELECT * FROM releases 
+                    WHERE (is_complete = 1 OR lower(title) LIKE '%complete%')
+                      AND status NOT IN ('BLACKLISTED', 'IGNORED')
+                      AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
+                    ORDER BY updated_at DESC LIMIT ? OFFSET ?;
+                """, (limit, offset))
+            elif status:
                 cur.execute("SELECT * FROM releases WHERE status = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?;", (status, limit, offset))
             else:
                 cur.execute("""
@@ -611,7 +636,9 @@ class MangaDatabase:
             cur.execute("SELECT search_term, canonical_title, romaji_title, cover_url FROM manga_metadata_cache;")
             meta_cache = {row["search_term"].lower(): dict(row) for row in cur.fetchall()}
 
+            from app.parser import is_complete_series_release
             for r in rows:
+                r["is_complete"] = bool(r.get("is_complete", 0) or is_complete_series_release(r.get("title", "")))
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
                 r["missing_volumes"] = json.loads(r["missing_vols_json"] or "[]")
                 r_group = (r.get("release_group") or "").strip().lower()
@@ -730,7 +757,9 @@ class MangaDatabase:
             cur.execute("SELECT lower(name) FROM prioritized_groups;")
             p_groups = {row[0] for row in cur.fetchall()}
 
+            from app.parser import is_complete_series_release
             for r in rows:
+                r["is_complete"] = bool(r.get("is_complete", 0) or is_complete_series_release(r.get("title", "")))
                 r["is_prioritized"] = bool(r.get("release_group") and r["release_group"].lower() in p_groups)
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
                 # Fallback to cache if description, mangaupdates_url, or canonical English title wasn't directly populated on release
@@ -926,9 +955,18 @@ class MangaDatabase:
     # --- Manga Metadata Cache (AniList) ---
     def get_cached_manga_metadata(self, search_term: str) -> Optional[Dict[str, Any]]:
         clean_key = search_term.strip().lower()
+        norm_key = re.sub(r"[-–—:_/\\]+", " ", clean_key).strip()
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT * FROM manga_metadata_cache WHERE lower(search_term) = lower(?);", (clean_key,))
+            cur.execute("""
+                SELECT * FROM manga_metadata_cache 
+                WHERE lower(search_term) IN (lower(?), lower(?))
+                   OR lower(canonical_title) IN (lower(?), lower(?))
+                   OR lower(romaji_title) IN (lower(?), lower(?))
+                   OR replace(lower(search_term), '-', ' ') = ?
+                   OR replace(lower(romaji_title), '-', ' ') = ?
+                   OR replace(lower(canonical_title), '-', ' ') = ?;
+            """, (clean_key, norm_key, clean_key, norm_key, clean_key, norm_key, norm_key, norm_key, norm_key))
             row = cur.fetchone()
             if row:
                 return {
@@ -1043,7 +1081,16 @@ class MangaDatabase:
             p_groups = {row[0] for row in cur.fetchall()}
 
             if prioritized_only:
-                if status:
+                if status == "COMPLETED":
+                    cur.execute("""
+                        SELECT * FROM releases 
+                        WHERE (is_complete = 1 OR lower(title) LIKE '%complete%')
+                          AND status NOT IN ('BLACKLISTED', 'IGNORED')
+                          AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
+                          AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                        ORDER BY updated_at DESC;
+                    """)
+                elif status:
                     cur.execute("""
                         SELECT * FROM releases 
                         WHERE status = ? AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
@@ -1060,7 +1107,15 @@ class MangaDatabase:
                             updated_at DESC;
                     """)
             else:
-                if status:
+                if status == "COMPLETED":
+                    cur.execute("""
+                        SELECT * FROM releases 
+                        WHERE (is_complete = 1 OR lower(title) LIKE '%complete%')
+                          AND status NOT IN ('BLACKLISTED', 'IGNORED')
+                          AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
+                        ORDER BY updated_at DESC;
+                    """)
+                elif status:
                     cur.execute("SELECT * FROM releases WHERE status = ? ORDER BY updated_at DESC;", (status,))
                 else:
                     cur.execute("""
@@ -1073,7 +1128,9 @@ class MangaDatabase:
                     """)
 
             raw_releases = [dict(r) for r in cur.fetchall()]
+            from app.parser import is_complete_series_release
             for r in raw_releases:
+                r["is_complete"] = bool(r.get("is_complete", 0) or is_complete_series_release(r.get("title", "")))
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
                 r["missing_volumes"] = json.loads(r["missing_vols_json"] or "[]")
                 r_group = (r.get("release_group") or "").strip().lower()
@@ -1198,6 +1255,9 @@ class MangaDatabase:
                         "seen_release_sigs": set(),
                         "all_volumes_set": set(),
                         "missing_volumes_set": set(),
+                        "is_complete": False,
+                        "has_complete_release": False,
+                        "is_publishing_finished": (meta_match.get("status") or "").upper() in ("FINISHED", "COMPLETED"),
                         "has_wanted": False,
                         "has_discovery": False,
                         "has_in_calibre": False,
@@ -1209,6 +1269,10 @@ class MangaDatabase:
                     group["romaji_name"] = romaji_title
                 if not group.get("cover_url") and rel.get("cover_url"):
                     group["cover_url"] = rel["cover_url"]
+
+                if rel.get("is_complete"):
+                    group["is_complete"] = True
+                    group["has_complete_release"] = True
 
                 # Deduplicate releases in group: same guid or (download_url, volume set, group)
                 sig = rel.get("guid") or (rel.get("download_url") or rel.get("link") or rel.get("title"), tuple(sorted(rel.get("volumes", []))), (rel.get("release_group") or "").lower())
@@ -1348,7 +1412,16 @@ class MangaDatabase:
         """Returns releases published by prioritized release groups."""
         with self.get_connection() as conn:
             cur = conn.cursor()
-            if status:
+            if status == "COMPLETED":
+                cur.execute("""
+                    SELECT * FROM releases 
+                    WHERE (is_complete = 1 OR lower(title) LIKE '%complete%')
+                      AND status NOT IN ('BLACKLISTED', 'IGNORED')
+                      AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
+                      AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                    ORDER BY updated_at DESC LIMIT ? OFFSET ?;
+                """, (limit, offset))
+            elif status:
                 cur.execute("""
                     SELECT * FROM releases 
                     WHERE status = ? AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
@@ -1366,13 +1439,9 @@ class MangaDatabase:
                     LIMIT ? OFFSET ?;
                 """, (limit, offset))
             rows = [dict(r) for r in cur.fetchall()]
+            from app.parser import is_complete_series_release
             for r in rows:
-                r["volumes"] = json.loads(r["volumes_json"] or "[]")
-                r["missing_volumes"] = json.loads(r["missing_vols_json"] or "[]")
-                r["is_prioritized"] = True
-            return rows
-            rows = [dict(r) for r in cur.fetchall()]
-            for r in rows:
+                r["is_complete"] = bool(r.get("is_complete", 0) or is_complete_series_release(r.get("title", "")))
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
                 r["missing_volumes"] = json.loads(r["missing_vols_json"] or "[]")
                 r["is_prioritized"] = True

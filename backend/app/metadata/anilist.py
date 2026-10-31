@@ -85,6 +85,15 @@ class AniListMetadataService:
                 cached = self.db.get_cached_manga_metadata(cache_key)
                 if cached:
                     return cached
+                # Check candidate parts from delimiters in cache
+                raw_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|:", raw_series_name) if p.strip()]
+                if len(raw_parts) > 1:
+                    for p in raw_parts:
+                        p_clean = clean_query_term(p)
+                        if p_clean and p_clean.lower() != cache_key:
+                            p_cached = self.db.get_cached_manga_metadata(p_clean.lower())
+                            if p_cached and p_cached.get("canonical_title"):
+                                return p_cached
             except Exception as e:
                 logger.debug(f"Cache lookup failed for '{cache_key}': {e}")
 

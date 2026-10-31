@@ -51,6 +51,10 @@
                    class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'DISCOVERY' %}bg-amber-600 text-white{% else %}text-slate-400 hover:text-amber-400{% endif %}">
                     Discovery
                 </a>
+                <a href="/prioritized?view={{ current_view }}&status=COMPLETED" 
+                   class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'COMPLETED' %}bg-teal-600 text-white{% else %}text-slate-400 hover:text-teal-300{% endif %}">
+                    Completed
+                </a>
                 <a href="/prioritized?view={{ current_view }}&status=IGNORED" 
                    class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'IGNORED' %}bg-slate-700 text-amber-300 border border-amber-500/40{% else %}text-slate-400 hover:text-amber-300{% endif %}" title="View ignored releases">
                     Ignored
