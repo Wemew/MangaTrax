@@ -122,6 +122,42 @@
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Feed Check Interval (Minutes)</label>
                     <input type="number" id="setting-feed-interval" value="{{ settings.feed_check_interval_minutes }}" min="5" max="1440" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-purple-500">
                 </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">Polite Backfill Max Pages</label>
+                    <input type="number" id="setting-backfill-pages" value="{{ settings.backfill_max_pages or '15' }}" min="0" max="1000" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-purple-500">
+                    <p class="text-[11px] text-slate-500 mt-1">Set to <strong>0 for unlimited</strong>. MangaTrax will scan until the feed naturally ends.</p>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">Polite Backfill Delay (Seconds)</label>
+                    <input type="number" step="0.5" id="setting-backfill-delay" value="{{ settings.backfill_delay_seconds or '2.0' }}" min="0.5" max="30" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-purple-500">
+                    <p class="text-[11px] text-slate-500 mt-1">Delay between requests to prevent tracker rate-limits or IP bans.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Maintenance & Diagnostics -->
+        <div class="bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                <i data-lucide="wrench" class="w-4 h-4 text-amber-400"></i>
+                Maintenance & Diagnostics
+            </h3>
+            <p class="text-xs text-slate-400">
+                Safely clear temporary caches or unreviewed discovery items to free up disk space or declutter lists.
+            </p>
+
+            <div class="flex flex-wrap items-center gap-3 pt-1">
+                <button type="button" onclick="debugAction('clear-thumbnails')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                    <i data-lucide="image" class="w-3.5 h-3.5 text-brand-400"></i>
+                    Purge Cover Thumbnail Cache
+                </button>
+                <button type="button" onclick="debugAction('clear-discovery')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                    <i data-lucide="compass" class="w-3.5 h-3.5 text-amber-400"></i>
+                    Clear Unreviewed Discovery Items
+                </button>
+                <button type="button" onclick="debugAction('clear-descriptions')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                    <i data-lucide="file-text" class="w-3.5 h-3.5 text-slate-400"></i>
+                    Reset Descriptions
+                </button>
             </div>
         </div>
 
@@ -178,7 +214,9 @@ async function saveSettings(e) {
         auto_download: document.getElementById('setting-auto-download').checked ? 'true' : 'false',
         auto_tag: document.getElementById('setting-auto-tag').checked ? 'true' : 'false',
         calibre_sync_interval_minutes: document.getElementById('setting-calibre-interval').value,
-        feed_check_interval_minutes: document.getElementById('setting-feed-interval').value
+        feed_check_interval_minutes: document.getElementById('setting-feed-interval').value,
+        backfill_max_pages: document.getElementById('setting-backfill-pages').value,
+        backfill_delay_seconds: document.getElementById('setting-backfill-delay').value
     };
 
     try {
@@ -192,6 +230,35 @@ async function saveSettings(e) {
             showToast('Settings saved successfully!', 'success');
         } else {
             showToast('Failed to save settings', 'error');
+        }
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+
+async function debugAction(action) {
+    let msg = '';
+    if (action === 'clear-thumbnails') {
+        msg = 'Are you sure you want to purge the cached cover image thumbnails from disk?\n\nImages will be safely re-downloaded when viewed.';
+    } else if (action === 'clear-discovery') {
+        msg = 'Are you sure you want to clear all unreviewed manga series from the Discovery page?\n\nThis will not delete your active wishlist requests or Calibre tracked series.';
+    } else if (action === 'clear-descriptions') {
+        msg = 'Are you sure you want to clear stored manga descriptions?';
+    }
+
+    if (!confirm(msg)) return;
+
+    try {
+        const res = await fetch('/api/debug/action', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: action })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast(data.message, 'success');
+        } else {
+            showToast(data.message || 'Action failed', 'error');
         }
     } catch (err) {
         showToast('Error: ' + err, 'error');

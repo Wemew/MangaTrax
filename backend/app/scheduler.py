@@ -230,20 +230,36 @@ class MangaScheduler:
             "progress": self.db.get_setting("backfill_progress", "Idle")
         }
 
-    async def run_polite_backfill(self, max_pages: int = 15, delay_seconds: float = 2.0):
+    async def run_polite_backfill(self, max_pages: Optional[int] = None, delay_seconds: Optional[float] = None):
         """
         Runs a polite historical backfill across feeds:
         Fetches older pages with polite rate-limiting delays to populate discovery
         and catch older missing volumes/bundles without causing tracker load.
+        If max_pages <= 0, scans until the end of the feed is reached.
         """
         import asyncio
         if self.is_backfilling:
             return {"status": "in_progress", "message": "Backfill already running"}
 
+        if max_pages is None:
+            try:
+                max_pages = int(self.db.get_setting("backfill_max_pages", "15"))
+            except ValueError:
+                max_pages = 15
+
+        if delay_seconds is None:
+            try:
+                delay_seconds = float(self.db.get_setting("backfill_delay_seconds", "2.0"))
+            except ValueError:
+                delay_seconds = 2.0
+
+        effective_max = 9999 if max_pages <= 0 else max_pages
+        target_pages_text = f"up to {max_pages} pages" if max_pages > 0 else "unlimited pages until end of feed"
+
         self.is_backfilling = True
         self.stop_backfill_requested = False
         self.db.set_setting("backfill_status", "running")
-        self.db.set_setting("backfill_progress", "Starting polite manga feed backfill...")
+        self.db.set_setting("backfill_progress", f"Starting polite manga feed backfill ({target_pages_text})...")
 
         try:
             feeds = self.db.get_all_feeds()
@@ -265,11 +281,11 @@ class MangaScheduler:
 
                 feed_name = feed["name"]
                 feed_config = json.loads(feed.get("config_json") or "{}") if isinstance(feed.get("config_json"), str) else (feed.get("config_json") or {})
-                feed_config["max_pages"] = max_pages
+                feed_config["max_pages"] = effective_max
                 feed_dict = dict(feed)
                 feed_dict["config_json"] = json.dumps(feed_config)
 
-                self.db.set_setting("backfill_progress", f"Scanning {feed_name} (up to {max_pages} pages)...")
+                self.db.set_setting("backfill_progress", f"Scanning {feed_name} ({target_pages_text})...")
 
                 provider = create_provider(feed_dict)
                 if not provider:

@@ -243,6 +243,32 @@ def test_database_and_blacklist_workflow():
         assert dandadan["website_url"] == "https://mangaupdates.com/series/dandadan"
         assert dandadan["is_monitored"] == 1
 
+        # Test clear_discovered_series
+        disc_rel2 = {
+            "guid": "guid-unwanted-1",
+            "title": "Unwanted Vol 1",
+            "series_name": "Unwanted",
+            "is_bundle": False,
+            "volume_start": 1.0,
+            "status": "DISCOVERY"
+        }
+        db.upsert_release(disc_rel2)
+        assert len(db.get_discovery_releases()) >= 1
+        cleared_disc = db.clear_discovered_series()
+        assert cleared_disc >= 1
+        assert len(db.get_discovery_releases()) == 0
+
+        # Test CoverCache clear_cache
+        from app.covers import CoverCache
+        c_cache = CoverCache(temp_dir)
+        dummy_file = os.path.join(c_cache.covers_dir, "test_cover.jpg")
+        with open(dummy_file, "wb") as f:
+            f.write(b"dummy image data")
+        assert os.path.isfile(dummy_file)
+        removed_files = c_cache.clear_cache()
+        assert removed_files == 1
+        assert not os.path.exists(dummy_file)
+
         print("    [PASSED] Database, request queue, and blacklist lifecycle verified.")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

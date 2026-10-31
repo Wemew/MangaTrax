@@ -30,6 +30,7 @@ class MangaDatabase:
                     authors TEXT DEFAULT '',
                     publisher TEXT DEFAULT '',
                     tags TEXT DEFAULT '',
+                    description TEXT DEFAULT '',
                     book_count INTEGER DEFAULT 0,
                     latest_index REAL DEFAULT 0.0,
                     is_monitored INTEGER DEFAULT 1,
@@ -37,6 +38,12 @@ class MangaDatabase:
                     last_sync TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+
+            # Add description column if missing on upgrade
+            cur.execute("PRAGMA table_info(series_tracking);")
+            cols = [r["name"] for r in cur.fetchall()]
+            if "description" not in cols:
+                cur.execute("ALTER TABLE series_tracking ADD COLUMN description TEXT DEFAULT '';")
 
             # Blacklisted manga series
             cur.execute("""
@@ -121,6 +128,8 @@ class MangaDatabase:
                     "auto_tag": "true",
                     "calibre_sync_interval_minutes": "15",
                     "feed_check_interval_minutes": "60",
+                    "backfill_max_pages": "15",
+                    "backfill_delay_seconds": "2.0",
                     "discord_webhook_url": ""
                 }
                 for k, v in defaults.items():
@@ -528,3 +537,24 @@ class MangaDatabase:
                 "active_downloads": active_downloads,
                 "discovered_count": discovered_count
             }
+
+    # --- Debug / Maintenance Operations ---
+    def clear_all_descriptions(self) -> int:
+        """Clears all stored descriptions and synopses in series_tracking."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE series_tracking SET description = '';")
+            count = cur.rowcount
+            conn.commit()
+            self.log_activity("DEBUG_CLEAR", "Cleared all manga descriptions", f"Reset descriptions across {count} tracked series.")
+            return count
+
+    def clear_discovered_series(self) -> int:
+        """Clears unreviewed new series from the Discovery page (status='DISCOVERY')."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM releases WHERE status = 'DISCOVERY';")
+            count = cur.rowcount
+            conn.commit()
+            self.log_activity("DEBUG_CLEAR", "Cleared discovered manga series", f"Removed {count} unreviewed discovery releases.")
+            return count

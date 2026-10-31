@@ -445,8 +445,12 @@ async def api_backfill_start(payload: Optional[Dict[str, Any]] = None):
         return JSONResponse({"status": "in_progress", "message": "Backfill already running"})
 
     p = payload or {}
-    max_pages = int(p.get("max_pages", 15))
-    delay = float(p.get("delay", 2.0))
+    max_pages = p.get("max_pages")
+    if max_pages is not None:
+        max_pages = int(max_pages)
+    delay = p.get("delay")
+    if delay is not None:
+        delay = float(delay)
 
     asyncio.create_task(scheduler.run_polite_backfill(
         max_pages=max_pages,
@@ -464,6 +468,22 @@ async def api_backfill_stop():
 async def api_backfill_status():
     """Returns current backfill progress and state."""
     return JSONResponse(scheduler.get_backfill_status())
+
+@app.post("/api/debug/action")
+async def api_debug_action(payload: Dict[str, Any]):
+    """Debug maintenance operations: clear discovery, descriptions, or cover cache."""
+    action = payload.get("action")
+    if action == "clear-discovery":
+        count = db.clear_discovered_series()
+        return JSONResponse({"status": "success", "message": f"Cleared {count} unreviewed manga series from Discovery."})
+    elif action == "clear-descriptions":
+        count = db.clear_all_descriptions()
+        return JSONResponse({"status": "success", "message": f"Cleared descriptions across {count} items."})
+    elif action == "clear-thumbnails":
+        count = cover_cache.clear_cache()
+        return JSONResponse({"status": "success", "message": f"Purged {count} cached cover images from disk."})
+    else:
+        return JSONResponse({"status": "error", "message": f"Unknown action: {action}"}, status_code=400)
 
 if __name__ == "__main__":
     import uvicorn
