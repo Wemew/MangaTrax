@@ -121,6 +121,13 @@ class MangaDatabase:
             if "mangaupdates_url" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN mangaupdates_url TEXT DEFAULT '';")
 
+            # Upgrade any Nyaa links pointing to raw torrent downloads to their web post view URLs
+            cur.execute("""
+                UPDATE releases 
+                SET link = replace(replace(link, '/download/', '/view/'), '.torrent', '')
+                WHERE link LIKE '%nyaa.si/download/%.torrent';
+            """)
+
             # Prioritized Release Groups table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS prioritized_groups (

@@ -562,6 +562,29 @@ def test_mangaupdates_and_rss_links():
         assert tracked_dandadan["website_url"] == "https://www.mangaupdates.com/series/test-dandadan"
         assert "extraterrestrials" in tracked_dandadan["description"]
 
+        # 5. Test RSS Provider web post permalink vs torrent download URL separation
+        from unittest.mock import patch, MagicMock
+        from app.providers.rss import RSSFeedProvider
+        mock_feed = MagicMock()
+        mock_feed.bozo = 0
+        mock_feed.entries = [{
+            "title": "[Group] Chainsaw Man Vol. 12 [Digital]",
+            "link": "https://nyaa.si/download/2180362.torrent",
+            "id": "https://nyaa.si/view/2180362",
+            "summary": '<a href="https://nyaa.si/view/2180362">#2180362</a> | 250 MiB',
+            "nyaa_size": "250 MiB",
+            "nyaa_seeders": 45,
+            "nyaa_infohash": "6506A47A152E85AAECA04865557873AF38F895F3"
+        }]
+        with patch("feedparser.parse", return_value=mock_feed):
+            provider = RSSFeedProvider(name="Nyaa", url="https://nyaa.si/?page=rss")
+            rss_items = provider.fetch_releases()
+            assert len(rss_items) == 1
+            assert rss_items[0].link == "https://nyaa.si/view/2180362"
+            assert rss_items[0].download_url == "https://nyaa.si/download/2180362.torrent"
+            assert rss_items[0].raw_data["post_size"] == "250 MiB"
+            assert rss_items[0].raw_data["seeders"] == 45
+
         print("    [PASSED] MangaUpdates metadata and specific RSS links verified end-to-end.")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
