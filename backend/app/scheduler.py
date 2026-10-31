@@ -1,6 +1,7 @@
 import time
 import logging
 import threading
+import re
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
@@ -169,10 +170,17 @@ class MangaScheduler:
                         if rel.series_name.lower() != canonical_series.lower():
                             alt_names.append(rel.series_name)
 
+                        # Extract sub-title candidates if dual-title (e.g. Romaji | English)
+                        dual_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+", rel.series_name) if p.strip()]
+                        if len(dual_parts) > 1:
+                            alt_names.extend(dual_parts)
+
                         # Match against Calibre
                         calibre_match = matcher.find_series(canonical_series, alt_names=alt_names)
                         if calibre_match and not english_title:
-                            canonical_series = calibre_match["series_name"]
+                            calibre_match_name = calibre_match.get("series_name") or calibre_match.get("name", "")
+                            if calibre_match_name:
+                                canonical_series = calibre_match_name
 
                     # SSRF safe sync cover caching
                     if cover_url:
@@ -356,6 +364,10 @@ class MangaScheduler:
                 alt_names.append(romaji)
             if rel.series_name.lower() != canonical_series.lower():
                 alt_names.append(rel.series_name)
+
+            dual_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+", rel.series_name) if p.strip()]
+            if len(dual_parts) > 1:
+                alt_names.extend(dual_parts)
 
             calibre_match = matcher.find_series(canonical_series, alt_names=alt_names)
             if calibre_match and not english_title:

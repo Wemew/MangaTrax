@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import json
 import time
@@ -1107,6 +1108,48 @@ class MangaDatabase:
                 if not calibre_match and meta_match.get("canonical_title"):
                     calibre_match = norm_tracked_map.get(normalize_text(meta_match["canonical_title"])) or tracked_map.get(meta_match["canonical_title"].lower())
 
+                # Check sub-parts if dual title separated by |, /, //, -, —, etc.
+                candidate_parts = []
+                if not calibre_match:
+                    parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+", s_name) if p.strip()]
+                    if len(parts) > 1:
+                        candidate_parts.extend(parts)
+
+                # Check parentheses e.g. "English Title (Romaji Title)"
+                if not calibre_match and "(" in s_name and ")" in s_name:
+                    m_paren = re.findall(r"\((.*?)\)", s_name)
+                    base_name = re.sub(r"\(.*?\)", "", s_name).strip()
+                    if base_name:
+                        candidate_parts.append(base_name)
+                    candidate_parts.extend([p.strip() for p in m_paren if p.strip()])
+
+                if not calibre_match and candidate_parts:
+                    for cand in candidate_parts:
+                        cand_norm = normalize_text(cand)
+                        if cand_norm in norm_tracked_map:
+                            calibre_match = norm_tracked_map[cand_norm]
+                            break
+                        if cand.lower() in tracked_map:
+                            calibre_match = tracked_map[cand.lower()]
+                            break
+                        cand_meta = norm_cache_map.get(cand_norm) or cache_map.get(cand.lower())
+                        if cand_meta:
+                            if not meta_match:
+                                meta_match = cand_meta
+                            if cand_meta.get("canonical_title"):
+                                cand_canon_norm = normalize_text(cand_meta["canonical_title"])
+                                if cand_canon_norm in norm_tracked_map:
+                                    calibre_match = norm_tracked_map[cand_canon_norm]
+                                    break
+
+                # Substring containment fallback against tracked series
+                if not calibre_match and len(s_norm) >= 4:
+                    for t_norm, t_row in norm_tracked_map.items():
+                        if len(t_norm) >= 4:
+                            if t_norm in s_norm or s_norm in t_norm:
+                                calibre_match = t_row
+                                break
+
                 canonical_title = (
                     meta_match.get("canonical_title")
                     or (calibre_match.get("name") if calibre_match else None)
@@ -1114,6 +1157,10 @@ class MangaDatabase:
                 )
                 canonical_key = normalize_text(canonical_title) or "uncategorized"
                 romaji_title = meta_match.get("romaji_title") or (s_name if s_name.lower() != canonical_title.lower() else "")
+                if not romaji_title and candidate_parts:
+                    other_parts = [p for p in candidate_parts if normalize_text(p) != normalize_text(canonical_title)]
+                    if other_parts:
+                        romaji_title = other_parts[0]
 
                 # Decorate release itself
                 rel["canonical_series_name"] = canonical_title
@@ -1189,6 +1236,14 @@ class MangaDatabase:
                 group["releases_count"] = len(group["releases"])
                 group["wanted_count"] = sum(1 for r in group["releases"] if r["status"] == "REQUESTED")
                 group["prioritized_count"] = sum(1 for r in group["releases"] if r.get("is_prioritized"))
+
+                # Fallback: if owned volumes exist in Calibre or release was marked IN_CALIBRE, ensure in_calibre is True
+                owned_count = len(set(group["all_volumes"]) - set(group["missing_volumes"]))
+                if not group["in_calibre"] and (group["has_in_calibre"] or owned_count > 0):
+                    group["in_calibre"] = True
+                    if not group.get("calibre_book_count"):
+                        group["calibre_book_count"] = owned_count
+
                 # Remove temporary sets before passing to Jinja templates
                 del group["all_volumes_set"]
                 del group["missing_volumes_set"]

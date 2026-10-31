@@ -278,6 +278,96 @@ def test_lazy_loading_template_partials():
 
     print(" [PASSED] Modular template chunks validated cleanly.")
 
+def test_dual_title_and_delimiter_calibre_matching():
+    import gc
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+        db = MangaDatabase(os.path.join(tmpdir, "test_dual.db"))
+        db.init_db()
+
+        # 1. Calibre has Japanese Romaji title with Volume 1 owned
+        db.sync_calibre_series([
+            {
+                "series_id": 101,
+                "series_name": "7 dai Tatarimasu node Hayaku Kekkon Shitekudasai!",
+                "authors": "Author",
+                "publisher": "Pub",
+                "book_count": 1,
+                "latest_index": 1.0,
+                "tags": "Manga",
+                "volume_numbers": [1.0]
+            }
+        ])
+
+        # Release in feed has concatenated Romaji | English title
+        db.upsert_release({
+            "guid": "nyaa-dual-title-1",
+            "title": "7 dai Tatarimasu node Hayaku Kekkon Shitekudasai! | Get Married So I Can Curse Your Firstborn and Finally Be Free! v01-02 [Group]",
+            "series_name": "7 dai Tatarimasu node Hayaku Kekkon Shitekudasai! | Get Married So I Can Curse Your Firstborn and Finally Be Free!",
+            "volumes": [1.0, 2.0],
+            "missing_volumes": [2.0],
+            "status": "REQUESTED",
+            "release_group": "Group"
+        })
+
+        groups = db.get_releases_grouped_by_series()
+        assert len(groups) == 1
+        g = groups[0]
+        assert g["in_calibre"] is True, f"Dual-title release should match Calibre, got in_calibre={g['in_calibre']}"
+        assert g["calibre_book_count"] == 1, f"Expected 1 book in Calibre, got {g['calibre_book_count']}"
+        assert g["all_volumes"] == [1.0, 2.0]
+        assert g["missing_volumes"] == [2.0]
+
+        # 2. Release with slash title
+        db.upsert_release({
+            "guid": "nyaa-dual-title-2",
+            "title": "Another Series / English Name v03 [Group]",
+            "series_name": "Another Series / English Name",
+            "volumes": [3.0],
+            "missing_volumes": [3.0],
+            "status": "REQUESTED",
+            "release_group": "Group"
+        })
+        db.sync_calibre_series([
+            {
+                "series_id": 102,
+                "series_name": "English Name",
+                "authors": "Author 2",
+                "publisher": "Pub 2",
+                "book_count": 2,
+                "latest_index": 2.0,
+                "tags": "Manga",
+                "volume_numbers": [1.0, 2.0]
+            }
+        ])
+
+        groups2 = db.get_releases_grouped_by_series()
+        g2 = next((x for x in groups2 if "English Name" in x["series_name"] or "Another Series" in x["series_name"]), None)
+        assert g2 is not None
+        assert g2["in_calibre"] is True
+        assert g2["calibre_book_count"] == 2
+
+        # 3. Fallback check: even if series name didn't match, if owned volumes exist
+        db.upsert_release({
+            "guid": "nyaa-fallback-1",
+            "title": "Unmatched Punctuation Title v01-02 [Group]",
+            "series_name": "Unmatched Punctuation Title",
+            "volumes": [1.0, 2.0],
+            "missing_volumes": [2.0],  # Volume 1 was identified as owned
+            "status": "REQUESTED",
+            "release_group": "Group"
+        })
+
+        groups3 = db.get_releases_grouped_by_series()
+        g3 = next((x for x in groups3 if "Unmatched Punctuation Title" in x["series_name"]), None)
+        assert g3 is not None
+        assert g3["in_calibre"] is True, "Fallback should mark in_calibre=True when owned volumes exist"
+        assert g3["calibre_book_count"] == 1
+
+        del db
+        gc.collect()
+
+    print(" [PASSED] Dual-title delimiter splitting, candidate matching, and in_calibre fallback verified.")
+
 if __name__ == "__main__":
     test_database_indexes()
     test_comicinfo_cache()
@@ -286,4 +376,5 @@ if __name__ == "__main__":
     test_templates_contain_lazy_loading_elements()
     test_lazy_loading_database_pagination_and_cache()
     test_lazy_loading_template_partials()
+    test_dual_title_and_delimiter_calibre_matching()
     print("\nALL PERFORMANCE AND LAZY LOADING TESTS PASSED!")

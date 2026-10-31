@@ -91,7 +91,17 @@ class AniListMetadataService:
         # 2. Query AniList
         metadata = self._fetch_from_anilist(cleaned_term)
 
-        # 3. If AniList didn't match with full string, try simplified primary title before delimiter
+        # 3. If AniList didn't match with full string, try candidate parts from delimiters (|, /, //, -, —)
+        if not metadata:
+            raw_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|:", raw_series_name) if p.strip()]
+            if len(raw_parts) > 1:
+                for p in raw_parts:
+                    p_clean = clean_query_term(p)
+                    if len(p_clean) >= 3 and p_clean.lower() != cleaned_term.lower():
+                        metadata = self._fetch_from_anilist(p_clean)
+                        if metadata:
+                            break
+
         if not metadata and ("-" in cleaned_term or ":" in cleaned_term):
             simplified = re.split(r"[-:]", cleaned_term)[0].strip()
             if len(simplified) >= 3 and simplified.lower() != cleaned_term.lower():
