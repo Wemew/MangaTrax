@@ -1131,6 +1131,82 @@ def test_webhook_notifications_service():
 
         print("    [PASSED] Webhook notifications for requests, acquisitions, and test diagnostics verified.")
 
+def test_selective_volume_download():
+    print("--> Testing Selective Volume Download for Bundle Torrents...")
+    from app.downloader.qbit import QBitClient
+
+    qbit = QBitClient(enabled=True)
+
+    # 1. Test hash extraction from magnet links (both 40-char hex and 32-char base32)
+    hex_magnet = "magnet:?xt=urn:btih:3b53f6396e952934cdcfd93ad987085c8e3efcfd&dn=Test"
+    h1 = qbit.extract_torrent_hash(hex_magnet)
+    assert h1 == "3b53f6396e952934cdcfd93ad987085c8e3efcfd"
+
+    b32_magnet = "magnet:?xt=urn:btih:4NRM4NZK5WUVL2XGXZZPXG6J2BTRUUBB&dn=Test"
+    h2 = qbit.extract_torrent_hash(b32_magnet)
+    assert h2 == "e362ce372aeda955eae6be72fb9bc9d0671a5021"
+
+    # 2. Test selective download on a multi-file bundle torrent (v01 through v05)
+    mock_files = [
+        {"index": 0, "name": "Chainsaw Man/Chainsaw Man v01 (Digital).cbz", "size": 1000, "priority": 1},
+        {"index": 1, "name": "Chainsaw Man/Chainsaw Man v02 (Digital).cbz", "size": 1000, "priority": 1},
+        {"index": 2, "name": "Chainsaw Man/Chainsaw Man v03 (Digital).cbz", "size": 1000, "priority": 1},
+        {"index": 3, "name": "Chainsaw Man/Chainsaw Man v04 (Digital).cbz", "size": 1000, "priority": 1},
+        {"index": 4, "name": "Chainsaw Man/Chainsaw Man v05 (Digital).cbz", "size": 1000, "priority": 1},
+        {"index": 5, "name": "Chainsaw Man/release_info.txt", "size": 50, "priority": 1}
+    ]
+
+    set_priority_calls = []
+
+    with mock.patch.object(qbit, "get_torrent_files", return_value=mock_files):
+        with mock.patch.object(qbit, "set_file_priorities", side_effect=lambda h, idxs, priority: set_priority_calls.append((h, idxs, priority)) or True):
+            # User already has Volumes 1 & 2 in Calibre; only wants 3, 4, 5
+            wanted_vols = [3.0, 4.0, 5.0]
+            res = qbit.apply_selective_volume_download(h1, wanted_vols)
+
+            assert res["status"] == "filtered"
+            assert res["skipped_volumes"] == [1.0, 2.0]
+            assert res["kept_volumes"] == [3.0, 4.0, 5.0]
+            assert res["skipped_files"] == 3  # Vol 1, Vol 2, and release_info.txt
+
+            # Verify set_file_priorities was invoked with priority=0 for unneeded files
+            assert len(set_priority_calls) == 1
+            call_hash, skipped_indices, prio = set_priority_calls[0]
+            assert call_hash == h1
+            assert set(skipped_indices) == {0, 1, 5}
+            assert prio == 0
+
+    # 3. Test single archive torrent (e.g. single 1GB .zip file)
+    single_archive_files = [
+        {"index": 0, "name": "Chainsaw_Man_Complete_v01-05.zip", "size": 5000000, "priority": 1}
+    ]
+    with mock.patch.object(qbit, "get_torrent_files", return_value=single_archive_files):
+        res_single = qbit.apply_selective_volume_download(h1, [3.0, 4.0, 5.0])
+        assert res_single["status"] == "single_archive"
+
+    print("    [PASSED] Selective bundle volume filtering, priority deselecting, and hash extraction verified.")
+
+def test_timezone_conversion_and_formatting():
+    print("--> Testing Timezone Conversion (Europe/Copenhagen Winter & Summer DST)...")
+    from app.timezone_util import format_localtime, format_localdate
+
+    # Database stores UTC timestamps like '2026-10-31 10:53:44'
+    # In winter time (CET, UTC+1), Copenhagen is 1 hour ahead of UTC:
+    winter_utc = "2026-10-31 10:53:44"
+    winter_local = format_localtime(winter_utc)
+    assert winter_local == "2026-10-31 11:53", f"Expected '2026-10-31 11:53', got '{winter_local}'"
+
+    # In summer time (CEST, UTC+2), Copenhagen is 2 hours ahead of UTC:
+    summer_utc = "2026-06-15 10:53:44"
+    summer_local = format_localtime(summer_utc)
+    assert summer_local == "2026-06-15 12:53", f"Expected '2026-06-15 12:53', got '{summer_local}'"
+
+    # Test format_localdate
+    date_formatted = format_localdate(winter_utc)
+    assert date_formatted == "2026-10-31"
+
+    print("    [PASSED] Timezone conversion and automatic daylight saving time handling verified 100%.")
+
 if __name__ == "__main__":
     print("==================================================")
     print("Running MangaTrax Comprehensive Integration Suite")
@@ -1149,6 +1225,8 @@ if __name__ == "__main__":
     test_light_novel_filtering()
     test_paginated_discovery_and_deduplication()
     test_webhook_notifications_service()
+    test_selective_volume_download()
+    test_timezone_conversion_and_formatting()
     print("==================================================")
     print("ALL TESTS PASSED SUCCESSFULLY! (100% VERIFIED)")
     print("==================================================")

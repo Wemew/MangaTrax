@@ -21,7 +21,7 @@ services:
       - DATA_DIR=/app/data
       - PUID=1000
       - PGID=1000
-      - TZ=UTC
+      - TZ=Europe/Copenhagen  # Set your local timezone (e.g. Europe/Copenhagen, America/New_York)
       # Note: BitTorrent downloader (qBittorrent, Flood, Torbox, etc.)
       # is configured 100% in-app via the MangaTrax Web UI (Settings & Downloads tab).
     volumes:

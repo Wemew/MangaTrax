@@ -194,7 +194,7 @@
                 <!-- Footer action -->
                 <div class="px-4 py-2.5 bg-slate-900/60 border-t border-slate-800/80 flex items-center justify-between text-xs">
                     <span class="text-slate-400 text-[11px]">
-                        {{ r.updated_at[:10] }}
+                        {{ r.updated_at|localdate }}
                     </span>
                     <div class="flex items-center gap-2">
                         <button onclick="downloadRelease({{ r.id }})" title="Send to downloader" class="px-2.5 py-1 rounded bg-brand-600 hover:bg-brand-500 text-white font-medium text-[11px] flex items-center gap-1 transition-colors">
@@ -242,7 +242,7 @@
                         {% endif %}
                     </div>
                 </div>
-                <span class="text-slate-500 shrink-0 text-[11px]">{{ log.created_at[:16] }}</span>
+                <span class="text-slate-500 shrink-0 text-[11px]">{{ log.created_at|localtime }}</span>
             </div>
             {% endfor %}
         </div>

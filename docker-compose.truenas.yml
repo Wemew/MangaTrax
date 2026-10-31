@@ -33,7 +33,7 @@ services:
       # TrueNAS SCALE unprivileged 'apps' user and group (568:568)
       - PUID=568
       - PGID=568
-      - TZ=Etc/UTC
+      - TZ=Europe/Copenhagen  # Set your local timezone (e.g. Europe/Copenhagen, America/New_York)
       # Note: BitTorrent downloader (qBittorrent, Flood, Torbox, etc.)
       # is configured 100% in-app via the MangaTrax Web UI (Settings & Downloads tab).
 

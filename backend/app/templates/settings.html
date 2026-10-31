@@ -159,6 +159,13 @@
                     <input type="number" step="0.5" id="setting-backfill-delay" value="{{ settings.backfill_delay_seconds or '2.0' }}" min="0.5" max="30" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-purple-500">
                     <p class="text-[11px] text-slate-500 mt-1">Delay between requests to prevent tracker rate-limits or IP bans.</p>
                 </div>
+                <div class="sm:col-span-2 pt-2 border-t border-slate-800">
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">
+                        Application Timezone (IANA)
+                    </label>
+                    <input type="text" id="setting-timezone" value="{{ settings.app_timezone or 'Europe/Copenhagen' }}" placeholder="Europe/Copenhagen" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-purple-500">
+                    <p class="text-[11px] text-slate-500 mt-1">E.g., <code>Europe/Copenhagen</code>, <code>Europe/London</code>, <code>America/New_York</code>, or <code>UTC</code>. MangaTrax automatically handles winter and summer daylight saving transitions for this zone.</p>
+                </div>
             </div>
         </div>
 
@@ -426,6 +433,7 @@ async function saveSettings(e) {
         feed_check_interval_minutes: document.getElementById('setting-feed-interval').value,
         backfill_max_pages: document.getElementById('setting-backfill-pages').value,
         backfill_delay_seconds: document.getElementById('setting-backfill-delay').value,
+        app_timezone: document.getElementById('setting-timezone').value.trim() || 'Europe/Copenhagen',
         discord_webhook_url: document.getElementById('setting-discord-url').value.trim(),
         apprise_url: document.getElementById('setting-apprise-url').value.trim()
     };

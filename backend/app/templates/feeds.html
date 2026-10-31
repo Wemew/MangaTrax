@@ -68,11 +68,11 @@
                         </td>
                         <td class="py-3 px-4 text-slate-400">
                             {% if f.last_status == 'OK' %}
-                            <span class="text-emerald-400 font-medium">{{ f.last_checked[:16] if f.last_checked else 'Never' }}</span>
+                            <span class="text-emerald-400 font-medium">{{ f.last_checked|localtime if f.last_checked else 'Never' }}</span>
                             {% elif f.last_status == 'ERROR' %}
                             <span class="text-rose-400 font-medium" title="{{ f.last_error }}">Error</span>
                             {% else %}
-                            <span>{{ f.last_checked[:16] if f.last_checked else 'Never' }}</span>
+                            <span>{{ f.last_checked|localtime if f.last_checked else 'Never' }}</span>
                             {% endif %}
                         </td>
                         <td class="py-3 px-4 text-right">

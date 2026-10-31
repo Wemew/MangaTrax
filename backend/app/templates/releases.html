@@ -249,7 +249,7 @@
                                 {% else %}
                                 <span>Feed: <strong class="text-slate-400">{{ r.source_feed_name or '-' }}</strong></span>
                                 {% endif %}
-                                <span>Added: {{ r.updated_at[:16] }}</span>
+                                <span>Added: {{ r.updated_at|localtime }}</span>
                             </div>
                         </div>
 
@@ -324,7 +324,7 @@
                             </div>
                             {% endif %}
                             <div class="text-[11px] text-slate-500 mt-0.5">
-                                {{ r.updated_at[:16] }}
+                                {{ r.updated_at|localtime }}
                             </div>
                         </td>
                         <td class="py-3 px-4 max-w-md">

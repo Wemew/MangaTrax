@@ -494,13 +494,14 @@ class MangaDatabase:
             conn.commit()
 
     def update_download_status(self, release_id: int, download_status: str, torrent_hash: Optional[str] = None):
+        clean_hash = str(torrent_hash).strip() if (isinstance(torrent_hash, str) and torrent_hash.strip()) else None
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
                 UPDATE releases 
                 SET download_status = ?, torrent_hash = COALESCE(?, torrent_hash), updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?;
-            """, (download_status, torrent_hash, release_id))
+            """, (download_status, clean_hash, release_id))
             conn.commit()
 
     def get_releases(self, status: Optional[str] = None, limit: int = 500) -> List[Dict[str, Any]]:

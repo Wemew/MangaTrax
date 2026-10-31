@@ -206,6 +206,146 @@ class QBitClient:
         }
         return self._post_data("/api/v2/torrents/delete", data)
 
+    @staticmethod
+    def extract_torrent_hash(url_or_magnet: str) -> Optional[str]:
+        """Extracts normalized 40-character hex hash from a magnet link or string."""
+        if not url_or_magnet:
+            return None
+        import re
+        m = re.search(r"urn:btih:([a-zA-Z0-9]{32,40})", url_or_magnet, re.IGNORECASE)
+        if m:
+            raw_hash = m.group(1).lower()
+            if len(raw_hash) == 32:
+                try:
+                    import base64
+                    raw_bytes = base64.b32decode(raw_hash.upper())
+                    return raw_bytes.hex().lower()
+                except Exception:
+                    return raw_hash
+            return raw_hash
+        return None
+
+    def get_torrent_files(self, torrent_hash: str) -> List[Dict[str, Any]]:
+        """Queries qBittorrent for the list of files in a specific torrent."""
+        if not self.enabled or not self._ensure_auth():
+            return []
+
+        url = f"{self.base_url}/api/v2/torrents/files?hash={urllib.parse.quote(torrent_hash)}"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "MangaTrax/1.0", "Accept": "application/json"}
+        )
+        try:
+            with self.opener.open(req, timeout=10.0) as resp:
+                if resp.status == 200:
+                    data = resp.read().decode("utf-8", errors="replace")
+                    return json.loads(data)
+                return []
+        except Exception as e:
+            logger.debug(f"Could not retrieve files for torrent {torrent_hash}: {e}")
+            return []
+
+    def set_file_priorities(self, torrent_hash: str, file_indices: List[int], priority: int = 0) -> bool:
+        """
+        Sets priority for a list of file indices in a torrent.
+        priority=0 sets 'Do not download' (deselects file in downloader).
+        """
+        if not self.enabled or not self._ensure_auth() or not file_indices:
+            return False
+
+        id_str = "|".join(str(i) for i in file_indices)
+        data = {
+            "hash": torrent_hash,
+            "id": id_str,
+            "priority": str(priority)
+        }
+        return self._post_data("/api/v2/torrents/filePrio", data)
+
+    def apply_selective_volume_download(
+        self,
+        torrent_hash: str,
+        wanted_volumes: List[float]
+    ) -> Dict[str, Any]:
+        """
+        Examines files in a multi-file torrent bundle and sets priority=0 (Do Not Download)
+        for any volumes that the user already owns (i.e. NOT in wanted_volumes).
+        """
+        if not self.enabled:
+            return {"status": "disabled", "message": "Downloader disabled"}
+
+        files = self.get_torrent_files(torrent_hash)
+        if not files:
+            # Metadata might still be downloading from DHT/trackers
+            return {"status": "pending_metadata", "message": "Metadata not loaded yet"}
+
+        # Check if the torrent contains individual volume files
+        archive_extensions = (".cbz", ".zip", ".cbr", ".rar", ".pdf", ".tar", ".7z")
+        manga_files = [
+            f for f in files 
+            if any(f.get("name", "").lower().endswith(ext) for ext in archive_extensions)
+        ]
+
+        # If only 1 archive file in torrent (e.g. single large zip archive), cannot split in BitTorrent
+        if len(manga_files) <= 1:
+            return {
+                "status": "single_archive",
+                "message": "Torrent contains a single archive; full archive will be downloaded and split in staging."
+            }
+
+        import re
+        vol_pattern = re.compile(
+            r'(?:^|[\s_\[\(-])(?:vol(?:ume)?|v)[.\s_-]*([0-9]+(?:\.[0-9]+)?)(?:[\s_\]\).-]|$)',
+            re.IGNORECASE
+        )
+
+        wanted_set = set(wanted_volumes)
+        skip_indices = []
+        keep_indices = []
+        skipped_vols = []
+        kept_vols = []
+
+        for idx, f in enumerate(files):
+            file_idx = f.get("index", idx)
+            fname = f.get("name", "")
+            match = vol_pattern.search(fname)
+            if match:
+                try:
+                    vol_num = float(match.group(1))
+                    if vol_num in wanted_set:
+                        keep_indices.append(file_idx)
+                        kept_vols.append(vol_num)
+                    else:
+                        skip_indices.append(file_idx)
+                        skipped_vols.append(vol_num)
+                except ValueError:
+                    keep_indices.append(file_idx)
+            else:
+                # Ancillary files (.txt, .nfo, .url, .html): skip them
+                if fname.lower().endswith((".txt", ".nfo", ".url", ".html", ".lnk")):
+                    skip_indices.append(file_idx)
+                else:
+                    keep_indices.append(file_idx)
+
+        if skip_indices:
+            self.set_file_priorities(torrent_hash, skip_indices, priority=0)
+            logger.info(
+                f"Selective download applied for {torrent_hash}: "
+                f"Skipped {len(skip_indices)} files (Vols: {skipped_vols}); "
+                f"Downloading {len(keep_indices)} files (Vols: {kept_vols})."
+            )
+            return {
+                "status": "filtered",
+                "skipped_files": len(skip_indices),
+                "skipped_volumes": skipped_vols,
+                "kept_files": len(keep_indices),
+                "kept_volumes": kept_vols
+            }
+        else:
+            return {
+                "status": "all_needed",
+                "message": "All files in bundle are needed; downloading all."
+            }
+
     def _post_hashes(self, path: str, torrent_hash: str) -> bool:
         return self._post_data(path, {"hashes": torrent_hash})
 

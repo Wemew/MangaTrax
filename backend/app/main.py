@@ -3,6 +3,7 @@ import json
 import math
 import logging
 from typing import Dict, Any, Optional
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Form, Query, HTTPException
@@ -69,6 +70,19 @@ async def add_security_headers(request: Request, call_next):
 
 # Setup Templates
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+
+from app.timezone_util import format_localtime, format_localdate
+
+def jinja_localtime(value: Optional[str], fmt: str = "%Y-%m-%d %H:%M") -> str:
+    user_tz = db.get_setting("app_timezone", "")
+    return format_localtime(value, fmt=fmt, custom_tz=user_tz)
+
+def jinja_localdate(value: Optional[str]) -> str:
+    user_tz = db.get_setting("app_timezone", "")
+    return format_localdate(value, custom_tz=user_tz)
+
+templates.env.filters["localtime"] = jinja_localtime
+templates.env.filters["localdate"] = jinja_localdate
 
 # --- HTML UI Routes ---
 
@@ -446,8 +460,20 @@ async def api_release_download(release_id: int):
     )
 
     if success:
-        db.update_download_status(release_id, "DOWNLOADING")
+        torrent_h = qbit.extract_torrent_hash(download_url)
+        db.update_download_status(release_id, "DOWNLOADING", torrent_h)
         db.log_activity("MANUAL_DOWNLOAD", f"Sent to downloader: '{target['title']}'", f"URL: {download_url[:60]}...")
+
+        missing = target.get("missing_volumes") or []
+        vols = target.get("volumes") or []
+        if torrent_h and target.get("is_bundle") and missing and len(missing) < len(vols):
+            sel_res = qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing])
+            if sel_res.get("status") == "filtered":
+                db.log_activity(
+                    "SELECTIVE_DOWNLOAD",
+                    f"Selective download applied for '{target['title']}': skipped {len(sel_res.get('skipped_volumes', []))} owned volumes; downloading {len(sel_res.get('kept_volumes', []))} missing volumes."
+                )
+
         return JSONResponse({"status": "success", "message": "Sent to downloader successfully"})
     else:
         return JSONResponse({"status": "error", "message": "Failed to add release to downloader"}, status_code=500)

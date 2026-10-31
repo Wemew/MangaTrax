@@ -246,12 +246,22 @@ class MangaScheduler:
                             )
                             if success:
                                 total_sent_to_downloader += 1
-                                self.db.update_download_status(rel_id, "DOWNLOADING")
+                                torrent_h = qbit.extract_torrent_hash(rel.download_url) if hasattr(qbit, "extract_torrent_hash") else None
+                                if not isinstance(torrent_h, str):
+                                    torrent_h = None
+                                self.db.update_download_status(rel_id, "DOWNLOADING", torrent_h)
                                 self.db.log_activity(
                                     "AUTO_DOWNLOAD",
                                     f"Sent to downloader: '{rel.title}' (Missing: {missing_vols})",
                                     f"Source: {feed_name}"
                                 )
+                                if torrent_h and rel.is_bundle and missing_vols and len(missing_vols) < len(rel.volumes):
+                                    sel_res = qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing_vols])
+                                    if sel_res.get("status") == "filtered":
+                                        self.db.log_activity(
+                                            "SELECTIVE_DOWNLOAD",
+                                            f"Selective download applied for '{rel.title}': skipped {len(sel_res.get('skipped_volumes', []))} owned volumes; downloading {len(sel_res.get('kept_volumes', []))} missing volumes."
+                                        )
 
                 self.db.update_feed_status(feed_id, "OK", None)
             except Exception as e:
@@ -465,7 +475,12 @@ class MangaScheduler:
                     )
                     if success:
                         total_sent_to_downloader += 1
-                        self.db.update_download_status(rel_id, "DOWNLOADING")
+                        torrent_h = qbit.extract_torrent_hash(rel.download_url) if hasattr(qbit, "extract_torrent_hash") else None
+                        if not isinstance(torrent_h, str):
+                            torrent_h = None
+                        self.db.update_download_status(rel_id, "DOWNLOADING", torrent_h)
+                        if torrent_h and rel.is_bundle and missing_vols and len(missing_vols) < len(rel.volumes):
+                            qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing_vols])
 
         summary = f"Backfilled '{english_name}': found {total_found} releases ({total_requested} wanted/missing volumes, {total_sent_to_downloader} sent to downloader)."
         self.db.log_activity("SERIES_BACKFILLED", summary)
@@ -579,12 +594,76 @@ class MangaScheduler:
         finally:
             self.is_backfilling = False
 
+    def check_and_filter_active_downloads(self) -> int:
+        """
+        Scans active DOWNLOADING releases that are bundles with missing_volumes.
+        If qBittorrent has resolved the metadata, adjusts file priorities so that
+        only the missing volumes are downloaded, saving bandwidth and disk space.
+        """
+        qbit = self.get_qbit_client()
+        if not qbit.enabled:
+            return 0
+
+        with self.db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id, title, series_name, torrent_hash, download_url, volumes, missing_volumes, is_bundle
+                FROM releases
+                WHERE download_status = 'DOWNLOADING' AND is_bundle = 1;
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+
+        filtered_count = 0
+        for r in rows:
+            h = r.get("torrent_hash")
+            if not h and r.get("download_url"):
+                h = qbit.extract_torrent_hash(r["download_url"])
+                if h:
+                    self.db.update_download_status(r["id"], "DOWNLOADING", h)
+
+            if not h:
+                continue
+
+            missing = r.get("missing_volumes")
+            if isinstance(missing, str):
+                import json
+                try:
+                    missing = json.loads(missing)
+                except Exception:
+                    missing = []
+            if not missing or not isinstance(missing, list):
+                continue
+
+            vols = r.get("volumes")
+            if isinstance(vols, str):
+                import json
+                try:
+                    vols = json.loads(vols)
+                except Exception:
+                    vols = []
+
+            # Only need filtering if we already own some volumes in this bundle
+            if vols and len(missing) >= len(vols):
+                continue
+
+            res = qbit.apply_selective_volume_download(h, [float(v) for v in missing])
+            if res.get("status") == "filtered":
+                filtered_count += 1
+                skipped_vols = res.get("skipped_volumes", [])
+                self.db.log_activity(
+                    "SELECTIVE_DOWNLOAD",
+                    f"Optimized torrent for '{r['title']}': downloading {len(res.get('kept_volumes', []))} missing volumes; skipped {len(skipped_vols)} volumes already in Calibre ({skipped_vols}).",
+                    f"Torrent Hash: {h[:10]}..."
+                )
+        return filtered_count
+
     # --- Background Loop ---
     def _worker_loop(self):
         logger.info("MangaTrax background worker loop started.")
         last_calibre_sync = 0
         last_feed_check = 0
         last_tag_check = 0
+        last_dl_check = 0
 
         while self.running:
             now = time.time()
@@ -608,6 +687,11 @@ class MangaScheduler:
                 if auto_tag_enabled and (now - last_tag_check >= 300):
                     self.tag_staging_files()
                     last_tag_check = time.time()
+
+                # Check and optimize bundle downloads every 30 seconds
+                if now - last_dl_check >= 30:
+                    self.check_and_filter_active_downloads()
+                    last_dl_check = time.time()
 
             except Exception as e:
                 logger.error(f"Error in background worker loop: {e}")

@@ -39,7 +39,7 @@
                         {% endif %}
                     </div>
                 </div>
-                <span class="text-slate-500 shrink-0 font-mono text-[11px]">{{ log.created_at[:19] }}</span>
+                <span class="text-slate-500 shrink-0 font-mono text-[11px]">{{ log.created_at|localtime("%Y-%m-%d %H:%M:%S") }}</span>
             </div>
             {% else %}
             <div class="p-12 text-center text-slate-500 text-xs">

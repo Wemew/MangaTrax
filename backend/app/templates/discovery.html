@@ -321,7 +321,7 @@
                                 {{ b.reason or 'Manually Blacklisted' }}
                             </td>
                             <td class="py-3.5 px-4 text-slate-500 font-mono text-[11px]">
-                                {{ b.created_at[:10] if b.created_at else 'Recent' }}
+                                {{ b.created_at|localdate if b.created_at else 'Recent' }}
                             </td>
                             <td class="py-3.5 px-6 text-right">
                                 <button data-blacklist-id="{{ b.id }}" data-series-name="{{ b.name }}" onclick="handleUnblockBtn(this)" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-brand-500/20 text-slate-300 hover:text-brand-300 border border-slate-700 hover:border-brand-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors ml-auto" title="Restore and allow tracking">
