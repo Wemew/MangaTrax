@@ -1,0 +1,230 @@
+{% extends "base.html" %}
+
+{% block title %}Feeds & Scrapers{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+    <!-- Header & Add Button -->
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+                <i data-lucide="rss" class="w-6 h-6 text-brand-400"></i>
+                Manga Feeds & Scrapers
+            </h1>
+            <p class="text-xs text-slate-400 mt-1">
+                Configure RSS/Atom feeds, torrent trackers, or custom HTML web scrapers.
+            </p>
+        </div>
+
+        <div class="flex items-center gap-3">
+            <button onclick="openAddFeedModal()" class="px-3.5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold flex items-center gap-2 transition-all shadow-md shadow-brand-600/20 active:scale-95">
+                <i data-lucide="plus" class="w-4 h-4"></i>
+                Add Feed
+            </button>
+        </div>
+    </div>
+
+    <!-- Feeds Table -->
+    <div class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-xs">
+                <thead>
+                    <tr class="bg-slate-900 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
+                        <th class="py-3 px-4">Feed Name</th>
+                        <th class="py-3 px-4">Type</th>
+                        <th class="py-3 px-4">URL</th>
+                        <th class="py-3 px-4">Auto-Download</th>
+                        <th class="py-3 px-4">Interval</th>
+                        <th class="py-3 px-4">Last Check</th>
+                        <th class="py-3 px-4 text-right">Actions</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/60">
+                    {% for f in feeds %}
+                    <tr class="hover:bg-slate-850/50 transition-colors">
+                        <td class="py-3 px-4 font-bold text-white">
+                            {{ f.name }}
+                        </td>
+                        <td class="py-3 px-4">
+                            <span class="px-2 py-0.5 rounded-md font-semibold text-[10px] uppercase {% if f.feed_type == 'rss' %}bg-brand-500/10 text-brand-400 border border-brand-500/20{% else %}bg-purple-500/10 text-purple-400 border border-purple-500/20{% endif %}">
+                                {{ f.feed_type }}
+                            </span>
+                        </td>
+                        <td class="py-3 px-4 max-w-xs truncate text-slate-400 font-mono" title="{{ f.url }}">
+                            {{ f.url }}
+                        </td>
+                        <td class="py-3 px-4">
+                            {% if f.auto_download %}
+                            <span class="text-emerald-400 font-semibold flex items-center gap-1">
+                                <i data-lucide="check" class="w-3.5 h-3.5"></i> Enabled
+                            </span>
+                            {% else %}
+                            <span class="text-slate-500">Disabled</span>
+                            {% endif %}
+                        </td>
+                        <td class="py-3 px-4 text-slate-300">
+                            {{ f.check_interval_minutes }}m
+                        </td>
+                        <td class="py-3 px-4 text-slate-400">
+                            {% if f.last_status == 'OK' %}
+                            <span class="text-emerald-400 font-medium">{{ f.last_checked[:16] if f.last_checked else 'Never' }}</span>
+                            {% elif f.last_status == 'ERROR' %}
+                            <span class="text-rose-400 font-medium" title="{{ f.last_error }}">Error</span>
+                            {% else %}
+                            <span>{{ f.last_checked[:16] if f.last_checked else 'Never' }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="py-3 px-4 text-right">
+                            <div class="flex items-center justify-end gap-1.5">
+                                <button onclick="deleteFeed({{ f.id }})" title="Delete feed" class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 border border-slate-700 transition-colors">
+                                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="7" class="py-10 text-center text-slate-500">
+                            No feeds configured. Click "Add Feed" above.
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+</div>
+
+<!-- Modal: Add Feed -->
+<div id="modal-add-feed" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-darkcard border border-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+        <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <i data-lucide="plus-circle" class="w-4 h-4 text-brand-400"></i>
+            Add New Manga Feed
+        </h3>
+
+        <form onsubmit="submitAddFeed(event)" class="space-y-3">
+            <div>
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">Feed Name</label>
+                <input type="text" id="feed-name" required placeholder="e.g. Manga Releases RSS" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+                <div>
+                    <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">Feed Type</label>
+                    <select id="feed-type" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                        <option value="rss">RSS / Atom Feed</option>
+                        <option value="html">HTML Web Scraper</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">Check Interval (Minutes)</label>
+                    <input type="number" id="feed-interval" value="60" min="5" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500">
+                </div>
+            </div>
+
+            <div>
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">Feed or Scraper URL</label>
+                <input type="url" id="feed-url" required placeholder="https://..." class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500 font-mono">
+            </div>
+
+            <div class="flex items-center gap-2 pt-1">
+                <input type="checkbox" id="feed-autodownload" checked class="rounded border-slate-700 bg-slate-900 text-brand-500 focus:ring-0">
+                <label for="feed-autodownload" class="text-xs text-slate-300">Automatically push wanted releases to qBittorrent</label>
+            </div>
+
+            <div class="flex items-center justify-between pt-4 border-t border-slate-800">
+                <button type="button" onclick="testFeedLive()" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                    <i data-lucide="play" class="w-3.5 h-3.5 text-brand-400"></i>
+                    Test Feed Live
+                </button>
+                <div class="flex items-center gap-2">
+                    <button type="button" onclick="closeAddFeedModal()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors">Cancel</button>
+                    <button type="submit" class="px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold transition-colors">Save Feed</button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+function openAddFeedModal() {
+    document.getElementById('modal-add-feed').classList.remove('hidden');
+}
+
+function closeAddFeedModal() {
+    document.getElementById('modal-add-feed').classList.add('hidden');
+}
+
+async function testFeedLive() {
+    const url = document.getElementById('feed-url').value.trim();
+    const feedType = document.getElementById('feed-type').value;
+    if (!url) {
+        showToast('Please enter a URL first', 'error');
+        return;
+    }
+    showToast('Testing feed...', 'info');
+
+    try {
+        const res = await fetch('/api/feeds/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url, feed_type: feedType })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast(`Success! Found ${data.count} items.`, 'success');
+        } else {
+            showToast(data.message || 'Feed test failed', 'error');
+        }
+    } catch (err) {
+        showToast('Test error: ' + err, 'error');
+    }
+}
+
+async function submitAddFeed(e) {
+    e.preventDefault();
+    const payload = {
+        name: document.getElementById('feed-name').value.trim(),
+        feed_type: document.getElementById('feed-type').value,
+        url: document.getElementById('feed-url').value.trim(),
+        interval: parseInt(document.getElementById('feed-interval').value) || 60,
+        auto_download: document.getElementById('feed-autodownload').checked
+    };
+
+    try {
+        const res = await fetch('/api/feeds', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast('Feed added successfully!', 'success');
+            closeAddFeedModal();
+            setTimeout(() => location.reload(), 800);
+        } else {
+            showToast(data.message || 'Failed to add feed', 'error');
+        }
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+
+async function deleteFeed(feedId) {
+    if (!confirm('Are you sure you want to delete this feed?')) return;
+    try {
+        const res = await fetch(`/api/feeds/${feedId}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast('Feed deleted', 'success');
+            setTimeout(() => location.reload(), 800);
+        }
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+</script>
+{% endblock %}

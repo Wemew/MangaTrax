@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+
+{% block title %}Manga Series{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+    <!-- Header & Search -->
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+                <i data-lucide="library" class="w-6 h-6 text-brand-400"></i>
+                Tracked Manga Series
+            </h1>
+            <p class="text-xs text-slate-400 mt-1">
+                Synced from Calibre. MangaTrax inherits author, publisher, and genre metadata from here to automatically tag new CBZ releases.
+            </p>
+        </div>
+
+        <div class="flex items-center gap-3">
+            <div class="relative w-full sm:w-64">
+                <i data-lucide="search" class="w-4 h-4 text-slate-500 absolute left-3 top-2.5"></i>
+                <input type="text" id="series-search" oninput="filterSeries()" placeholder="Search manga series..." class="w-full bg-darkcard border border-slate-700/80 rounded-xl pl-9 pr-4 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 transition-colors">
+            </div>
+        </div>
+    </div>
+
+    <!-- Series Table -->
+    <div class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-xs">
+                <thead>
+                    <tr class="bg-slate-900/80 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
+                        <th class="py-3.5 px-4 w-12 text-center">Status</th>
+                        <th class="py-3.5 px-4">Series Name</th>
+                        <th class="py-3.5 px-4">Author(s)</th>
+                        <th class="py-3.5 px-4 text-center">Owned</th>
+                        <th class="py-3.5 px-4 text-center">Latest Vol</th>
+                        <th class="py-3.5 px-4">Tags / Genres</th>
+                        <th class="py-3.5 px-4 text-right">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="series-table-body" class="divide-y divide-slate-800/60">
+                    {% for s in series_list %}
+                    <tr class="hover:bg-slate-850/50 transition-colors series-row" data-name="{{ s.name|lower }}">
+                        <td class="py-3 px-4 text-center">
+                            <button onclick="toggleMonitored({{ s.id }})" title="Click to toggle monitoring" class="w-7 h-7 rounded-lg inline-flex items-center justify-center transition-all {% if s.is_monitored %}bg-brand-500/10 text-brand-400 border border-brand-500/20 hover:bg-brand-500/20{% else %}bg-slate-800 text-slate-500 border border-slate-700 hover:bg-slate-700{% endif %}">
+                                <i data-lucide="{% if s.is_monitored %}check{% else %}x{% endif %}" class="w-3.5 h-3.5"></i>
+                            </button>
+                        </td>
+                        <td class="py-3 px-4">
+                            <div class="flex items-center gap-3">
+                                {% if s.cover_url %}
+                                <img src="/api/covers?url={{ s.cover_url|urlencode }}" alt="Cover" class="w-8 h-12 object-cover rounded shadow border border-slate-700/60 shrink-0" loading="lazy">
+                                {% endif %}
+                                <div class="min-w-0">
+                                    <div class="font-bold text-slate-100 text-sm flex items-center gap-1.5">
+                                        {{ s.name }}
+                                        {% if s.website_url %}
+                                        <a href="{{ s.website_url }}" target="_blank" rel="noopener noreferrer" title="Open series webpage" class="text-slate-500 hover:text-brand-400 transition-colors inline-flex">
+                                            <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
+                                        </a>
+                                        {% endif %}
+                                    </div>
+                                    {% if s.publisher %}
+                                    <div class="text-[11px] text-slate-400">Publisher: {{ s.publisher }}</div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </td>
+                        <td class="py-3 px-4 text-slate-300">
+                            {{ s.authors or 'Unknown' }}
+                        </td>
+                        <td class="py-3 px-4 text-center font-bold text-slate-200">
+                            {{ s.book_count }}
+                        </td>
+                        <td class="py-3 px-4 text-center font-semibold text-brand-400">
+                            Vol. {{ s.latest_index|int if s.latest_index == s.latest_index|int else s.latest_index }}
+                        </td>
+                        <td class="py-3 px-4 max-w-xs truncate text-slate-400">
+                            {{ s.tags or '-' }}
+                        </td>
+                        <td class="py-3 px-4 text-right">
+                            <div class="flex items-center justify-end gap-2">
+                                <button onclick="editSeriesLink({{ s.id }}, '{{ s.website_url|escape }}', '{{ s.name|escape }}')" title="Edit website link" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs flex items-center gap-1 transition-colors">
+                                    <i data-lucide="link" class="w-3.5 h-3.5"></i>
+                                </button>
+                                <button onclick="blacklistSeries('{{ s.name|escape }}')" title="Blacklist series" class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 border border-slate-700 text-xs flex items-center gap-1 transition-colors">
+                                    <i data-lucide="ban" class="w-3.5 h-3.5"></i>
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+</div>
+
+<!-- Modal: Edit Series Website Link -->
+<div id="modal-link" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-darkcard border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+        <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <i data-lucide="link" class="w-4 h-4 text-brand-400"></i>
+            Edit Series Webpage Link
+        </h3>
+        <p id="modal-series-name" class="text-xs text-slate-400"></p>
+        <div>
+            <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">Web URL (MangaUpdates, AniList, etc.)</label>
+            <input type="url" id="modal-link-input" placeholder="https://..." class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-brand-500">
+        </div>
+        <div class="flex items-center justify-end gap-2.5 pt-2">
+            <button onclick="closeModalLink()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors">Cancel</button>
+            <button onclick="saveSeriesLink()" class="px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-medium transition-colors">Save Link</button>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentEditingSeriesId = null;
+
+function filterSeries() {
+    const q = document.getElementById('series-search').value.toLowerCase().trim();
+    const rows = document.querySelectorAll('.series-row');
+    rows.forEach(r => {
+        const name = r.getAttribute('data-name');
+        r.style.display = name.includes(q) ? '' : 'none';
+    });
+}
+
+async function toggleMonitored(seriesId) {
+    try {
+        const res = await fetch(`/api/series/${seriesId}/toggle`, { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast('Monitoring status updated', 'success');
+            setTimeout(() => location.reload(), 800);
+        }
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+
+function editSeriesLink(id, url, name) {
+    currentEditingSeriesId = id;
+    document.getElementById('modal-series-name').innerText = name;
+    document.getElementById('modal-link-input').value = url || '';
+    document.getElementById('modal-link').classList.remove('hidden');
+}
+
+function closeModalLink() {
+    document.getElementById('modal-link').classList.add('hidden');
+    currentEditingSeriesId = null;
+}
+
+async function saveSeriesLink() {
+    if (!currentEditingSeriesId) return;
+    const url = document.getElementById('modal-link-input').value.trim();
+    try {
+        const res = await fetch(`/api/series/${currentEditingSeriesId}/link`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ website_url: url })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast('Series link saved', 'success');
+            closeModalLink();
+            setTimeout(() => location.reload(), 800);
+        }
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+
+async function blacklistSeries(name) {
+    if (!confirm(`Are you sure you want to blacklist "${name}"? Future releases will be ignored.`)) return;
+    try {
+        const res = await fetch('/api/blacklist', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name, reason: 'Blacklisted from Series panel' })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast(`Blacklisted ${name}`, 'success');
+            setTimeout(() => location.reload(), 1000);
+        }
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+</script>
+{% endblock %}

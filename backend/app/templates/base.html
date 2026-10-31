@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}MangaTrax{% endblock %} - Manga Release Monitor & Downloader</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#fff1f2',
+                            100: '#ffe4e6',
+                            500: '#f43f5e',
+                            600: '#e11d48',
+                            700: '#be123c',
+                            900: '#881337',
+                        },
+                        darkbg: '#0b0f19',
+                        darkcard: '#161e2e',
+                        darkborder: '#273549'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        [x-cloak] { display: none !important; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #0b0f19; }
+        ::-webkit-scrollbar-thumb { background: #273549; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #3e4f68; }
+    </style>
+</head>
+<body class="bg-[#0b0f19] text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-brand-500 selection:text-white">
+
+    <!-- Top Navigation Bar -->
+    <header class="bg-[#111827]/90 backdrop-blur-md border-b border-slate-800 sticky top-0 z-40">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <!-- Brand Logo & Name -->
+                <div class="flex items-center space-x-3">
+                    <a href="/" class="flex items-center space-x-2.5 group">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-brand-600 to-rose-400 flex items-center justify-center shadow-lg shadow-brand-500/20 group-hover:scale-105 transition-transform">
+                            <i data-lucide="layers" class="w-5 h-5 text-white"></i>
+                        </div>
+                        <div>
+                            <span class="text-xl font-bold tracking-tight text-white flex items-center gap-1.5">
+                                MangaTrax
+                                <span class="text-xs px-2 py-0.5 rounded-full bg-brand-500/10 text-brand-400 border border-brand-500/20 font-medium">Bundles & qBit</span>
+                            </span>
+                            <p class="text-[10px] text-slate-400 tracking-wider uppercase font-semibold">Calibre & BookOrbit Monitor</p>
+                        </div>
+                    </a>
+                </div>
+
+                <!-- Main Navigation Links -->
+                <nav class="hidden md:flex space-x-1 lg:space-x-1.5">
+                    <a href="/" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'dashboard' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
+                        <i data-lucide="layout-dashboard" class="w-4 h-4"></i>
+                        Overview
+                    </a>
+                    <a href="/series" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'series' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
+                        <i data-lucide="library" class="w-4 h-4"></i>
+                        Series
+                    </a>
+                    <a href="/discovery" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'discovery' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
+                        <i data-lucide="compass" class="w-4 h-4 text-amber-400"></i>
+                        Discovery
+                    </a>
+                    <a href="/releases" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'releases' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
+                        <i data-lucide="sparkles" class="w-4 h-4"></i>
+                        Releases
+                    </a>
+                    <a href="/downloads" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'downloads' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
+                        <i data-lucide="download-cloud" class="w-4 h-4 text-cyan-400"></i>
+                        Downloads
+                    </a>
+                    <a href="/feeds" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'feeds' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
+                        <i data-lucide="rss" class="w-4 h-4"></i>
+                        Feeds
+                    </a>
+                    <a href="/logs" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'logs' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
+                        <i data-lucide="scroll-text" class="w-4 h-4"></i>
+                        Logs
+                    </a>
+                    <a href="/settings" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'settings' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
+                        <i data-lucide="settings" class="w-4 h-4"></i>
+                        Settings
+                    </a>
+                </nav>
+
+                <!-- Quick Action Buttons -->
+                <div class="flex items-center space-x-2">
+                    <button onclick="triggerCalibreSync()" id="btn-sync-calibre" title="Scan Calibre library for manga series & owned volumes" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm active:scale-95">
+                        <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-brand-400" id="icon-calibre-sync"></i>
+                        <span class="hidden lg:inline">Sync Calibre</span>
+                    </button>
+                    <button onclick="triggerFeedCheck()" id="btn-check-feeds" title="Check feeds for new manga releases & bundles" class="px-2.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm shadow-brand-600/30 active:scale-95">
+                        <i data-lucide="radio" class="w-3.5 h-3.5" id="icon-feed-check"></i>
+                        <span class="hidden sm:inline">Poll Feeds</span>
+                    </button>
+                    <button onclick="triggerStagingTag()" id="btn-tag-staging" title="Tag completed .cbz files in staging with inherited Calibre metadata" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-300 text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm active:scale-95">
+                        <i data-lucide="tag" class="w-3.5 h-3.5" id="icon-staging-tag"></i>
+                        <span class="hidden lg:inline">Tag CBZ</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Notification Toast Container -->
+    <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none"></div>
+
+    <!-- Main Content Body -->
+    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    <footer class="border-t border-slate-800/80 bg-[#0d131f] py-6 mt-auto">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-4">
+            <div class="flex items-center space-x-2">
+                <span class="w-2 h-2 rounded-full bg-brand-500 animate-pulse"></span>
+                <span class="font-medium text-slate-400">MangaTrax v1.0.0</span>
+                <span>&bull;</span>
+                <span>Zero-Lock Calibre & BookOrbit Integration</span>
+            </div>
+            <div class="flex items-center space-x-4">
+                <a href="https://github.com/Wemew/MangaTrax" target="_blank" class="hover:text-slate-300 transition-colors flex items-center gap-1">
+                    <i data-lucide="github" class="w-3.5 h-3.5"></i>
+                    GitHub
+                </a>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Global Scripts & Lucide Init -->
+    <script>
+        lucide.createIcons();
+
+        function showToast(message, type = 'success') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `pointer-events-auto flex items-center gap-2.5 px-4 py-3 rounded-xl shadow-xl text-sm font-medium transition-all transform duration-300 translate-y-2 opacity-0 ${
+                type === 'success' ? 'bg-slate-800 border border-brand-500/30 text-brand-300' :
+                type === 'error' ? 'bg-slate-800 border border-rose-500/30 text-rose-300' :
+                'bg-slate-800 border border-slate-700 text-slate-200'
+            }`;
+
+            const iconName = type === 'success' ? 'check-circle' : type === 'error' ? 'alert-triangle' : 'info';
+            toast.innerHTML = `<i data-lucide="${iconName}" class="w-4 h-4 shrink-0"></i><span>${message}</span>`;
+            container.appendChild(toast);
+            lucide.createIcons();
+
+            setTimeout(() => {
+                toast.classList.remove('translate-y-2', 'opacity-0');
+            }, 10);
+
+            setTimeout(() => {
+                toast.classList.add('opacity-0', 'translate-y-2');
+                setTimeout(() => toast.remove(), 300);
+            }, 4000);
+        }
+
+        async function triggerCalibreSync() {
+            const btn = document.getElementById('btn-sync-calibre');
+            const icon = document.getElementById('icon-calibre-sync');
+            icon.classList.add('animate-spin');
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/api/calibre/sync', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(data.message, 'success');
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    showToast(data.message || 'Sync failed', 'error');
+                }
+            } catch (err) {
+                showToast('Failed to trigger Calibre scan: ' + err, 'error');
+            } finally {
+                icon.classList.remove('animate-spin');
+                btn.disabled = false;
+            }
+        }
+
+        async function triggerFeedCheck() {
+            const btn = document.getElementById('btn-check-feeds');
+            const icon = document.getElementById('icon-feed-check');
+            icon.classList.add('animate-spin');
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/api/feeds/check', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(data.message, 'success');
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    showToast(data.message || 'Feed check failed', 'error');
+                }
+            } catch (err) {
+                showToast('Failed to trigger feed check: ' + err, 'error');
+            } finally {
+                icon.classList.remove('animate-spin');
+                btn.disabled = false;
+            }
+        }
+
+        async function triggerStagingTag() {
+            const btn = document.getElementById('btn-tag-staging');
+            const icon = document.getElementById('icon-staging-tag');
+            icon.classList.add('animate-spin');
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/api/staging/tag', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    showToast(data.message, 'success');
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    showToast(data.message || 'Tagging failed', 'error');
+                }
+            } catch (err) {
+                showToast('Failed to trigger staging tag: ' + err, 'error');
+            } finally {
+                icon.classList.remove('animate-spin');
+                btn.disabled = false;
+            }
+        }
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block title %}Activity Logs{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+    <!-- Header & Filter -->
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+                <i data-lucide="scroll-text" class="w-6 h-6 text-brand-400"></i>
+                Activity & Tagging Logs
+            </h1>
+            <p class="text-xs text-slate-400 mt-1">
+                Real-time audit log of Calibre synchronization, bundle matching, downloader events, and ComicInfo.xml injections.
+            </p>
+        </div>
+
+        <div class="relative w-full sm:w-64">
+            <i data-lucide="search" class="w-4 h-4 text-slate-500 absolute left-3 top-2.5"></i>
+            <input type="text" id="log-search" oninput="filterLogs()" placeholder="Search logs..." class="w-full bg-darkcard border border-slate-700/80 rounded-xl pl-9 pr-4 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-brand-500">
+        </div>
+    </div>
+
+    <!-- Logs List Container -->
+    <div class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+        <div class="divide-y divide-slate-800/60" id="logs-container">
+            {% for log in logs %}
+            <div class="p-4 flex items-start justify-between gap-4 text-xs log-item" data-text="{{ log.message|lower }} {{ (log.details or '')|lower }} {{ log.event_type|lower }}">
+                <div class="flex items-start gap-3">
+                    <span class="px-2 py-0.5 rounded-full font-semibold text-[10px] mt-0.5 shrink-0 {% if 'ERROR' in log.event_type %}bg-rose-500/10 text-rose-400 border border-rose-500/20{% elif 'AUTO_TAG' in log.event_type %}bg-cyan-500/10 text-cyan-400 border border-cyan-500/20{% elif 'DOWNLOAD' in log.event_type %}bg-emerald-500/10 text-emerald-400 border border-emerald-500/20{% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
+                        {{ log.event_type }}
+                    </span>
+                    <div class="space-y-0.5">
+                        <p class="text-slate-100 font-medium">{{ log.message }}</p>
+                        {% if log.details %}
+                        <p class="text-slate-500 font-mono text-[11px]">{{ log.details }}</p>
+                        {% endif %}
+                    </div>
+                </div>
+                <span class="text-slate-500 shrink-0 font-mono text-[11px]">{{ log.created_at[:19] }}</span>
+            </div>
+            {% else %}
+            <div class="p-12 text-center text-slate-500 text-xs">
+                No logs recorded yet.
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+</div>
+
+<script>
+function filterLogs() {
+    const q = document.getElementById('log-search').value.toLowerCase().trim();
+    const items = document.querySelectorAll('.log-item');
+    items.forEach(el => {
+        const text = el.getAttribute('data-text');
+        el.style.display = text.includes(q) ? '' : 'none';
+    });
+}
+</script>
+{% endblock %}

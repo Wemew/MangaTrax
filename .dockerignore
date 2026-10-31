@@ -1,0 +1,16 @@
+.git/
+.gitignore
+.dockerignore
+data/
+covers/
+staging/
+test_run_data/
+tests/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.idea/
+.vscode/
+README.md
