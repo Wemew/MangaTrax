@@ -250,10 +250,93 @@ def test_pending_requests_and_bundle_download_filter():
 
     print(" [PASSED] get_pending_requests(limit) and bundle download filter query verified.")
 
+def test_calibre_volume_bundle_edgecase_handling():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        calibre_dir = os.path.join(tmpdir, "calibre")
+        os.makedirs(calibre_dir, exist_ok=True)
+        db_path = os.path.join(calibre_dir, "metadata.db")
+
+        # Create Calibre metadata.db
+        from mock_calibre_manga import create_mock_calibre_manga_db
+        create_mock_calibre_manga_db(db_path)
+
+        # Insert edgecase volume bundle: Aharen-san is Indecipherable v01-02
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("INSERT INTO series (name) VALUES ('Aharen-san is Indecipherable');")
+        s_id = cur.lastrowid
+        # In Calibre, series_index is single float 1.0 even for v01-02!
+        cur.execute("INSERT INTO books (title, series_index) VALUES ('Aharen-san is Indecipherable v01-02', 1.0);")
+        b_id = cur.lastrowid
+        cur.execute("INSERT INTO books_series_link (book, series) VALUES (?, ?);", (b_id, s_id))
+        conn.commit()
+        conn.close()
+
+        from app.calibre.scanner import CalibreMangaScanner
+        from app.calibre.matcher import MangaCalibreMatcher
+
+        scanner = CalibreMangaScanner(calibre_dir)
+        assert scanner.is_available()
+
+        # 1. Verify get_series_volumes_map resolves BOTH 1.0 and 2.0
+        vols_map = scanner.get_series_volumes_map()
+        aharen_vols = vols_map.get("aharen-san is indecipherable")
+        assert aharen_vols is not None, "Series 'Aharen-san is Indecipherable' not found in volumes map!"
+        assert 1.0 in aharen_vols, "Volume 1.0 missing from owned volumes!"
+        assert 2.0 in aharen_vols, "Volume 2.0 missing from bundle in owned volumes!"
+
+        # 2. Verify get_all_series reports latest_index = 2.0 (not 1.0)
+        all_series = scanner.get_all_series()
+        aharen_series = next((s for s in all_series if s["series_name"] == "Aharen-san is Indecipherable"), None)
+        assert aharen_series is not None
+        assert aharen_series["latest_index"] == 2.0, f"Expected latest_index 2.0, got {aharen_series['latest_index']}"
+
+        # 3. Verify matcher checks
+        matcher = MangaCalibreMatcher(all_series, vols_map)
+
+        # Release for v01-02 should be IN_CALIBRE (0 missing)
+        rel_bundle = {
+            "title": "Aharen-san is Indecipherable v01-02 [Seven Seas]",
+            "series_name": "Aharen-san is Indecipherable",
+            "is_bundle": True,
+            "volumes": [1.0, 2.0]
+        }
+        res_bundle = matcher.check_release(rel_bundle)
+        assert res_bundle["status"] == "IN_CALIBRE", f"Expected IN_CALIBRE, got {res_bundle['status']}"
+        assert res_bundle["missing_volumes"] == []
+
+        # Release for single volume v02 should be IN_CALIBRE
+        rel_v2 = {
+            "title": "Aharen-san is Indecipherable v02 [Digital]",
+            "series_name": "Aharen-san is Indecipherable",
+            "is_bundle": False,
+            "volumes": [2.0]
+        }
+        res_v2 = matcher.check_release(rel_v2)
+        assert res_v2["status"] == "IN_CALIBRE", f"Expected IN_CALIBRE for v02, got {res_v2['status']}"
+
+        # Release for v01-03 should be REQUESTED with ONLY volume 3.0 missing
+        rel_v3_bundle = {
+            "title": "Aharen-san is Indecipherable v01-03 [Digital]",
+            "series_name": "Aharen-san is Indecipherable",
+            "is_bundle": True,
+            "volumes": [1.0, 2.0, 3.0]
+        }
+        res_v3 = matcher.check_release(rel_v3_bundle)
+        assert res_v3["status"] == "REQUESTED"
+        assert res_v3["missing_volumes"] == [3.0], f"Expected missing [3.0], got {res_v3['missing_volumes']}"
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    print(" [PASSED] Calibre volume bundle edgecase (Aharen-san v01-02) fully verified.")
+
 if __name__ == "__main__":
     test_ignore_and_unignore_release_lifecycle()
     test_backfill_start_page_and_resume()
     test_template_features_and_modal()
     test_pending_requests_and_bundle_download_filter()
+    test_calibre_volume_bundle_edgecase_handling()
     test_all_python_files_syntax()
     print("\nALL IGNORE, RESUME, AND PARITY TESTS PASSED!")

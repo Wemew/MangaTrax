@@ -100,6 +100,12 @@ def auto_tag_staging_cbz_files(staging_dir: str, series_templates: Dict[str, Dic
                 parsed = extract_manga_bundle_and_volumes(f)
                 s_name = parsed["series_name"]
                 vol = parsed["volume_start"]
+                if parsed.get("is_bundle") and parsed.get("volume_end") and parsed["volume_end"] != parsed["volume_start"]:
+                    vol_display = f"{int(parsed['volume_start'])}-{int(parsed['volume_end'])}"
+                elif vol:
+                    vol_display = str(int(vol)) if vol == int(vol) else str(vol)
+                else:
+                    vol_display = ""
 
                 # Find series template in Calibre
                 norm_name = normalize_text(s_name)
@@ -107,9 +113,9 @@ def auto_tag_staging_cbz_files(staging_dir: str, series_templates: Dict[str, Dic
 
                 if template:
                     metadata = {
-                        "title": f"{template['series_name']} Vol. {vol}" if vol else template['series_name'],
+                        "title": f"{template['series_name']} Vol. {vol_display}" if vol_display else template['series_name'],
                         "series_name": template["series_name"],
-                        "volume": vol,
+                        "volume": vol_display or vol,
                         "authors": template.get("authors", ""),
                         "publisher": template.get("publisher", ""),
                         "tags": template.get("tags", "")
@@ -119,7 +125,7 @@ def auto_tag_staging_cbz_files(staging_dir: str, series_templates: Dict[str, Dic
                             "filename": f,
                             "filepath": cbz_path,
                             "series_name": template["series_name"],
-                            "volume": vol
+                            "volume": vol_display or vol
                         })
 
     return tagged_files

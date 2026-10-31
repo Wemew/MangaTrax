@@ -2,6 +2,7 @@ import os
 import sqlite3
 import logging
 from typing import List, Dict, Any, Optional, Set
+from app.parser import parse_calibre_volumes_and_series
 
 logger = logging.getLogger("mangatrax.calibre")
 
@@ -132,6 +133,43 @@ class CalibreMangaScanner:
                     "publisher": row["publisher"] or "",
                     "tags": row["tags"] or ""
                 })
+            # Resolve volume bundles and standalone books
+            vols_map = self.get_series_volumes_map()
+            for s in results:
+                owned = vols_map.get(s["series_name"].lower(), set())
+                if owned:
+                    max_owned = max(owned)
+                    if max_owned > s["latest_index"]:
+                        s["latest_index"] = max_owned
+
+            # Check books not attached to any series (standalones or untagged series)
+            existing_norm = {s["series_name"].lower() for s in results}
+            cur.execute("""
+                SELECT b.id, b.title, GROUP_CONCAT(DISTINCT a.name) AS authors
+                FROM books b
+                LEFT JOIN books_series_link bsl ON b.id = bsl.book
+                LEFT JOIN books_authors_link bal ON b.id = bal.book
+                LEFT JOIN authors a ON bal.author = a.id
+                WHERE bsl.series IS NULL
+                GROUP BY b.id, b.title;
+            """)
+            for b_row in cur.fetchall():
+                b_title = b_row["title"] or ""
+                extracted_series, vols = parse_calibre_volumes_and_series(b_title, None, None)
+                if extracted_series and vols and extracted_series.lower() not in existing_norm:
+                    norm_ext = extracted_series.lower()
+                    existing_norm.add(norm_ext)
+                    all_owned = vols_map.get(norm_ext, vols)
+                    results.append({
+                        "series_id": b_row["id"] + 1000000,
+                        "series_name": extracted_series,
+                        "book_count": 1,
+                        "latest_index": max(all_owned) if all_owned else 1.0,
+                        "authors": b_row["authors"] or "Unknown",
+                        "publisher": "",
+                        "tags": ""
+                    })
+
             return results
         except Exception as e:
             logger.error(f"Error fetching manga series: {e}")
@@ -141,16 +179,20 @@ class CalibreMangaScanner:
                 conn.close()
 
     def get_series_volumes_map(self) -> Dict[str, Set[float]]:
-        """Returns a map of normalized series name -> set of owned volume indices."""
+        """
+        Returns a map of normalized series name -> set of owned volume indices.
+        Extracts single volumes as well as volume bundles (e.g. 'Aharen-san is Indecipherable v01-02'
+        where Calibre series_index only records 1.0, ensuring all contained volumes {1.0, 2.0}
+        are recognized as owned).
+        """
         if not self.is_available():
             return {}
 
         query = """
-            SELECT lower(s.name) AS ser_name, b.series_index
+            SELECT s.name AS ser_name, b.title, b.series_index
             FROM books b
-            JOIN books_series_link bsl ON b.id = bsl.book
-            JOIN series s ON bsl.series = s.id
-            WHERE b.series_index IS NOT NULL;
+            LEFT JOIN books_series_link bsl ON b.id = bsl.book
+            LEFT JOIN series s ON bsl.series = s.id;
         """
         conn = None
         try:
@@ -159,9 +201,15 @@ class CalibreMangaScanner:
             cur.execute(query)
             res: Dict[str, Set[float]] = {}
             for row in cur.fetchall():
-                s_name = row["ser_name"]
-                vol = round(float(row["series_index"]), 2)
-                res.setdefault(s_name, set()).add(vol)
+                s_name = row["ser_name"] or ""
+                b_title = row["title"] or ""
+                idx = float(row["series_index"]) if row["series_index"] is not None else None
+
+                extracted_series, vols = parse_calibre_volumes_and_series(b_title, s_name, idx)
+                target_series = s_name.strip() or (extracted_series or "").strip()
+                if target_series and vols:
+                    norm_key = target_series.lower()
+                    res.setdefault(norm_key, set()).update(vols)
             return res
         except Exception as e:
             logger.error(f"Error reading volumes map: {e}")

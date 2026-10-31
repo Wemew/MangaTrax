@@ -480,3 +480,90 @@ def match_manga_series_in_calibre(extracted_series: str, calibre_series_list: li
             best_match = c_ser
 
     return best_match
+
+def parse_calibre_volumes_and_series(
+    title: str,
+    series_name: Optional[str] = None,
+    series_index: Optional[float] = None
+) -> Tuple[Optional[str], Set[float]]:
+    """
+    Extracts all owned volume indices and canonical series name from a Calibre book record.
+    Handles volume bundle edge cases (e.g. 'Aharen-san is Indecipherable v01-02' where
+    Calibre's series_index only stores 1.0, ensuring both volumes 1.0 and 2.0 are recognized).
+    Also supports bundle notations like 'Vol. 1-2', 'v01-v04', 'v01+v02', 'v01, 02',
+    as well as standalone books without series tags.
+    """
+    vols: Set[float] = set()
+    detected_series: Optional[str] = series_name.strip() if series_name else None
+
+    # 1. Start with Calibre's series_index if present
+    if series_index is not None and series_index > 0:
+        vols.add(round(float(series_index), 2))
+
+    if not title:
+        return detected_series, vols
+
+    # 2. Check full title using general bundle extractor
+    bundle_info = extract_manga_bundle_and_volumes(title)
+    if bundle_info.get("is_bundle") and bundle_info.get("volumes"):
+        for v in bundle_info["volumes"]:
+            vols.add(round(float(v), 2))
+        if not detected_series and bundle_info.get("series_name"):
+            detected_series = bundle_info["series_name"]
+
+    # 3. Test combinations / substrings if title is just volume or has custom notations
+    candidates = [title]
+    if detected_series:
+        candidates.append(f"{detected_series} {title}")
+        clean_t = re.sub(r"^" + re.escape(detected_series), "", title, flags=re.IGNORECASE).strip(" -–—:,|.")
+        if clean_t:
+            candidates.append(clean_t)
+
+    for c in candidates:
+        if not c:
+            continue
+        # Pattern range: v01-02, vol 1-3, v01-v02, 01-02
+        m = re.search(
+            r"(?i)(?:(?:\b(?:volumes?|volume|vols?|vol|books?|book|bk)\b\.?|\bv\.?)\s*|\b)"
+            r"(?P<start>\d+(?:\.\d+)?)"
+            r"\s*[-–—~to/]+\s*"
+            r"(?:(?:\b(?:volumes?|volume|vols?|vol|books?|book|bk)\b\.?|\bv\.?)\s*)?"
+            r"(?P<end>\d+(?:\.\d+)?)\b",
+            c
+        )
+        if m:
+            s_val = float(m.group("start"))
+            e_val = float(m.group("end"))
+            if s_val > e_val:
+                s_val, e_val = e_val, s_val
+            # Sanity check: manga bundles are realistically between 1 and 2000, with span <= 50
+            if 0 < s_val <= 2000 and 0 < e_val <= 2000 and (e_val - s_val) <= 50:
+                curr = int(s_val)
+                while curr <= int(e_val):
+                    vols.add(float(curr))
+                    curr += 1
+                break
+
+        # Pattern list: v1, 2, 3 or v01+v02 or v1 & v2
+        m_list = re.search(
+            r"(?i)(?:(?:\b(?:volumes?|volume|vols?|vol)\b\.?|\bv\.?)\s*)"
+            r"(?P<list>\d+(?:\s*[,+&]\s*(?:(?:\b(?:volumes?|volume|vols?|vol)\b\.?|\bv\.?)\s*)?\d+)+)",
+            c
+        )
+        if m_list:
+            raw_nums = re.findall(r"\d+", m_list.group("list"))
+            for n in raw_nums:
+                vols.add(float(int(n)))
+            break
+
+    # If still no series detected and title has volume info, extract base series
+    if not detected_series:
+        clean_name = re.sub(
+            r"(?i)\s*(?:[-–—:]\s*)?(?:(?:\b(?:volumes?|volume|vols?|vol|books?|book)\b\.?|\bv\.?)\s*\d+.*|\d+\s*[-–—~to/].*)$",
+            "",
+            title
+        ).strip(" -–—:,|.")
+        if clean_name:
+            detected_series = clean_name
+
+    return detected_series, vols
