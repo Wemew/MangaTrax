@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import json
+import time
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -11,12 +12,19 @@ logger = logging.getLogger("mangatrax.database")
 class MangaDatabase:
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self._grouped_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
         db_dir = os.path.dirname(os.path.abspath(db_path))
         try:
             os.makedirs(db_dir, exist_ok=True)
         except Exception as e:
             logger.error(f"Error creating database directory '{db_dir}': {e}")
         self.init_db()
+
+    def _invalidate_grouped_cache(self):
+        try:
+            self._grouped_cache.clear()
+        except Exception:
+            pass
 
     def get_connection(self) -> sqlite3.Connection:
         try:
@@ -346,9 +354,17 @@ class MangaDatabase:
                 """, (ser_id, name, authors, publisher, tags, count, latest, default_web_url))
                 updated_count += 1
             conn.commit()
+        if updated_count > 0:
+            self._invalidate_grouped_cache()
         return updated_count
 
-    def get_all_series(self, monitored_only: bool = False) -> List[Dict[str, Any]]:
+    def get_all_series(
+        self,
+        monitored_only: bool = False,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        search: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         with self.get_connection() as conn:
             cur = conn.cursor()
             base_sql = """
@@ -357,11 +373,40 @@ class MangaDatabase:
                     (SELECT r.cover_url FROM releases r WHERE lower(r.series_name) = lower(st.name) AND r.cover_url IS NOT NULL AND r.cover_url != '' ORDER BY r.id DESC LIMIT 1) AS cover_url
                 FROM series_tracking st
             """
+            where_clauses = []
+            params = []
             if monitored_only:
-                cur.execute(f"{base_sql} WHERE st.is_monitored = 1 ORDER BY st.name COLLATE NOCASE ASC;")
-            else:
-                cur.execute(f"{base_sql} ORDER BY st.is_monitored DESC, st.name COLLATE NOCASE ASC;")
+                where_clauses.append("st.is_monitored = 1")
+            if search and search.strip():
+                clean_s = f"%{search.strip().lower()}%"
+                where_clauses.append("(lower(st.name) LIKE ? OR lower(COALESCE(st.authors, '')) LIKE ? OR lower(COALESCE(st.publisher, '')) LIKE ?)")
+                params.extend([clean_s, clean_s, clean_s])
+
+            where_str = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            order_str = "ORDER BY st.is_monitored DESC, st.name COLLATE NOCASE ASC"
+            limit_str = ""
+            if limit is not None:
+                limit_str = f"LIMIT {int(limit)} OFFSET {int(offset)}"
+
+            sql = f"{base_sql} {where_str} {order_str} {limit_str};"
+            cur.execute(sql, tuple(params))
             return [dict(row) for row in cur.fetchall()]
+
+    def count_all_series(self, monitored_only: bool = False, search: Optional[str] = None) -> int:
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            where_clauses = []
+            params = []
+            if monitored_only:
+                where_clauses.append("is_monitored = 1")
+            if search and search.strip():
+                clean_s = f"%{search.strip().lower()}%"
+                where_clauses.append("(lower(name) LIKE ? OR lower(COALESCE(authors, '')) LIKE ? OR lower(COALESCE(publisher, '')) LIKE ?)")
+                params.extend([clean_s, clean_s, clean_s])
+            where_str = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            cur.execute(f"SELECT COUNT(*) FROM series_tracking {where_str};", tuple(params))
+            row = cur.fetchone()
+            return row[0] if row else 0
 
     def toggle_series_monitored(self, series_id: int) -> bool:
         with self.get_connection() as conn:
@@ -409,6 +454,7 @@ class MangaDatabase:
             cur.execute("UPDATE releases SET status = 'BLACKLISTED', updated_at = CURRENT_TIMESTAMP WHERE lower(series_name) = lower(?);", (clean,))
             cur.execute("UPDATE series_tracking SET is_monitored = 0 WHERE lower(name) = lower(?);", (clean,))
             conn.commit()
+            self._invalidate_grouped_cache()
             return True
 
     def remove_from_blacklist(self, blacklist_id: int):
@@ -416,6 +462,7 @@ class MangaDatabase:
             cur = conn.cursor()
             cur.execute("DELETE FROM series_blacklist WHERE id = ?;", (blacklist_id,))
             conn.commit()
+            self._invalidate_grouped_cache()
 
     def get_blacklisted_series(self) -> List[Dict[str, Any]]:
         with self.get_connection() as conn:
@@ -482,6 +529,7 @@ class MangaDatabase:
                     rel_id
                 ))
                 conn.commit()
+                self._invalidate_grouped_cache()
                 return False, rel_id
             else:
                 cur.execute("""
@@ -512,6 +560,7 @@ class MangaDatabase:
                 ))
                 rel_id = cur.lastrowid
                 conn.commit()
+                self._invalidate_grouped_cache()
                 return True, rel_id
 
     def update_release_status(self, release_id: int, status: str):
@@ -519,6 +568,7 @@ class MangaDatabase:
             cur = conn.cursor()
             cur.execute("UPDATE releases SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;", (status, release_id))
             conn.commit()
+            self._invalidate_grouped_cache()
 
     def update_download_status(self, release_id: int, download_status: str, torrent_hash: Optional[str] = None):
         clean_hash = str(torrent_hash).strip() if (isinstance(torrent_hash, str) and torrent_hash.strip()) else None
@@ -530,15 +580,16 @@ class MangaDatabase:
                 WHERE id = ?;
             """, (download_status, clean_hash, release_id))
             conn.commit()
+            self._invalidate_grouped_cache()
 
-    def get_releases(self, status: Optional[str] = None, limit: int = 500) -> List[Dict[str, Any]]:
+    def get_releases(self, status: Optional[str] = None, limit: int = 500, offset: int = 0) -> List[Dict[str, Any]]:
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("SELECT lower(name) FROM prioritized_groups;")
             p_groups = {row[0] for row in cur.fetchall()}
 
             if status:
-                cur.execute("SELECT * FROM releases WHERE status = ? ORDER BY updated_at DESC LIMIT ?;", (status, limit))
+                cur.execute("SELECT * FROM releases WHERE status = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?;", (status, limit, offset))
             else:
                 cur.execute("""
                     SELECT * FROM releases 
@@ -547,8 +598,8 @@ class MangaDatabase:
                     ORDER BY 
                         CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                         updated_at DESC 
-                    LIMIT ?;
-                """, (limit,))
+                    LIMIT ? OFFSET ?;
+                """, (limit, offset))
             rows = [dict(r) for r in cur.fetchall()]
 
             cur.execute("SELECT search_term, canonical_title, romaji_title, cover_url FROM manga_metadata_cache;")
@@ -955,13 +1006,30 @@ class MangaDatabase:
         return updated_count
 
     # --- Group Releases by Series ---
-    def get_releases_grouped_by_series(self, status: Optional[str] = None, prioritized_only: bool = False) -> List[Dict[str, Any]]:
+    def get_releases_grouped_by_series(
+        self,
+        status: Optional[str] = None,
+        prioritized_only: bool = False,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        search: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
         Groups releases under canonical series, aggregating all bundle volumes,
         highlighting owned vs missing volumes against Calibre tracking.
         If prioritized_only is True, filters to series having releases from prioritized groups.
+        Supports fast pagination with limit & offset and instant keyword search.
         """
         from app.parser import normalize_text
+
+        cache_key = f"{status}_{prioritized_only}"
+        now = time.time()
+        if not search and cache_key in self._grouped_cache:
+            cached_time, cached_data = self._grouped_cache[cache_key]
+            if now - cached_time < 5.0:
+                if limit is not None:
+                    return cached_data[offset : offset + limit]
+                return cached_data
 
         with self.get_connection() as conn:
             cur = conn.cursor()
@@ -1006,10 +1074,26 @@ class MangaDatabase:
                 r["is_prioritized"] = r_group in p_groups if r_group else False
 
             cur.execute("SELECT * FROM series_tracking;")
-            tracked_map = {row["name"].lower(): dict(row) for row in cur.fetchall()}
+            tracked_map = {}
+            norm_tracked_map = {}
+            for row in cur.fetchall():
+                t_row = dict(row)
+                t_name = t_row["name"]
+                t_lower = t_name.lower()
+                tracked_map[t_lower] = t_row
+                norm_tracked_map[normalize_text(t_name)] = t_row
+                norm_tracked_map[t_lower] = t_row
 
             cur.execute("SELECT * FROM manga_metadata_cache;")
-            cache_map = {row["search_term"].lower(): dict(row) for row in cur.fetchall()}
+            cache_map = {}
+            norm_cache_map = {}
+            for row in cur.fetchall():
+                c_row = dict(row)
+                c_term = c_row["search_term"]
+                c_lower = c_term.lower()
+                cache_map[c_lower] = c_row
+                norm_cache_map[normalize_text(c_term)] = c_row
+                norm_cache_map[c_lower] = c_row
 
             groups_dict: Dict[str, Dict[str, Any]] = {}
 
@@ -1017,13 +1101,11 @@ class MangaDatabase:
                 s_name = (rel.get("series_name") or "Uncategorized").strip()
                 s_norm = normalize_text(s_name) or "uncategorized"
 
-                meta_match = cache_map.get(s_norm) or cache_map.get(s_name.lower()) or {}
+                meta_match = norm_cache_map.get(s_norm) or cache_map.get(s_name.lower()) or {}
 
-                calibre_match = None
-                for t_name_lower, t_row in tracked_map.items():
-                    if normalize_text(t_name_lower) == s_norm or (meta_match.get("canonical_title") and normalize_text(t_name_lower) == normalize_text(meta_match.get("canonical_title"))):
-                        calibre_match = t_row
-                        break
+                calibre_match = norm_tracked_map.get(s_norm)
+                if not calibre_match and meta_match.get("canonical_title"):
+                    calibre_match = norm_tracked_map.get(normalize_text(meta_match["canonical_title"])) or tracked_map.get(meta_match["canonical_title"].lower())
 
                 canonical_title = (
                     meta_match.get("canonical_title")
@@ -1131,7 +1213,34 @@ class MangaDatabase:
                 return (priority, g["series_name"].lower())
 
             result_groups.sort(key=sort_key)
+
+            if not search:
+                self._grouped_cache[cache_key] = (now, list(result_groups))
+
+            if search and search.strip():
+                clean_s = search.strip().lower()
+                filtered = [
+                    g for g in result_groups
+                    if clean_s in g["series_name"].lower()
+                    or clean_s in (g.get("romaji_name") or "").lower()
+                    or clean_s in (g.get("synopsis") or "").lower()
+                ]
+                if limit is not None:
+                    return filtered[offset : offset + limit]
+                return filtered
+
+            if limit is not None:
+                return result_groups[offset : offset + limit]
             return result_groups
+
+    def count_releases_grouped_by_series(
+        self,
+        status: Optional[str] = None,
+        prioritized_only: bool = False,
+        search: Optional[str] = None
+    ) -> int:
+        groups = self.get_releases_grouped_by_series(status=status, prioritized_only=prioritized_only, search=search)
+        return len(groups)
 
     # --- Prioritized Release Groups ---
     def get_prioritized_groups(self) -> List[Dict[str, Any]]:
@@ -1157,6 +1266,7 @@ class MangaDatabase:
                 ON CONFLICT(name) DO UPDATE SET notes = excluded.notes, priority = excluded.priority;
             """, (clean, notes, priority))
             conn.commit()
+            self._invalidate_grouped_cache()
             return True
 
     def remove_prioritized_group(self, group_id: int):
@@ -1164,6 +1274,7 @@ class MangaDatabase:
             cur = conn.cursor()
             cur.execute("DELETE FROM prioritized_groups WHERE id = ?;", (group_id,))
             conn.commit()
+            self._invalidate_grouped_cache()
 
     def is_group_prioritized(self, group_name: str) -> bool:
         if not group_name:
@@ -1173,7 +1284,7 @@ class MangaDatabase:
             cur.execute("SELECT id FROM prioritized_groups WHERE lower(name) = lower(?);", (group_name.strip(),))
             return cur.fetchone() is not None
 
-    def get_prioritized_releases(self, status: Optional[str] = None, limit: int = 500) -> List[Dict[str, Any]]:
+    def get_prioritized_releases(self, status: Optional[str] = None, limit: int = 500, offset: int = 0) -> List[Dict[str, Any]]:
         """Returns releases published by prioritized release groups."""
         with self.get_connection() as conn:
             cur = conn.cursor()
@@ -1181,8 +1292,8 @@ class MangaDatabase:
                 cur.execute("""
                     SELECT * FROM releases 
                     WHERE status = ? AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
-                    ORDER BY updated_at DESC LIMIT ?;
-                """, (status, limit))
+                    ORDER BY updated_at DESC LIMIT ? OFFSET ?;
+                """, (status, limit, offset))
             else:
                 cur.execute("""
                     SELECT * FROM releases 
@@ -1192,8 +1303,14 @@ class MangaDatabase:
                     ORDER BY 
                         CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                         updated_at DESC 
-                    LIMIT ?;
-                """, (limit,))
+                    LIMIT ? OFFSET ?;
+                """, (limit, offset))
+            rows = [dict(r) for r in cur.fetchall()]
+            for r in rows:
+                r["volumes"] = json.loads(r["volumes_json"] or "[]")
+                r["missing_volumes"] = json.loads(r["missing_vols_json"] or "[]")
+                r["is_prioritized"] = True
+            return rows
             rows = [dict(r) for r in cur.fetchall()]
             for r in rows:
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
@@ -1242,4 +1359,5 @@ class MangaDatabase:
                 VALUES ('SYSTEM_RESET', 'All application data, releases, and caches have been reset.', NULL, CURRENT_TIMESTAMP);
             """)
             conn.commit()
+            self._invalidate_grouped_cache()
             return {"status": "success", "message": "All application data and release history have been reset successfully."}

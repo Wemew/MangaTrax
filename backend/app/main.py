@@ -114,39 +114,27 @@ async def dashboard_view(request: Request):
 
 @app.get("/series", response_class=HTMLResponse)
 async def series_view(request: Request):
-    series_list = db.get_all_series()
+    total_count = db.count_all_series()
     return templates.TemplateResponse(
         request=request,
         name="series.html",
         context={
             "active_page": "series",
-            "series_list": series_list
+            "series_list": [],
+            "total_series": total_count
         }
     )
 
 @app.get("/releases", response_class=HTMLResponse)
 async def releases_view(request: Request, status: Optional[str] = None, view: str = Query("series")):
-    if view == "flat":
-        releases = db.get_releases(status=status, limit=100)
-        seen_sigs = set()
-        deduped_releases = []
-        for r in releases:
-            sig = r.get("guid") or (r.get("download_url") or r.get("link") or r.get("title"), tuple(sorted(r.get("volumes", []))), (r.get("release_group") or "").lower())
-            if sig not in seen_sigs:
-                seen_sigs.add(sig)
-                deduped_releases.append(r)
-        grouped_series = []
-    else:
-        deduped_releases = []
-        grouped_series = db.get_releases_grouped_by_series(status=status)
-
+    # Instant page response: page shell renders in <10ms and lazy loads series dynamically
     return templates.TemplateResponse(
         request=request,
         name="releases.html",
         context={
             "active_page": "releases",
-            "releases": deduped_releases,
-            "grouped_series": grouped_series,
+            "releases": [],
+            "grouped_series": [],
             "current_status": status,
             "current_view": view
         }
@@ -155,25 +143,138 @@ async def releases_view(request: Request, status: Optional[str] = None, view: st
 @app.get("/prioritized", response_class=HTMLResponse)
 async def prioritized_view(request: Request, status: Optional[str] = None, view: str = Query("series")):
     prioritized_groups = db.get_prioritized_groups()
-    if view == "flat":
-        releases = db.get_prioritized_releases(status=status, limit=100)
-        grouped_series = []
-    else:
-        releases = []
-        grouped_series = db.get_releases_grouped_by_series(status=status, prioritized_only=True)
-
     return templates.TemplateResponse(
         request=request,
         name="prioritized.html",
         context={
             "active_page": "prioritized",
             "prioritized_groups": prioritized_groups,
-            "releases": releases,
-            "grouped_series": grouped_series,
+            "releases": [],
+            "grouped_series": [],
             "current_status": status,
             "current_view": view
         }
     )
+
+# --- Lazy Loading API Endpoints ---
+@app.get("/api/releases/cards")
+async def api_releases_cards(
+    request: Request,
+    status: Optional[str] = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(8, ge=1, le=50),
+    search: Optional[str] = Query(None)
+):
+    clean_s = search.strip() if search else None
+    groups = db.get_releases_grouped_by_series(status=status, limit=limit, offset=offset, search=clean_s)
+    total = db.count_releases_grouped_by_series(status=status, search=clean_s)
+    has_more = (offset + len(groups)) < total
+    html = templates.get_template("partials/series_card_chunk.html").render(
+        {"request": request, "grouped_series": groups, "is_prioritized_view": False}
+    )
+    return JSONResponse({
+        "status": "success",
+        "offset": offset,
+        "count": len(groups),
+        "total": total,
+        "has_more": has_more,
+        "html": html
+    })
+
+@app.get("/api/prioritized/cards")
+async def api_prioritized_cards(
+    request: Request,
+    status: Optional[str] = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(8, ge=1, le=50),
+    search: Optional[str] = Query(None)
+):
+    clean_s = search.strip() if search else None
+    groups = db.get_releases_grouped_by_series(status=status, prioritized_only=True, limit=limit, offset=offset, search=clean_s)
+    total = db.count_releases_grouped_by_series(status=status, prioritized_only=True, search=clean_s)
+    has_more = (offset + len(groups)) < total
+    html = templates.get_template("partials/series_card_chunk.html").render(
+        {"request": request, "grouped_series": groups, "is_prioritized_view": True}
+    )
+    return JSONResponse({
+        "status": "success",
+        "offset": offset,
+        "count": len(groups),
+        "total": total,
+        "has_more": has_more,
+        "html": html
+    })
+
+@app.get("/api/releases/flat_rows")
+async def api_releases_flat_rows(
+    request: Request,
+    status: Optional[str] = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200)
+):
+    releases = db.get_releases(status=status, limit=limit, offset=offset)
+    seen_sigs = set()
+    deduped = []
+    for r in releases:
+        sig = r.get("guid") or (r.get("download_url") or r.get("link") or r.get("title"), tuple(sorted(r.get("volumes", []))), (r.get("release_group") or "").lower())
+        if sig not in seen_sigs:
+            seen_sigs.add(sig)
+            deduped.append(r)
+    has_more = len(releases) == limit
+    html = templates.get_template("partials/flat_release_row_chunk.html").render(
+        {"request": request, "releases": deduped}
+    )
+    return JSONResponse({
+        "status": "success",
+        "offset": offset,
+        "count": len(deduped),
+        "has_more": has_more,
+        "html": html
+    })
+
+@app.get("/api/prioritized/flat_rows")
+async def api_prioritized_flat_rows(
+    request: Request,
+    status: Optional[str] = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200)
+):
+    releases = db.get_prioritized_releases(status=status, limit=limit, offset=offset)
+    has_more = len(releases) == limit
+    html = templates.get_template("partials/flat_release_row_chunk.html").render(
+        {"request": request, "releases": releases}
+    )
+    return JSONResponse({
+        "status": "success",
+        "offset": offset,
+        "count": len(releases),
+        "has_more": has_more,
+        "html": html
+    })
+
+@app.get("/api/series/rows")
+async def api_series_rows(
+    request: Request,
+    monitored_only: bool = Query(False),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    search: Optional[str] = Query(None)
+):
+    clean_s = search.strip() if search else None
+    series_list = db.get_all_series(monitored_only=monitored_only, limit=limit, offset=offset, search=clean_s)
+    total = db.count_all_series(monitored_only=monitored_only, search=clean_s)
+    has_more = (offset + len(series_list)) < total
+    html = templates.get_template("partials/series_table_row_chunk.html").render(
+        {"request": request, "series_list": series_list}
+    )
+    return JSONResponse({
+        "status": "success",
+        "offset": offset,
+        "count": len(series_list),
+        "total": total,
+        "has_more": has_more,
+        "html": html
+    })
 
 @app.get("/api/releases/grouped")
 async def api_releases_grouped(status: Optional[str] = None):

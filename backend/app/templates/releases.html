@@ -72,258 +72,47 @@
     <!-- VIEW MODE: GROUPED BY CANONICAL SERIES     -->
     <!-- ========================================== -->
     <div class="space-y-4" id="seriesGroupContainer">
-        {% for group in grouped_series %}
-        <div class="series-card bg-darkcard border border-slate-800/80 hover:border-slate-700/80 rounded-2xl p-5 shadow-lg transition-all {% if loop.index > 24 %}hidden series-card-deferred{% endif %}" data-series-name="{{ group.series_name|lower }} {{ (group.romaji_name or '')|lower }} {{ group.synopsis|lower }}">
-            <div class="flex flex-col md:flex-row gap-5 items-start">
-                
-                <!-- Series Cover Art -->
-                <div class="relative flex-shrink-0 mx-auto md:mx-0">
-                    {% if group.cover_url %}
-                    <img src="/api/covers?url={{ group.cover_url|urlencode }}" alt="{{ group.series_name }}" 
-                         onclick="openImageModal(this.src, '{{ group.series_name|escape }}')"
-                         class="w-24 h-36 object-cover rounded-xl shadow-md border border-slate-700/70 cursor-pointer hover:opacity-90 hover:scale-[1.02] transition-all cover-placeholder" loading="lazy" decoding="async" title="Click to enlarge cover artwork">
-                    {% else %}
-                    <div class="w-24 h-36 rounded-xl bg-slate-900 border border-slate-800 flex flex-col items-center justify-center text-slate-600">
-                        <i data-lucide="book-open" class="w-8 h-8 mb-1"></i>
-                        <span class="text-[10px] uppercase font-bold tracking-wider">Manga</span>
-                    </div>
-                    {% endif %}
-                    
-                    {% if group.has_wanted %}
-                    <span class="absolute -top-2 -right-2 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-rose-600 text-white shadow-lg animate-pulse">
-                        WANTED
-                    </span>
-                    {% elif group.in_calibre %}
-                    <span class="absolute -top-2 -right-2 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-600 text-white shadow">
-                        TRACKED
-                    </span>
-                    {% endif %}
-                </div>
-
-                <!-- Series Info & Aggregated Volumes -->
-                <div class="flex-1 w-full min-w-0">
-                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                        <div>
-                            <h2 class="text-xl font-bold text-white tracking-tight flex items-center gap-2">
-                                {{ group.series_name }}
-                            </h2>
-                            {% if group.romaji_name and group.romaji_name.lower() != group.series_name.lower() %}
-                            <p class="text-xs text-slate-400 mt-0.5 italic" title="Original Japanese/Romaji Title: {{ group.romaji_name }}">
-                                Romaji: {{ group.romaji_name }}
-                            </p>
-                            {% endif %}
-                            <div class="flex items-center gap-2 flex-wrap mt-1 text-xs">
-                                {% if group.in_calibre %}
-                                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold text-[11px]">
-                                    <i data-lucide="check-circle" class="w-3 h-3"></i> In Calibre: {{ group.calibre_book_count }} vols
-                                </span>
-                                {% else %}
-                                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/20 font-semibold text-[11px]">
-                                    <i data-lucide="compass" class="w-3 h-3"></i> New / Discovery
-                                </span>
-                                {% endif %}
-
-                                {% if group.total_volumes %}
-                                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-800 text-slate-300 border border-slate-700 font-semibold text-[11px]">
-                                    Total: {{ group.total_volumes }} vols
-                                </span>
-                                {% endif %}
-
-                                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-purple-500/10 text-purple-300 border border-purple-500/20 font-semibold text-[11px]">
-                                    {{ group.releases_count }} {{ 'Release' if group.releases_count == 1 else 'Releases / Batches' }}
-                                </span>
-                            </div>
-                        </div>
-
-                        <!-- Series Quick Actions: Track, Backfill, Blacklist & Releases Accordion -->
-                        <div class="flex items-center gap-1.5 flex-wrap self-start sm:self-auto">
-                            {% if not group.in_calibre and not group.is_monitored %}
-                            <button type="button" onclick="handleTrackSeries('{{ group.series_name|escape }}', this)" title="Track upcoming releases of {{ group.series_name }}" class="px-2.5 py-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm">
-                                <i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i>
-                                <span class="hidden sm:inline">Track</span>
-                            </button>
-                            {% endif %}
-                            <button type="button" onclick="backfillSeriesGlobal('{{ group.series_name|escape }}', this)" title="Search Nyaa for all past releases of {{ group.series_name }}" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-brand-600/30 text-slate-300 hover:text-brand-300 border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm">
-                                <i data-lucide="history" class="w-3.5 h-3.5 text-brand-400"></i>
-                                <span class="hidden sm:inline">Backfill</span>
-                            </button>
-                            <button type="button" onclick="blacklistSeriesGlobal('{{ group.series_name|escape }}', this)" title="Blacklist {{ group.series_name }} (hide all releases & stop tracking)" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm">
-                                <i data-lucide="ban" class="w-3.5 h-3.5 text-rose-400"></i>
-                                <span class="hidden sm:inline">Blacklist</span>
-                            </button>
-                            <button type="button" onclick="toggleReleasesAccordion('accordion-{{ loop.index }}')" 
-                                    class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-colors">
-                                <span>Releases ({{ group.releases_count }})</span>
-                                <i data-lucide="chevron-down" id="icon-accordion-{{ loop.index }}" class="w-3.5 h-3.5 transition-transform duration-200"></i>
-                            </button>
-                        </div>
-                    </div>
-
-                    <!-- Volume Coverage Grid (All distinct volumes from all batches) -->
-                    <div class="mt-4 pt-3 border-t border-slate-800/80">
-                        <div class="flex items-center justify-between text-xs text-slate-400 mb-2">
-                            <span class="font-semibold text-slate-300 flex items-center gap-1.5">
-                                <i data-lucide="layers" class="w-3.5 h-3.5 text-brand-400"></i>
-                                Available Volumes in Feed Releases ({{ group.all_volumes|length }}):
-                            </span>
-                            <div class="flex items-center gap-3 text-[11px]">
-                                <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-500"></span> Owned in Calibre</span>
-                                <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-amber-500"></span> Missing / Wanted</span>
-                            </div>
-                        </div>
-
-                        <!-- All Volume Pills -->
-                        <div class="flex flex-wrap gap-1.5">
-                            {% for v in group.all_volumes %}
-                            {% set is_missing = v in group.missing_volumes %}
-                            <span class="px-2 py-0.5 rounded-md text-[11px] font-bold border transition-all {% if is_missing %}bg-amber-500/15 text-amber-300 border-amber-500/40 shadow-sm shadow-amber-950/20{% else %}bg-emerald-500/10 text-emerald-300 border-emerald-500/30{% endif %}"
-                                  title="Volume {{ v|int if v == v|int else v }} - {% if is_missing %}Wanted in Calibre{% else %}Already in Library{% endif %}">
-                                Vol {{ v|int if v == v|int else v }}
-                                {% if not is_missing %}
-                                <i data-lucide="check" class="w-2.5 h-2.5 inline-block text-emerald-400 ml-0.5"></i>
-                                {% endif %}
-                            </span>
-                            {% else %}
-                            <span class="text-xs text-slate-500 italic">No specific volume numbers parsed</span>
-                            {% endfor %}
-                        </div>
-                    </div>
-
-                    {% if group.synopsis %}
-                    <p class="text-xs text-slate-400 mt-3 line-clamp-2 leading-relaxed break-words-anywhere">
-                        {{ group.synopsis }}
-                    </p>
-                    {% endif %}
-                </div>
-            </div>
-
-            <!-- Expandable Releases List Accordion -->
-            <div id="accordion-{{ loop.index }}" class="hidden mt-4 pt-4 border-t border-slate-800">
-                <h4 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">
-                    Torrent Versions & Releases for {{ group.series_name }}
-                </h4>
-                <div class="bg-slate-900/80 rounded-xl border border-slate-800 overflow-hidden divide-y divide-slate-800/60">
-                    {% for r in group.releases %}
-                    <div class="p-3 hover:bg-slate-850/50 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs min-w-0">
-                        <div class="flex-1 min-w-0">
-                            <div class="flex items-center gap-2 flex-wrap min-w-0">
-                                {% if r.link %}
-                                <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" class="font-bold text-slate-100 text-sm hover:text-brand-400 transition-colors inline-flex items-center gap-1.5 max-w-full break-words-anywhere" title="Open RSS Feed Post: {{ r.title }}">
-                                    <span class="truncate max-w-[260px] sm:max-w-md">{{ r.title }}</span>
-                                    <i data-lucide="external-link" class="w-3 h-3 text-slate-500 opacity-60 shrink-0"></i>
-                                </a>
-                                {% else %}
-                                <span class="font-bold text-slate-100 text-sm truncate max-w-[260px] sm:max-w-md inline-block break-words-anywhere" title="{{ r.title }}">
-                                    {{ r.title }}
-                                </span>
-                                {% endif %}
-
-                                {% if r.release_group %}
-                                {% if r.is_prioritized %}
-                                <span class="px-2 py-0.5 rounded-md bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-bold flex items-center gap-1">
-                                    <i data-lucide="star" class="w-2.5 h-2.5 fill-amber-400"></i> {{ r.release_group }}
-                                </span>
-                                {% else %}
-                                <button onclick="quickPrioritizeGroup('{{ r.release_group|escape }}')" title="Add to Prioritized Groups" class="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-amber-300 border border-slate-700 text-[10px] font-medium flex items-center gap-1 transition-colors">
-                                    <i data-lucide="star" class="w-2.5 h-2.5"></i> {{ r.release_group }}
-                                </button>
-                                {% endif %}
-                                {% endif %}
-
-                                {% if r.is_bundle %}
-                                <span class="px-2 py-0.5 rounded bg-purple-500/15 border border-purple-500/30 text-purple-300 text-[10px] font-bold">
-                                    Bundle ({{ r.volumes|length }} Volumes: Vol {{ r.volume_start|int }}-{{ r.volume_end|int }})
-                                </span>
-                                {% elif r.volume_start %}
-                                <span class="px-2 py-0.5 rounded bg-brand-500/15 border border-brand-500/30 text-brand-300 text-[10px] font-bold">
-                                    Vol {{ r.volume_start|int }}
-                                </span>
-                                {% endif %}
-
-                                {% if r.status == 'REQUESTED' %}
-                                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/20">
-                                    Wanted
-                                </span>
-                                {% elif r.status == 'IN_CALIBRE' %}
-                                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                                    In Calibre
-                                </span>
-                                {% endif %}
-
-                                {% if r.download_status == 'DOWNLOADING' %}
-                                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 flex items-center gap-1">
-                                    <i data-lucide="download" class="w-3 h-3 animate-bounce"></i> Downloading
-                                </span>
-                                {% endif %}
-                            </div>
-
-                            <!-- List of Individual Volumes in this Release -->
-                            <div class="mt-2 flex items-center gap-1 flex-wrap">
-                                <span class="text-[11px] text-slate-400 font-semibold mr-1">Includes ({{ r.volumes|length }} vols):</span>
-                                {% for v in r.volumes %}
-                                {% set is_missing = v in r.missing_volumes %}
-                                <span class="px-1.5 py-0.5 rounded text-[10px] font-bold {% if is_missing %}bg-amber-500/20 text-amber-300 border border-amber-500/40{% else %}bg-slate-800 text-slate-400 border border-slate-700{% endif %}">
-                                    Vol {{ v|int if v == v|int else v }}
-                                </span>
-                                {% endfor %}
-                            </div>
-
-                            <div class="text-[11px] text-slate-500 mt-1 flex items-center gap-3">
-                                {% if r.link %}
-                                <span>Feed: <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" class="text-slate-300 hover:text-brand-400 font-semibold underline underline-offset-2 inline-flex items-center gap-1" title="Open RSS Feed Post"><i data-lucide="rss" class="w-3 h-3 text-amber-500"></i>{{ r.source_feed_name or '-' }}</a></span>
-                                {% else %}
-                                <span>Feed: <strong class="text-slate-400">{{ r.source_feed_name or '-' }}</strong></span>
-                                {% endif %}
-                                <span>Added: {{ r.updated_at|localtime }}</span>
-                            </div>
-                        </div>
-
-                        <!-- Actions for Release -->
-                        <div class="flex items-center gap-1.5 self-end md:self-center">
-                            {% if r.download_url %}
-                            <button onclick="downloadRelease({{ r.id }})" title="Send to qBittorrent" 
-                                    class="px-2.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-sm">
-                                <i data-lucide="download" class="w-3.5 h-3.5"></i>
-                                <span>Download</span>
-                            </button>
-                            {% endif %}
-                            {% if r.status != 'IGNORED' %}
-                            <button type="button" onclick="ignoreReleaseGlobal({{ r.id }}, this)" title="Ignore this specific release batch" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-amber-300 border border-slate-700 text-xs flex items-center transition-colors">
-                                <i data-lucide="eye-off" class="w-3.5 h-3.5"></i>
-                            </button>
-                            {% else %}
-                            <button type="button" onclick="unignoreReleaseGlobal({{ r.id }}, this)" title="Un-ignore and restore release" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-700 text-xs flex items-center transition-colors">
-                                <i data-lucide="eye" class="w-3.5 h-3.5"></i>
-                            </button>
-                            {% endif %}
-                            {% if r.link %}
-                            <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" title="Open source page" 
-                               class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs flex items-center transition-colors">
-                                <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
-                            </a>
-                            {% endif %}
-                        </div>
-                    </div>
-                    {% endfor %}
-                </div>
-            </div>
-
-        </div>
+        {% if grouped_series %}
+            {% include "partials/series_card_chunk.html" %}
         {% else %}
-        <div class="bg-darkcard border border-slate-800 rounded-2xl p-12 text-center text-slate-500">
-            <i data-lucide="inbox" class="w-12 h-12 mx-auto mb-3 opacity-40"></i>
-            <p class="text-sm font-semibold">No manga series found matching current filters.</p>
-        </div>
-        {% endfor %}
-
-        {% if grouped_series|length > 24 %}
-        <div id="load-more-series-container" class="text-center py-6">
-            <button onclick="loadMoreSeries()" id="btn-load-more-series" class="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
-                <i data-lucide="chevrons-down" class="w-4 h-4 text-brand-400"></i>
-                <span>Load More Series (<span id="deferred-series-count">{{ grouped_series|length - 24 }}</span> remaining)</span>
-            </button>
+        <div id="series-loading-skeleton" class="space-y-4">
+            <div class="bg-darkcard border border-slate-800 rounded-2xl p-6 animate-pulse flex flex-col md:flex-row gap-5 items-start">
+                <div class="w-24 h-36 bg-slate-800 rounded-xl flex-shrink-0"></div>
+                <div class="flex-1 w-full space-y-3">
+                    <div class="h-5 bg-slate-800 rounded w-1/3"></div>
+                    <div class="h-3 bg-slate-800/60 rounded w-1/4"></div>
+                    <div class="flex gap-2 pt-2">
+                        <div class="h-6 w-20 bg-slate-800/80 rounded"></div>
+                        <div class="h-6 w-20 bg-slate-800/80 rounded"></div>
+                    </div>
+                    <div class="h-10 bg-slate-800/40 rounded w-full mt-2"></div>
+                </div>
+            </div>
+            <div class="bg-darkcard border border-slate-800 rounded-2xl p-6 animate-pulse flex flex-col md:flex-row gap-5 items-start">
+                <div class="w-24 h-36 bg-slate-800 rounded-xl flex-shrink-0"></div>
+                <div class="flex-1 w-full space-y-3">
+                    <div class="h-5 bg-slate-800 rounded w-1/4"></div>
+                    <div class="h-3 bg-slate-800/60 rounded w-1/5"></div>
+                    <div class="h-10 bg-slate-800/40 rounded w-full mt-2"></div>
+                </div>
+            </div>
+            <div class="text-center py-2 text-xs text-slate-500 font-medium flex items-center justify-center gap-2">
+                <i data-lucide="loader-2" class="w-4 h-4 animate-spin text-brand-400"></i>
+                <span>Loading manga series releases...</span>
+            </div>
         </div>
         {% endif %}
+    </div>
+
+    <div id="load-more-series-container" class="text-center py-6" style="display: none;">
+        <div id="series-loading-spinner" class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-400 font-medium shadow-sm">
+            <i data-lucide="loader-2" class="w-4 h-4 animate-spin text-brand-400"></i>
+            <span id="series-loading-text">Loading more series...</span>
+        </div>
+        <button onclick="loadMoreSeries()" id="btn-load-more-series" class="hidden px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
+            <i data-lucide="chevrons-down" class="w-4 h-4 text-brand-400"></i>
+            <span>Load More Series (<span id="deferred-series-count">0</span> remaining)</span>
+        </button>
     </div>
 
     {% else %}
@@ -343,171 +132,19 @@
                         <th class="py-3.5 px-4 text-right">Actions</th>
                     </tr>
                 </thead>
-                <tbody class="divide-y divide-slate-800/60">
-                    {% for r in releases %}
-                    <tr class="hover:bg-slate-850/50 transition-colors release-row {% if loop.index > 50 %}hidden flat-row-deferred{% endif %}" data-release-name="{{ r.title|lower }} {{ (r.series_name or '')|lower }} {{ (r.romaji_name or '')|lower }} {{ (r.release_group or '')|lower }}">
-                        <td class="py-3 px-4 text-center">
-                            {% if r.cover_url %}
-                            <img src="/api/covers?url={{ r.cover_url|urlencode }}" alt="Cover" onclick="openImageModal(this.src, '{{ (r.series_name or r.title)|escape }}')" class="w-8 h-12 object-cover rounded shadow border border-slate-700/60 inline-block cursor-pointer hover:opacity-90 transition-all cover-placeholder" loading="lazy" decoding="async" title="Click to enlarge cover artwork">
-                            {% else %}
-                            <div class="w-8 h-12 rounded bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-600 mx-auto">
-                                <i data-lucide="layers" class="w-4 h-4"></i>
-                            </div>
-                            {% endif %}
-                        </td>
-                        <td class="py-3 px-4 max-w-sm min-w-0">
-                            <div class="flex items-center gap-1.5 mb-1.5 flex-wrap">
-                                <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20 truncate max-w-full break-words-anywhere" title="{{ r.series_name }}">
-                                    {{ r.series_name or 'Uncategorized' }}
-                                </span>
-                                {% if r.romaji_name and r.romaji_name.lower() != (r.series_name or '').lower() %}
-                                <span class="text-[10px] text-slate-400 italic truncate max-w-full break-words-anywhere" title="Original Japanese/Romaji Title: {{ r.romaji_name }}">
-                                    Romaji: {{ r.romaji_name }}
-                                </span>
-                                {% endif %}
-                                {% if r.release_group %}
-                                {% if r.is_prioritized %}
-                                <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-bold shrink-0">
-                                    <i data-lucide="star" class="w-2.5 h-2.5 fill-amber-400"></i> {{ r.release_group }}
-                                </span>
-                                {% else %}
-                                <button onclick="quickPrioritizeGroup('{{ r.release_group|escape }}')" title="Add to Prioritized Groups" class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-slate-800 text-slate-300 hover:text-amber-300 border border-slate-700 text-[10px] font-medium shrink-0 transition-colors">
-                                    <i data-lucide="star" class="w-2.5 h-2.5"></i> {{ r.release_group }}
-                                </button>
-                                {% endif %}
-                                {% endif %}
-                            </div>
-                            {% if r.link %}
-                            <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" class="font-bold text-slate-100 text-xs sm:text-sm hover:text-brand-400 transition-colors inline-flex items-center gap-1.5 max-w-full break-words-anywhere" title="Open RSS Feed Post: {{ r.title }}">
-                                <span class="truncate max-w-[260px] sm:max-w-md">{{ r.title }}</span>
-                                <i data-lucide="external-link" class="w-3 h-3 text-slate-500 opacity-60 shrink-0"></i>
-                            </a>
-                            {% else %}
-                            <div class="font-bold text-slate-100 text-xs sm:text-sm truncate max-w-[260px] sm:max-w-md break-words-anywhere" title="{{ r.title }}">
-                                {{ r.title }}
-                            </div>
-                            {% endif %}
-                            <div class="text-[11px] text-slate-500 mt-0.5">
-                                {{ r.updated_at|localtime }}
-                            </div>
-                        </td>
-                        <td class="py-3 px-4 max-w-md">
-                            <div class="font-bold text-slate-200 text-sm flex items-center gap-2">
-                                <span>{{ r.series_name or '-' }}</span>
-                                {% if r.release_group %}
-                                {% if r.is_prioritized %}
-                                <span class="px-1.5 py-0.2 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[9px] font-bold flex items-center gap-0.5">
-                                    <i data-lucide="star" class="w-2.5 h-2.5 fill-amber-400"></i> {{ r.release_group }}
-                                </span>
-                                {% else %}
-                                <button onclick="quickPrioritizeGroup('{{ r.release_group|escape }}')" title="Prioritize Group" class="px-1.5 py-0.2 rounded bg-slate-800 text-slate-400 hover:text-amber-300 border border-slate-700 text-[9px] flex items-center gap-0.5 transition-colors">
-                                    <i data-lucide="star" class="w-2.5 h-2.5"></i> {{ r.release_group }}
-                                </button>
-                                {% endif %}
-                                {% endif %}
-                            </div>
-                            <div class="mt-1 flex items-center gap-1.5 flex-wrap">
-                                {% if r.is_bundle %}
-                                <span class="px-1.5 py-0.5 rounded bg-purple-500/10 border border-purple-500/20 text-purple-300 text-[10px] font-bold">
-                                    Bundle Vol {{ r.volume_start|int if r.volume_start is not none else '?' }}-{{ r.volume_end|int if r.volume_end is not none else '?' }} ({{ r.volumes|length }} vols)
-                                </span>
-                                {% elif r.volume_start %}
-                                <span class="px-1.5 py-0.5 rounded bg-brand-500/10 border border-brand-500/20 text-brand-300 text-[10px] font-bold">
-                                    Vol {{ r.volume_start|int }}
-                                </span>
-                                {% endif %}
-                            </div>
-
-                            <!-- Explicit list of all volumes in this batch release -->
-                            {% if r.volumes|length > 1 %}
-                            <div class="mt-1.5 flex flex-wrap gap-1">
-                                {% for v in r.volumes %}
-                                {% set is_missing = v in r.missing_volumes %}
-                                <span class="px-1 py-0.2 rounded text-[9px] font-bold {% if is_missing %}bg-amber-500/15 text-amber-300 border border-amber-500/30{% else %}bg-emerald-500/10 text-emerald-400 border border-emerald-500/20{% endif %}">
-                                    {{ v|int if v == v|int else v }}
-                                </span>
-                                {% endfor %}
-                            </div>
-                            {% endif %}
-                        </td>
-                        <td class="py-3 px-4">
-                            {% if r.status == 'REQUESTED' %}
-                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/20">
-                                <i data-lucide="bell" class="w-3 h-3"></i> Wanted
-                            </span>
-                            {% if r.missing_volumes %}
-                            <div class="text-[11px] text-amber-400 font-medium mt-1">
-                                Missing: Vol {{ r.missing_volumes|join(', ') }}
-                            </div>
-                            {% endif %}
-                            {% elif r.status == 'IN_CALIBRE' %}
-                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                                <i data-lucide="check" class="w-3 h-3"></i> In Calibre
-                            </span>
-                            {% elif r.status == 'DISCOVERY' %}
-                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                                <i data-lucide="compass" class="w-3 h-3"></i> Discovery
-                            </span>
-                            {% elif r.status == 'BLACKLISTED' %}
-                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-800 text-slate-400 border border-slate-700">
-                                <i data-lucide="ban" class="w-3 h-3"></i> Blacklisted
-                            </span>
-                            {% else %}
-                            <span class="text-slate-400">{{ r.status }}</span>
-                            {% endif %}
-
-                            {% if r.download_status == 'DOWNLOADING' %}
-                            <div class="text-[10px] text-cyan-400 font-semibold mt-1 flex items-center gap-1">
-                                <i data-lucide="download" class="w-3 h-3 animate-bounce"></i> Downloading
-                            </div>
-                            {% endif %}
-                        </td>
-                        <td class="py-3 px-4 text-slate-400">
-                            {% if r.link %}
-                            <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" class="hover:text-brand-400 underline underline-offset-2 transition-colors inline-flex items-center gap-1" title="Open RSS Feed Post">
-                                <i data-lucide="rss" class="w-3 h-3 text-amber-500"></i>
-                                <span>{{ r.source_feed_name or '-' }}</span>
-                            </a>
-                            {% else %}
-                            {{ r.source_feed_name or '-' }}
-                            {% endif %}
-                        </td>
-                        <td class="py-3 px-4 text-right">
-                            <div class="flex items-center justify-end gap-1.5">
-                                {% if r.download_url %}
-                                <button onclick="downloadRelease({{ r.id }})" title="Send to qBittorrent" class="p-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-medium text-xs flex items-center gap-1 transition-colors">
-                                    <i data-lucide="download" class="w-3.5 h-3.5"></i>
-                                </button>
-                                {% endif %}
-                                {% if r.status != 'IGNORED' %}
-                                <button type="button" onclick="ignoreReleaseGlobal({{ r.id }}, this)" title="Ignore this release batch" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-amber-300 border border-slate-700 text-xs flex items-center transition-colors">
-                                    <i data-lucide="eye-off" class="w-3.5 h-3.5"></i>
-                                </button>
-                                {% else %}
-                                <button type="button" onclick="unignoreReleaseGlobal({{ r.id }}, this)" title="Un-ignore and restore release" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-700 text-xs flex items-center transition-colors">
-                                    <i data-lucide="eye" class="w-3.5 h-3.5"></i>
-                                </button>
-                                {% endif %}
-                                {% if r.series_name %}
-                                <button type="button" onclick="blacklistSeriesGlobal('{{ r.series_name|escape }}', this)" title="Blacklist series: {{ r.series_name }}" class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 border border-slate-700 text-xs flex items-center transition-colors">
-                                    <i data-lucide="ban" class="w-3.5 h-3.5"></i>
-                                </button>
-                                {% endif %}
-                                {% if r.link %}
-                                <a href="{{ r.link }}" target="_blank" rel="noopener noreferrer" title="Open source page" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs flex items-center gap-1 transition-colors">
-                                    <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
-                                </a>
-                                {% endif %}
-                            </div>
-                        </td>
-                    </tr>
+                <tbody class="divide-y divide-slate-800/60" id="flatTableBody">
+                    {% if releases %}
+                        {% include "partials/flat_release_row_chunk.html" %}
                     {% else %}
-                    <tr>
-                        <td colspan="6" class="py-12 text-center text-slate-500">
-                            No releases found matching the selected filter.
+                    <tr id="flat-loading-skeleton" class="animate-pulse">
+                        <td colspan="6" class="py-8 text-center text-xs text-slate-500 font-medium">
+                            <div class="inline-flex items-center gap-2">
+                                <i data-lucide="loader-2" class="w-4 h-4 animate-spin text-brand-400"></i>
+                                <span>Loading releases...</span>
+                            </div>
                         </td>
                     </tr>
-                    {% endfor %}
+                    {% endif %}
                 </tbody>
             </table>
         </div>
@@ -525,6 +162,9 @@
 </div>
 
 <script>
+const currentStatus = "{{ current_status or '' }}";
+const currentView = "{{ current_view or 'series' }}";
+
 function toggleReleasesAccordion(id) {
     const el = document.getElementById(id);
     const icon = document.getElementById('icon-' + id);
@@ -540,52 +180,191 @@ function toggleReleasesAccordion(id) {
     }
 }
 
-function loadMoreSeries(batchSize = 24) {
-    const deferred = document.querySelectorAll('.series-card-deferred');
-    if (!deferred.length) {
-        const container = document.getElementById('load-more-series-container');
-        if (container) container.style.display = 'none';
-        return;
-    }
-    let count = 0;
-    deferred.forEach(card => {
-        if (count < batchSize) {
-            card.classList.remove('hidden', 'series-card-deferred');
-            count++;
+// Progressive series lazy-loading
+let seriesOffset = 0;
+const seriesLimit = 8;
+let isLoadingSeries = false;
+let hasMoreSeries = true;
+let isFirstSeriesBatch = true;
+
+async function fetchNextSeriesBatch() {
+    if (isLoadingSeries || !hasMoreSeries) return;
+    isLoadingSeries = true;
+
+    const spinner = document.getElementById('load-more-series-container');
+    if (spinner && !isFirstSeriesBatch) spinner.style.display = 'block';
+
+    try {
+        const url = `/api/releases/cards?status=${encodeURIComponent(currentStatus)}&offset=${seriesOffset}&limit=${seriesLimit}`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        const container = document.getElementById('seriesGroupContainer');
+        const skeleton = document.getElementById('series-loading-skeleton');
+        if (skeleton) skeleton.remove();
+
+        if (isFirstSeriesBatch && data.count === 0) {
+            container.innerHTML = `
+                <div class="bg-darkcard border border-slate-800 rounded-2xl p-12 text-center text-slate-500">
+                    <i data-lucide="inbox" class="w-12 h-12 mx-auto mb-3 opacity-40"></i>
+                    <p class="text-sm font-semibold">No manga series found matching current filters.</p>
+                </div>
+            `;
+            hasMoreSeries = false;
+            if (spinner) spinner.style.display = 'none';
+            if (window.lucide) lucide.createIcons();
+            return;
         }
-    });
-    const remaining = document.querySelectorAll('.series-card-deferred').length;
-    const countEl = document.getElementById('deferred-series-count');
-    if (countEl) countEl.innerText = remaining;
-    if (remaining === 0) {
-        const container = document.getElementById('load-more-series-container');
-        if (container) container.style.display = 'none';
+
+        if (data.html) {
+            container.insertAdjacentHTML('beforeend', data.html);
+        }
+
+        seriesOffset += data.count;
+        hasMoreSeries = data.has_more;
+        isFirstSeriesBatch = false;
+
+        const remaining = Math.max(0, data.total - seriesOffset);
+        const countEl = document.getElementById('deferred-series-count');
+        if (countEl) countEl.innerText = remaining;
+
+        if (window.lucide) lucide.createIcons();
+
+        const query = (document.getElementById('releaseSearchInput')?.value || '').trim();
+        if (query) {
+            filterReleases();
+        }
+
+        if (!hasMoreSeries) {
+            if (spinner) spinner.style.display = 'none';
+        } else {
+            // Smoothly stream next batch down the page
+            if (spinner) spinner.style.display = 'block';
+            setTimeout(fetchNextSeriesBatch, 60);
+        }
+    } catch (err) {
+        console.error("Error loading series cards:", err);
+        const btn = document.getElementById('btn-load-more-series');
+        if (btn) btn.classList.remove('hidden');
+    } finally {
+        isLoadingSeries = false;
     }
-    if (window.lucide) lucide.createIcons();
+}
+
+function loadMoreSeries(batchSize = 24) {
+    // Unhide static deferred if any exists
+    const deferred = document.querySelectorAll('.series-card-deferred');
+    if (deferred.length > 0) {
+        let count = 0;
+        deferred.forEach(card => {
+            if (count < batchSize) {
+                card.classList.remove('hidden', 'series-card-deferred');
+                count++;
+            }
+        });
+        const remaining = document.querySelectorAll('.series-card-deferred').length;
+        const countEl = document.getElementById('deferred-series-count');
+        if (countEl) countEl.innerText = remaining;
+        if (remaining === 0) {
+            const container = document.getElementById('load-more-series-container');
+            if (container) container.style.display = 'none';
+        }
+        if (window.lucide) lucide.createIcons();
+    } else {
+        fetchNextSeriesBatch();
+    }
+}
+
+// Progressive flat releases lazy-loading
+let flatOffset = 0;
+const flatLimit = 50;
+let isLoadingFlat = false;
+let hasMoreFlat = true;
+let isFirstFlatBatch = true;
+
+async function fetchNextFlatBatch() {
+    if (isLoadingFlat || !hasMoreFlat) return;
+    isLoadingFlat = true;
+
+    const spinner = document.getElementById('load-more-flat-container');
+    if (spinner && !isFirstFlatBatch) spinner.style.display = 'block';
+
+    try {
+        const url = `/api/releases/flat_rows?status=${encodeURIComponent(currentStatus)}&offset=${flatOffset}&limit=${flatLimit}`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        const tbody = document.getElementById('flatTableBody');
+        const skeleton = document.getElementById('flat-loading-skeleton');
+        if (skeleton) skeleton.remove();
+
+        if (isFirstFlatBatch && data.count === 0) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="6" class="py-12 text-center text-slate-500">
+                        No releases found matching the selected filter.
+                    </td>
+                </tr>
+            `;
+            hasMoreFlat = false;
+            if (spinner) spinner.style.display = 'none';
+            return;
+        }
+
+        if (data.html) {
+            tbody.insertAdjacentHTML('beforeend', data.html);
+        }
+
+        flatOffset += data.count;
+        hasMoreFlat = data.has_more;
+        isFirstFlatBatch = false;
+
+        const countEl = document.getElementById('deferred-flat-count');
+        if (countEl) countEl.innerText = flatOffset;
+
+        if (window.lucide) lucide.createIcons();
+
+        const query = (document.getElementById('releaseSearchInput')?.value || '').trim();
+        if (query) {
+            filterReleases();
+        }
+
+        if (!hasMoreFlat) {
+            if (spinner) spinner.style.display = 'none';
+        } else {
+            if (spinner) spinner.style.display = 'block';
+            setTimeout(fetchNextFlatBatch, 60);
+        }
+    } catch (err) {
+        console.error("Error loading flat releases:", err);
+        const btn = document.getElementById('btn-load-more-flat');
+        if (btn) btn.classList.remove('hidden');
+    } finally {
+        isLoadingFlat = false;
+    }
 }
 
 function loadMoreFlat(batchSize = 50) {
     const deferred = document.querySelectorAll('.flat-row-deferred');
-    if (!deferred.length) {
-        const container = document.getElementById('load-more-flat-container');
-        if (container) container.style.display = 'none';
-        return;
-    }
-    let count = 0;
-    deferred.forEach(row => {
-        if (count < batchSize) {
-            row.classList.remove('hidden', 'flat-row-deferred');
-            count++;
+    if (deferred.length > 0) {
+        let count = 0;
+        deferred.forEach(row => {
+            if (count < batchSize) {
+                row.classList.remove('hidden', 'flat-row-deferred');
+                count++;
+            }
+        });
+        const remaining = document.querySelectorAll('.flat-row-deferred').length;
+        const countEl = document.getElementById('deferred-flat-count');
+        if (countEl) countEl.innerText = remaining;
+        if (remaining === 0) {
+            const container = document.getElementById('load-more-flat-container');
+            if (container) container.style.display = 'none';
         }
-    });
-    const remaining = document.querySelectorAll('.flat-row-deferred').length;
-    const countEl = document.getElementById('deferred-flat-count');
-    if (countEl) countEl.innerText = remaining;
-    if (remaining === 0) {
-        const container = document.getElementById('load-more-flat-container');
-        if (container) container.style.display = 'none';
+        if (window.lucide) lucide.createIcons();
+    } else {
+        fetchNextFlatBatch();
     }
-    if (window.lucide) lucide.createIcons();
 }
 
 // Auto-trigger infinite scroll when near bottom
@@ -609,7 +388,21 @@ function setupInfiniteScroll() {
         obs.observe(flatContainer);
     }
 }
-window.addEventListener('DOMContentLoaded', setupInfiniteScroll);
+
+window.addEventListener('DOMContentLoaded', () => {
+    setupInfiniteScroll();
+    if (currentView === 'flat') {
+        const deferred = document.querySelectorAll('.flat-row-deferred');
+        if (!deferred.length) {
+            fetchNextFlatBatch();
+        }
+    } else {
+        const deferred = document.querySelectorAll('.series-card-deferred');
+        if (!deferred.length) {
+            fetchNextSeriesBatch();
+        }
+    }
+});
 
 function filterReleases() {
     const query = (document.getElementById('releaseSearchInput')?.value || '').toLowerCase().trim();

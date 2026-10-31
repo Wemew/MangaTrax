@@ -41,72 +41,27 @@
                     </tr>
                 </thead>
                 <tbody id="series-table-body" class="divide-y divide-slate-800/60">
-                    {% for s in series_list %}
-                    <tr class="hover:bg-slate-850/50 transition-colors series-row {% if loop.index > 50 %}hidden series-row-deferred{% endif %}" data-name="{{ s.name|lower }}">
-                        <td class="py-3 px-4 text-center">
-                            <button onclick="toggleMonitored({{ s.id }})" title="Click to toggle monitoring" class="w-7 h-7 rounded-lg inline-flex items-center justify-center transition-all {% if s.is_monitored %}bg-brand-500/10 text-brand-400 border border-brand-500/20 hover:bg-brand-500/20{% else %}bg-slate-800 text-slate-500 border border-slate-700 hover:bg-slate-700{% endif %}">
-                                <i data-lucide="{% if s.is_monitored %}check{% else %}x{% endif %}" class="w-3.5 h-3.5"></i>
-                            </button>
-                        </td>
-                        <td class="py-3 px-4">
-                            <div class="flex items-center gap-3">
-                                {% if s.cover_url %}
-                                <img src="/api/covers?url={{ s.cover_url|urlencode }}" alt="Cover" onclick="openImageModal(this.src, '{{ s.name|escape }}')" class="w-8 h-12 object-cover rounded shadow border border-slate-700/60 shrink-0 cursor-pointer hover:opacity-90 transition-all cover-placeholder" loading="lazy" decoding="async" title="Click to enlarge cover artwork">
-                                {% endif %}
-                                <div class="min-w-0">
-                                    <div class="font-bold text-slate-100 text-sm flex items-center gap-1.5 break-words-anywhere">
-                                        <span>{{ s.name }}</span>
-                                        {% if s.website_url %}
-                                        <a href="{{ s.website_url }}" target="_blank" rel="noopener noreferrer" title="Open series webpage" class="text-slate-500 hover:text-brand-400 transition-colors inline-flex">
-                                            <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
-                                        </a>
-                                        {% endif %}
-                                    </div>
-                                    {% if s.publisher %}
-                                    <div class="text-[11px] text-slate-400">Publisher: {{ s.publisher }}</div>
-                                    {% endif %}
-                                </div>
-                            </div>
-                        </td>
-                        <td class="py-3 px-4 text-slate-300">
-                            {{ s.authors or 'Unknown' }}
-                        </td>
-                        <td class="py-3 px-4 text-center font-bold text-slate-200">
-                            {{ s.book_count }}
-                        </td>
-                        <td class="py-3 px-4 text-center font-semibold text-brand-400">
-                            Vol. {{ s.latest_index|int if s.latest_index == s.latest_index|int else s.latest_index }}
-                        </td>
-                        <td class="py-3 px-4 max-w-xs truncate text-slate-400">
-                            {{ s.tags or '-' }}
-                        </td>
-                        <td class="py-3 px-4 text-right">
-                            <div class="flex items-center justify-end gap-2">
-                                <button onclick="backfillSeries({{ s.id }}, '{{ s.name|escape }}', this)" title="Search Nyaa for all past releases and missing volumes of {{ s.name }}" class="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-brand-600/30 text-slate-300 hover:text-brand-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
-                                    <i data-lucide="history" class="w-3.5 h-3.5 text-brand-400"></i>
-                                    <span>Backfill</span>
-                                </button>
-                                <button onclick="editSeriesLink({{ s.id }}, '{{ s.website_url|escape }}', '{{ s.name|escape }}')" title="Edit website link" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs flex items-center gap-1 transition-colors">
-                                    <i data-lucide="link" class="w-3.5 h-3.5"></i>
-                                </button>
-                                <button onclick="blacklistSeriesGlobal('{{ s.name|escape }}', this)" title="Blacklist series" class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 border border-slate-700 text-xs flex items-center gap-1 transition-colors">
-                                    <i data-lucide="ban" class="w-3.5 h-3.5"></i>
-                                </button>
+                    {% if series_list %}
+                        {% include "partials/series_table_row_chunk.html" %}
+                    {% else %}
+                    <tr id="series-loading-skeleton" class="animate-pulse">
+                        <td colspan="7" class="py-8 text-center text-xs text-slate-500 font-medium">
+                            <div class="inline-flex items-center gap-2">
+                                <i data-lucide="loader-2" class="w-4 h-4 animate-spin text-brand-400"></i>
+                                <span>Loading tracked series...</span>
                             </div>
                         </td>
                     </tr>
-                    {% endfor %}
+                    {% endif %}
                 </tbody>
             </table>
         </div>
-        {% if series_list|length > 50 %}
         <div id="load-more-series-container" class="text-center py-4 bg-slate-900/60 border-t border-slate-800">
-            <button onclick="loadMoreSeriesRows()" id="btn-load-more-series" class="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
+            <button onclick="loadMoreSeriesRows()" id="btn-load-more-series" class="hidden px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
                 <i data-lucide="chevrons-down" class="w-4 h-4 text-brand-400"></i>
-                <span>Load More Series (<span id="deferred-series-count">{{ series_list|length - 50 }}</span> remaining)</span>
+                <span>Load More Series (<span id="deferred-series-count">{{ total_series or 0 }}</span> remaining)</span>
             </button>
         </div>
-        {% endif %}
     </div>
 
 </div>
@@ -133,28 +88,97 @@
 <script>
 let currentEditingSeriesId = null;
 
+// Progressive series lazy-loading
+let seriesRowsOffset = 0;
+const seriesRowsLimit = 50;
+let isLoadingSeriesRows = false;
+let hasMoreSeriesRows = true;
+let isFirstSeriesBatch = true;
+
+async function fetchNextSeriesRows() {
+    if (isLoadingSeriesRows || !hasMoreSeriesRows) return;
+    isLoadingSeriesRows = true;
+
+    const container = document.getElementById('load-more-series-container');
+    if (container && !isFirstSeriesBatch) container.style.display = 'block';
+
+    try {
+        const url = `/api/series/rows?offset=${seriesRowsOffset}&limit=${seriesRowsLimit}`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        const tbody = document.getElementById('series-table-body');
+        const skeleton = document.getElementById('series-loading-skeleton');
+        if (skeleton) skeleton.remove();
+
+        if (isFirstSeriesBatch && data.count === 0) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="7" class="py-12 text-center text-slate-500">
+                        No manga series found in Calibre library.
+                    </td>
+                </tr>
+            `;
+            hasMoreSeriesRows = false;
+            if (container) container.style.display = 'none';
+            return;
+        }
+
+        if (data.html) {
+            tbody.insertAdjacentHTML('beforeend', data.html);
+        }
+
+        seriesRowsOffset += data.count;
+        hasMoreSeriesRows = data.has_more;
+        isFirstSeriesBatch = false;
+
+        const remaining = Math.max(0, data.total - seriesRowsOffset);
+        const countEl = document.getElementById('deferred-series-count');
+        if (countEl) countEl.innerText = remaining;
+
+        if (window.lucide) lucide.createIcons();
+
+        const query = (document.getElementById('series-search')?.value || '').trim();
+        if (query) {
+            filterSeries();
+        }
+
+        if (!hasMoreSeriesRows) {
+            if (container) container.style.display = 'none';
+        } else {
+            if (container) container.style.display = 'block';
+            setTimeout(fetchNextSeriesRows, 60);
+        }
+    } catch (err) {
+        console.error("Error loading series rows:", err);
+        const btn = document.getElementById('btn-load-more-series');
+        if (btn) btn.classList.remove('hidden');
+    } finally {
+        isLoadingSeriesRows = false;
+    }
+}
+
 function loadMoreSeriesRows(batchSize = 50) {
     const deferred = document.querySelectorAll('.series-row-deferred');
-    if (!deferred.length) {
-        const container = document.getElementById('load-more-series-container');
-        if (container) container.style.display = 'none';
-        return;
-    }
-    let count = 0;
-    deferred.forEach(row => {
-        if (count < batchSize) {
-            row.classList.remove('hidden', 'series-row-deferred');
-            count++;
+    if (deferred.length > 0) {
+        let count = 0;
+        deferred.forEach(row => {
+            if (count < batchSize) {
+                row.classList.remove('hidden', 'series-row-deferred');
+                count++;
+            }
+        });
+        const remaining = document.querySelectorAll('.series-row-deferred').length;
+        const countEl = document.getElementById('deferred-series-count');
+        if (countEl) countEl.innerText = remaining;
+        if (remaining === 0) {
+            const container = document.getElementById('load-more-series-container');
+            if (container) container.style.display = 'none';
         }
-    });
-    const remaining = document.querySelectorAll('.series-row-deferred').length;
-    const countEl = document.getElementById('deferred-series-count');
-    if (countEl) countEl.innerText = remaining;
-    if (remaining === 0) {
-        const container = document.getElementById('load-more-series-container');
-        if (container) container.style.display = 'none';
+        if (window.lucide) lucide.createIcons();
+    } else {
+        fetchNextSeriesRows();
     }
-    if (window.lucide) lucide.createIcons();
 }
 
 function filterSeries() {
@@ -164,7 +188,7 @@ function filterSeries() {
     if (q) {
         if (container) container.style.display = 'none';
     } else {
-        if (container) container.style.display = '';
+        if (container && hasMoreSeriesRows) container.style.display = '';
     }
 
     rows.forEach(r => {
@@ -196,7 +220,14 @@ function setupSeriesScroll() {
         obs.observe(container);
     }
 }
-window.addEventListener('DOMContentLoaded', setupSeriesScroll);
+
+window.addEventListener('DOMContentLoaded', () => {
+    const existingRows = document.querySelectorAll('#series-table-body .series-row');
+    if (existingRows.length === 0) {
+        fetchNextSeriesRows();
+    }
+    setupSeriesScroll();
+});
 
 async function toggleMonitored(seriesId) {
     try {

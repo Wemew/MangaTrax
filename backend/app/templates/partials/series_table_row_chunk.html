@@ -1,0 +1,55 @@
+{% for s in series_list %}
+<tr class="hover:bg-slate-850/50 transition-colors series-row" data-name="{{ s.name|lower }} {{ (s.authors or '')|lower }} {{ (s.publisher or '')|lower }} {{ (s.tags or '')|lower }}">
+    <td class="py-3 px-4 text-center">
+        <button onclick="toggleMonitored({{ s.id }})" title="Click to toggle monitoring" class="w-7 h-7 rounded-lg inline-flex items-center justify-center transition-all {% if s.is_monitored %}bg-brand-500/10 text-brand-400 border border-brand-500/20 hover:bg-brand-500/20{% else %}bg-slate-800 text-slate-500 border border-slate-700 hover:bg-slate-700{% endif %}">
+            <i data-lucide="{% if s.is_monitored %}check{% else %}x{% endif %}" class="w-3.5 h-3.5"></i>
+        </button>
+    </td>
+    <td class="py-3 px-4">
+        <div class="flex items-center gap-3">
+            {% if s.cover_url %}
+            <img src="/api/covers?url={{ s.cover_url|urlencode }}" alt="Cover" onclick="openImageModal(this.src, '{{ s.name|escape }}')" class="w-8 h-12 object-cover rounded shadow border border-slate-700/60 shrink-0 cursor-pointer hover:opacity-90 transition-all cover-placeholder" loading="lazy" decoding="async" title="Click to enlarge cover artwork">
+            {% endif %}
+            <div class="min-w-0">
+                <div class="font-bold text-slate-100 text-sm flex items-center gap-1.5 break-words-anywhere">
+                    <span>{{ s.name }}</span>
+                    {% if s.website_url %}
+                    <a href="{{ s.website_url }}" target="_blank" rel="noopener noreferrer" title="Open series webpage" class="text-slate-500 hover:text-brand-400 transition-colors inline-flex">
+                        <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
+                    </a>
+                    {% endif %}
+                </div>
+                {% if s.publisher %}
+                <div class="text-[11px] text-slate-400">Publisher: {{ s.publisher }}</div>
+                {% endif %}
+            </div>
+        </div>
+    </td>
+    <td class="py-3 px-4 text-slate-300">
+        {{ s.authors or 'Unknown' }}
+    </td>
+    <td class="py-3 px-4 text-center font-bold text-slate-200">
+        {{ s.book_count }}
+    </td>
+    <td class="py-3 px-4 text-center font-semibold text-brand-400">
+        Vol. {{ s.latest_index|int if s.latest_index == s.latest_index|int else s.latest_index }}
+    </td>
+    <td class="py-3 px-4 max-w-xs truncate text-slate-400">
+        {{ s.tags or '-' }}
+    </td>
+    <td class="py-3 px-4 text-right">
+        <div class="flex items-center justify-end gap-2">
+            <button onclick="backfillSeries({{ s.id }}, '{{ s.name|escape }}', this)" title="Search Nyaa for all past releases and missing volumes of {{ s.name }}" class="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-brand-600/30 text-slate-300 hover:text-brand-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                <i data-lucide="history" class="w-3.5 h-3.5 text-brand-400"></i>
+                <span>Backfill</span>
+            </button>
+            <button onclick="editSeriesLink({{ s.id }}, '{{ s.website_url|escape }}', '{{ s.name|escape }}')" title="Edit website link" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs flex items-center gap-1 transition-colors">
+                <i data-lucide="link" class="w-3.5 h-3.5"></i>
+            </button>
+            <button onclick="blacklistSeriesGlobal('{{ s.name|escape }}', this)" title="Blacklist series" class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 border border-slate-700 text-xs flex items-center gap-1 transition-colors">
+                <i data-lucide="ban" class="w-3.5 h-3.5"></i>
+            </button>
+        </div>
+    </td>
+</tr>
+{% endfor %}

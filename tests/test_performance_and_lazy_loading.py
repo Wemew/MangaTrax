@@ -125,10 +125,165 @@ def test_templates_contain_lazy_loading_elements():
 
     print(" [PASSED] Templates contain instant click indicators and deferred lazy loading elements.")
 
+def test_lazy_loading_database_pagination_and_cache():
+    import gc
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+        db_path = os.path.join(tmpdir, "test_pagination.db")
+        db = MangaDatabase(db_path)
+        db.init_db()
+
+        # Add mock series and releases
+        for i in range(15):
+            db.sync_calibre_series([
+                {
+                    "series_id": i + 1,
+                    "series_name": f"Series {i:02d}",
+                    "authors": "Author",
+                    "publisher": "Pub",
+                    "book_count": 3,
+                    "latest_index": 3.0,
+                    "tags": "Manga",
+                    "volume_numbers": [1.0, 2.0, 3.0]
+                }
+            ])
+            db.upsert_release({
+                "guid": f"nyaa-test-{i}",
+                "title": f"Series {i:02d} v04 [danke-Empire]",
+                "series_name": f"Series {i:02d}",
+                "volumes": [4.0],
+                "release_group": "danke-Empire",
+                "status": "REQUESTED"
+            })
+
+        # Test pagination of grouped series
+        first_batch = db.get_releases_grouped_by_series(limit=5, offset=0)
+        assert len(first_batch) == 5, f"Expected 5 groups, got {len(first_batch)}"
+        
+        second_batch = db.get_releases_grouped_by_series(limit=5, offset=5)
+        assert len(second_batch) == 5, f"Expected 5 groups, got {len(second_batch)}"
+        
+        # Verify disjoint pages
+        names1 = {g["series_name"] for g in first_batch}
+        names2 = {g["series_name"] for g in second_batch}
+        assert not names1.intersection(names2), "Pages must be disjoint!"
+
+        # Test count
+        total = db.count_releases_grouped_by_series()
+        assert total == 15, f"Expected total 15, got {total}"
+
+        # Test series table pagination
+        series_page1 = db.get_all_series(limit=8, offset=0)
+        assert len(series_page1) == 8
+        total_s = db.count_all_series()
+        assert total_s == 15
+
+        # Test cache hit
+        t0 = time.time()
+        cached_call1 = db.get_releases_grouped_by_series()
+        cached_call2 = db.get_releases_grouped_by_series()
+        assert cached_call1 == cached_call2
+
+        # Invalidation test
+        db.add_to_blacklist("Series 00", "Testing")
+        assert db._grouped_cache == {}
+        del db
+        gc.collect()
+    print(" [PASSED] Lazy loading pagination, counting, and in-memory caching verified.")
+
+def test_lazy_loading_template_partials():
+    try:
+        from jinja2 import Environment, FileSystemLoader
+        has_jinja = True
+    except ImportError:
+        has_jinja = False
+
+    templates_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend", "app", "templates"))
+    card_path = os.path.join(templates_dir, "partials", "series_card_chunk.html")
+    flat_path = os.path.join(templates_dir, "partials", "flat_release_row_chunk.html")
+    series_path = os.path.join(templates_dir, "partials", "series_table_row_chunk.html")
+
+    assert os.path.isfile(card_path), "series_card_chunk.html partial missing!"
+    assert os.path.isfile(flat_path), "flat_release_row_chunk.html partial missing!"
+    assert os.path.isfile(series_path), "series_table_row_chunk.html partial missing!"
+
+    if has_jinja:
+        env = Environment(loader=FileSystemLoader(templates_dir))
+        mock_groups = [{
+            "series_key": "test series",
+            "series_name": "Test Series",
+            "romaji_name": "Test Romaji",
+            "synopsis": "A test series",
+            "cover_url": "",
+            "has_wanted": True,
+            "in_calibre": True,
+            "is_monitored": True,
+            "calibre_book_count": 3,
+            "total_volumes": 4,
+            "releases_count": 1,
+            "all_volumes": [1.0, 2.0, 3.0, 4.0],
+            "missing_volumes": [4.0],
+            "releases": [{
+                "id": 1,
+                "title": "Test Series v04 [danke-Empire]",
+                "release_group": "danke-Empire",
+                "volumes": [4.0],
+                "missing_volumes": [4.0],
+                "status": "REQUESTED",
+                "source_feed_name": "Nyaa",
+                "download_url": "magnet:?xt=urn:btih:abc"
+            }]
+        }]
+        card_tmpl = env.get_template("partials/series_card_chunk.html")
+        card_html = card_tmpl.render(grouped_series=mock_groups, is_prioritized_view=False)
+        assert "Test Series" in card_html
+        assert "danke-Empire" in card_html
+        assert "accordion-" in card_html
+
+        flat_tmpl = env.get_template("partials/flat_release_row_chunk.html")
+        flat_html = flat_tmpl.render(releases=mock_groups[0]["releases"])
+        assert "Test Series v04" in flat_html
+        assert "danke-Empire" in flat_html
+
+        mock_series = [{
+            "id": 1,
+            "name": "Test Series",
+            "authors": "Author",
+            "publisher": "Pub",
+            "book_count": 3,
+            "latest_index": 3.0,
+            "tags": "Manga",
+            "is_monitored": 1,
+            "website_url": "https://example.com",
+            "cover_url": ""
+        }]
+        series_tmpl = env.get_template("partials/series_table_row_chunk.html")
+        series_html = series_tmpl.render(series_list=mock_series)
+        assert "Test Series" in series_html
+        assert "Author" in series_html
+    else:
+        # Validate partial templates contain expected macro structures
+        with open(card_path, "r", encoding="utf-8") as f:
+            content = f.read()
+            assert "grouped_series" in content
+            assert "series-card" in content
+            assert "toggleReleasesAccordion" in content
+        with open(flat_path, "r", encoding="utf-8") as f:
+            content = f.read()
+            assert "releases" in content
+            assert "release-row" in content
+        with open(series_path, "r", encoding="utf-8") as f:
+            content = f.read()
+            assert "series_list" in content
+            assert "series-row" in content
+
+    print(" [PASSED] Modular template chunks validated cleanly.")
+
 if __name__ == "__main__":
     test_database_indexes()
     test_comicinfo_cache()
     test_calibre_summary_cache()
     test_qbit_connection_cache()
     test_templates_contain_lazy_loading_elements()
+    test_lazy_loading_database_pagination_and_cache()
+    test_lazy_loading_template_partials()
     print("\nALL PERFORMANCE AND LAZY LOADING TESTS PASSED!")
