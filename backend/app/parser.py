@@ -1,6 +1,6 @@
 import re
 import unicodedata
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Iterable, Set, Union
 from difflib import SequenceMatcher
 
 def normalize_text(text: str) -> str:
