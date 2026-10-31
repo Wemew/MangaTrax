@@ -4,16 +4,45 @@ import json
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 
+import logging
+
+logger = logging.getLogger("mangatrax.database")
+
 class MangaDatabase:
     def __init__(self, db_path: str):
         self.db_path = db_path
-        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        db_dir = os.path.dirname(os.path.abspath(db_path))
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+        except Exception as e:
+            logger.error(f"Error creating database directory '{db_dir}': {e}")
         self.init_db()
 
     def get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=10.0)
+        except sqlite3.OperationalError as e:
+            uid = getattr(os, "getuid", lambda: "N/A")()
+            gid = getattr(os, "getgid", lambda: "N/A")()
+            db_dir = os.path.dirname(os.path.abspath(self.db_path))
+            dir_stat = ""
+            try:
+                st = os.stat(db_dir)
+                dir_stat = f"Directory permissions: mode={oct(st.st_mode)}, uid={st.st_uid}, gid={st.st_gid}"
+            except Exception:
+                pass
+            raise sqlite3.OperationalError(
+                f"Failed to open/create database file '{self.db_path}'. {dir_stat}. "
+                f"Running as UID={uid}, GID={gid}. "
+                f"Please ensure the data directory on your host is writable by UID {uid} "
+                f"(e.g. 'chmod -R 777 <host_folder>' on TrueNAS) or configure PUID/PGID without 'user:' in Docker."
+            ) from e
+
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL;")
+        try:
+            conn.execute("PRAGMA journal_mode = WAL;")
+        except sqlite3.OperationalError:
+            conn.execute("PRAGMA journal_mode = DELETE;")
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn
 

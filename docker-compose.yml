@@ -19,6 +19,8 @@ services:
       - CALIBRE_DIR=/calibre
       - STAGING_DIR=/staging
       - DATA_DIR=/app/data
+      - PUID=1000
+      - PGID=1000
       - QBIT_URL=http://qbittorrent:8080
       - QBIT_USER=admin
       - QBIT_PASS=adminadmin

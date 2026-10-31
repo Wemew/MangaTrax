@@ -1,11 +1,11 @@
 services:
   mangatrax:
-    # Option A: Build directly from GitHub repo on TrueNAS
+    # Option A: Build directly from GitHub repo on TrueNAS in Dockhand
     build:
       context: https://github.com/Wemew/MangaTrax.git#main
       dockerfile: Dockerfile
 
-    # Option B (Alternative): If you git cloned the repository locally on your server:
+    # Option B: If you git cloned the repository locally on your server:
     # build:
     #   context: .
     #   dockerfile: Dockerfile
@@ -14,18 +14,15 @@ services:
     container_name: mangatrax
     restart: unless-stopped
 
-    # TrueNAS SCALE unprivileged 'apps' user and group
-    user: "568:568"
-
-    # Container security hardening
+    # Security hardening
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
 
     ports:
-      # Format: "HOST_PORT:CONTAINER_PORT"
-      # Change 8082 if needed to avoid conflicts with other apps on your server
+      # Host port : Container port
+      # Change 8082 if you already have another service running on it
       - "8082:8080"
 
     environment:
@@ -33,6 +30,9 @@ services:
       - CALIBRE_DIR=/calibre
       - STAGING_DIR=/staging
       - DATA_DIR=/app/data
+      # TrueNAS SCALE unprivileged 'apps' user and group (568:568)
+      - PUID=568
+      - PGID=568
       - QBIT_URL=http://qbittorrent:8080
       - QBIT_USER=admin
       - QBIT_PASS=adminadmin
@@ -48,5 +48,7 @@ services:
       - /mnt/tank/media/manga/staging:/staging
 
       # 3. Mount persistent storage for MangaTrax database, cached covers, and logs
-      # Replace '/mnt/tank/apps/mangatrax/data' with your app dataset:
-      - /mnt/tank/apps/mangatrax/data:/app/data
+      # Dockhand keeps relative './data' inside the stack directory automatically:
+      - ./data:/app/data
+      # Or use a dedicated TrueNAS dataset path:
+      # - /mnt/tank/apps/mangatrax/data:/app/data
