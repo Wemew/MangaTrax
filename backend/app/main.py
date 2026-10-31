@@ -174,14 +174,6 @@ async def prioritized_view(request: Request, status: Optional[str] = None, view:
             "current_view": view
         }
     )
-            "active_page": "prioritized",
-            "prioritized_groups": prioritized_groups,
-            "releases": releases,
-            "grouped_series": grouped_series,
-            "current_status": status,
-            "current_view": view
-        }
-    )
 
 @app.get("/api/releases/grouped")
 async def api_releases_grouped(status: Optional[str] = None):

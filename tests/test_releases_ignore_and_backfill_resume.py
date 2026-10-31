@@ -187,8 +187,18 @@ def test_template_features_and_modal():
 
     print(" [PASSED] Template feature parity and backfill modal verified.")
 
+def test_all_python_files_syntax():
+    import glob
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend"))
+    for py_file in glob.glob(os.path.join(backend_dir, "**", "*.py"), recursive=True):
+        with open(py_file, "r", encoding="utf-8") as f:
+            code = f.read()
+        compile(code, py_file, "exec")
+    print(" [PASSED] All backend Python files compile cleanly with zero syntax errors.")
+
 if __name__ == "__main__":
     test_ignore_and_unignore_release_lifecycle()
     test_backfill_start_page_and_resume()
     test_template_features_and_modal()
+    test_all_python_files_syntax()
     print("\nALL IGNORE, RESUME, AND PARITY TESTS PASSED!")
