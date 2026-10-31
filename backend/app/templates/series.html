@@ -51,7 +51,7 @@
                         <td class="py-3 px-4">
                             <div class="flex items-center gap-3">
                                 {% if s.cover_url %}
-                                <img src="/api/covers?url={{ s.cover_url|urlencode }}" alt="Cover" class="w-8 h-12 object-cover rounded shadow border border-slate-700/60 shrink-0" loading="lazy">
+                                <img src="/api/covers?url={{ s.cover_url|urlencode }}" alt="Cover" onclick="openImageModal(this.src, '{{ s.name|escape }}')" class="w-8 h-12 object-cover rounded shadow border border-slate-700/60 shrink-0 cursor-pointer hover:opacity-90 transition-all" loading="lazy" title="Click to enlarge cover artwork">
                                 {% endif %}
                                 <div class="min-w-0">
                                     <div class="font-bold text-slate-100 text-sm flex items-center gap-1.5 break-words-anywhere">

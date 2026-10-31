@@ -155,7 +155,7 @@
                     <!-- Cover Image -->
                     <div class="w-16 h-24 shrink-0 rounded-lg overflow-hidden bg-slate-900 border border-slate-800 relative shadow">
                         {% if r.cover_url %}
-                        <img src="/api/covers?url={{ r.cover_url|urlencode }}" alt="Cover" class="w-full h-full object-cover group-hover:scale-105 transition-transform" loading="lazy">
+                        <img src="/api/covers?url={{ r.cover_url|urlencode }}" alt="Cover" onclick="openImageModal(this.src, '{{ (r.series_name or r.title)|escape }}')" class="w-full h-full object-cover group-hover:scale-105 transition-transform cursor-pointer" loading="lazy" title="Click to enlarge cover artwork">
                         {% else %}
                         <div class="w-full h-full flex flex-col items-center justify-center text-slate-600">
                             <i data-lucide="layers" class="w-6 h-6"></i>

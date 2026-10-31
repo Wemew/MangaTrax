@@ -3,6 +3,7 @@ import sys
 import tempfile
 import zipfile
 import shutil
+from unittest import mock
 
 # Ensure app is in sys.path
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -992,6 +993,144 @@ def test_light_novel_filtering():
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+def test_paginated_discovery_and_deduplication():
+    print("--> Testing Paginated Discovery & Series Deduplication...")
+    temp_dir = tempfile.mkdtemp()
+    try:
+        db_path = os.path.join(temp_dir, "test_discovery.db")
+        db = MangaDatabase(db_path)
+
+        # Insert 15 discovery releases across 5 distinct series (3 releases each)
+        series_names = ["Spy x Family", "Chainsaw Man", "Dandadan", "Frieren", "Jujutsu Kaisen"]
+        for i, s_name in enumerate(series_names):
+            for v in [1, 2, 3]:
+                db.upsert_release({
+                    "guid": f"disc-{i}-{v}",
+                    "title": f"[Manga] {s_name} Vol. {v} [Digital]",
+                    "series_name": s_name,
+                    "volume_start": float(v),
+                    "volume_end": float(v),
+                    "is_bundle": False,
+                    "volumes": [float(v)],
+                    "download_url": f"magnet:?xt=urn:btih:mock{i}{v}",
+                    "link": f"https://example.com/post/{i}/{v}",
+                    "cover_url": f"https://example.com/covers/{i}.jpg" if v == 1 else "",
+                    "description": f"Synopsis for {s_name}" if v == 1 else "",
+                    "source_feed_name": "Test Manga Feed",
+                    "status": "DISCOVERY"
+                })
+
+        # 1. Total discovery count should collapse by series (exactly 5 series)
+        total_series = db.count_discovery_releases()
+        assert total_series == 5, f"Expected 5 deduplicated series, got {total_series}"
+
+        # 2. Paginated fetching
+        # Page 1: limit 2, offset 0 -> 2 items
+        page1 = db.get_discovery_releases(limit=2, offset=0)
+        assert len(page1) == 2, f"Expected 2 items on page 1, got {len(page1)}"
+        p1_series = {r["series_name"] for r in page1}
+        assert len(p1_series) == 2
+
+        # Page 2: limit 2, offset 2 -> 2 items
+        page2 = db.get_discovery_releases(limit=2, offset=2)
+        assert len(page2) == 2, f"Expected 2 items on page 2, got {len(page2)}"
+        p2_series = {r["series_name"] for r in page2}
+        assert len(p2_series) == 2
+        assert not (p1_series & p2_series), "Pages should not overlap series"
+
+        # Page 3: limit 2, offset 4 -> 1 item remaining
+        page3 = db.get_discovery_releases(limit=2, offset=4)
+        assert len(page3) == 1, f"Expected 1 item on page 3, got {len(page3)}"
+
+        # 3. Canonical selection should prefer release with synopsis / cover
+        all_disc = db.get_discovery_releases(limit=10, offset=0)
+        for r in all_disc:
+            assert r["description"].startswith("Synopsis for"), f"Should pick release with description for {r['series_name']}"
+
+        # 4. Search filtering
+        frieren_count = db.count_discovery_releases(search="frieren")
+        assert frieren_count == 1, f"Expected 1 matching series for 'frieren', got {frieren_count}"
+        frieren_disc = db.get_discovery_releases(search="frieren")
+        assert len(frieren_disc) == 1
+        assert frieren_disc[0]["series_name"] == "Frieren"
+
+        # 5. get_release_by_id
+        target_id = frieren_disc[0]["id"]
+        rel_by_id = db.get_release_by_id(target_id)
+        assert rel_by_id is not None
+        assert rel_by_id["series_name"] == "Frieren"
+
+        print("    [PASSED] Paginated discovery, series deduplication, and search filtering verified.")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+def test_webhook_notifications_service():
+    print("--> Testing Webhook Notification System (Discord & Generic)...")
+    from app.notifier.webhook import NotificationService, SimpleHttpResponse
+
+    posted_payloads = []
+
+    def mock_post_json(url, json_data, timeout=10.0):
+        posted_payloads.append({"url": url, "data": json_data})
+        return SimpleHttpResponse(204, "")
+
+    with mock.patch("app.notifier.webhook._post_json", side_effect=mock_post_json):
+        service = NotificationService(
+            discord_webhook="https://discord.com/api/webhooks/test/123",
+            generic_webhook="https://notify.home.arpa/webhook"
+        )
+
+        sample_release = {
+            "title": "[Manga] Chainsaw Man Vol. 12 [VIZ]",
+            "series_name": "Chainsaw Man",
+            "volume_start": 12.0,
+            "volume_end": 12.0,
+            "is_bundle": False,
+            "link": "https://nyaa.si/view/123456",
+            "cover_url": "https://example.com/csm.jpg",
+            "source_feed_name": "Nyaa Manga",
+            "release_group": "VIZ"
+        }
+
+        # 1. Test notify_new_request
+        service.notify_new_request(sample_release)
+        assert len(posted_payloads) == 2, f"Expected 2 dispatches (discord + generic), got {len(posted_payloads)}"
+        
+        discord_call = next(p for p in posted_payloads if "discord" in p["url"])
+        generic_call = next(p for p in posted_payloads if "notify.home.arpa" in p["url"])
+
+        # Verify Discord embed
+        d_embed = discord_call["data"]["embeds"][0]
+        assert "Chainsaw Man" in d_embed["title"]
+        assert d_embed["color"] == 0xf59e0b # Amber
+        assert d_embed["thumbnail"]["url"] == "https://example.com/csm.jpg"
+        assert any(f["name"] == "Series" and f["value"] == "Chainsaw Man" for f in d_embed["fields"])
+
+        # Verify Generic payload
+        assert generic_call["data"]["event"] == "NEW_REQUEST"
+        assert generic_call["data"]["release"]["series_name"] == "Chainsaw Man"
+
+        posted_payloads.clear()
+
+        # 2. Test notify_acquired
+        service.notify_acquired(sample_release)
+        assert len(posted_payloads) == 2
+        d_embed_acq = next(p for p in posted_payloads if "discord" in p["url"])["data"]["embeds"][0]
+        assert "Added to Calibre" in d_embed_acq["title"]
+        assert d_embed_acq["color"] == 0x10b981 # Emerald
+
+        posted_payloads.clear()
+
+        # 3. Test test_webhook diagnostics
+        test_result = service.test_webhook()
+        assert test_result["status"] == "success"
+        assert "discord" in test_result["results"]
+        assert test_result["results"]["discord"]["success"] is True
+        assert "generic" in test_result["results"]
+        assert test_result["results"]["generic"]["success"] is True
+
+        print("    [PASSED] Webhook notifications for requests, acquisitions, and test diagnostics verified.")
+
 if __name__ == "__main__":
     print("==================================================")
     print("Running MangaTrax Comprehensive Integration Suite")
@@ -1008,6 +1147,8 @@ if __name__ == "__main__":
     test_nyaa_historical_crawl_and_series_backfill()
     test_in_app_bittorrent_downloader_setup()
     test_light_novel_filtering()
+    test_paginated_discovery_and_deduplication()
+    test_webhook_notifications_service()
     print("==================================================")
     print("ALL TESTS PASSED SUCCESSFULLY! (100% VERIFIED)")
     print("==================================================")

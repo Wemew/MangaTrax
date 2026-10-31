@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import logging
 from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
@@ -149,16 +150,32 @@ async def api_releases_grouped(status: Optional[str] = None):
     return JSONResponse({"status": "success", "count": len(groups), "series_groups": groups})
 
 @app.get("/discovery", response_class=HTMLResponse)
-async def discovery_view(request: Request):
-    discovered = db.get_discovery_releases(limit=100)
+async def discovery_view(
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(24, ge=6, le=120),
+    q: Optional[str] = Query(None)
+):
+    clean_q = q.strip() if q else None
+    total_count = db.count_discovery_releases(search=clean_q)
+    total_pages = max(1, math.ceil(total_count / page_size))
+    current_page = min(page, total_pages) if total_count > 0 else 1
+    offset = (current_page - 1) * page_size
+    discovered = db.get_discovery_releases(limit=page_size, offset=offset, search=clean_q)
     blacklisted = db.get_blacklisted_series()
+
     return templates.TemplateResponse(
         request=request,
         name="discovery.html",
         context={
             "active_page": "discovery",
             "discovered_releases": discovered,
-            "blacklisted_series": blacklisted
+            "blacklisted_series": blacklisted,
+            "current_page": current_page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "total_count": total_count,
+            "search_query": clean_q or ""
         }
     )
 
@@ -544,6 +561,13 @@ async def api_discovery_track(payload: Dict[str, Any]):
 
     db.track_discovered_series(target_name, release_id)
     db.log_activity("SERIES_TRACKED", f"Started tracking new series: {target_name}")
+    if release_id:
+        try:
+            rel_item = db.get_release_by_id(release_id)
+            if rel_item:
+                scheduler.get_notifier().notify_new_request(rel_item)
+        except Exception as e:
+            logger.debug(f"Webhook notification failed on track: {e}")
     return JSONResponse({"status": "success", "tracked_name": target_name})
 
 @app.post("/api/discovery/blacklist")
@@ -562,8 +586,7 @@ async def api_discovery_blacklist(payload: Dict[str, Any]):
 async def api_discovery_fetch_info(release_id: int):
     """Fetches series synopsis and MangaUpdates link for a discovery release on demand."""
     import asyncio
-    releases = db.get_discovery_releases(limit=500)
-    target = next((r for r in releases if r["id"] == release_id), None)
+    target = db.get_release_by_id(release_id)
     if not target:
         raise HTTPException(status_code=404, detail="Discovery release not found")
 
@@ -596,6 +619,16 @@ async def api_save_settings(payload: Dict[str, Any]):
         db.set_setting(k, str(v))
     db.log_activity("SETTINGS_UPDATED", "Application settings updated")
     return JSONResponse({"status": "success"})
+
+@app.post("/api/settings/test-webhook")
+async def api_test_webhook(payload: Optional[Dict[str, Any]] = None):
+    """Test Discord and/or generic webhook endpoints with immediate feedback."""
+    p = payload or {}
+    discord_url = p.get("discord_webhook_url")
+    generic_url = p.get("generic_webhook_url") or p.get("apprise_url")
+    notifier = scheduler.get_notifier()
+    res = notifier.test_webhook(discord_url=discord_url, apprise_url=generic_url)
+    return JSONResponse(res)
 
 # --- Polite Historical Backfill Endpoints ---
 

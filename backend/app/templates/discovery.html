@@ -55,7 +55,7 @@
         <button onclick="switchTab('discovery')" id="tab-btn-discovery" class="pb-3 border-b-2 border-brand-500 text-brand-400 flex items-center gap-2 transition-colors">
             <i data-lucide="sparkles" class="w-4 h-4"></i>
             <span>Discovered Manga (Vol. 1 & Standalones)</span>
-            <span class="px-2 py-0.5 rounded-full text-xs bg-brand-500/15 text-brand-300 border border-brand-500/20" id="discovery-badge">{{ discovered_releases|length }}</span>
+            <span class="px-2 py-0.5 rounded-full text-xs bg-brand-500/15 text-brand-300 border border-brand-500/20" id="discovery-badge">{{ total_count }}</span>
         </button>
         <button onclick="switchTab('blacklist')" id="tab-btn-blacklist" class="pb-3 border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center gap-2 transition-colors">
             <i data-lucide="ban" class="w-4 h-4 text-rose-400"></i>
@@ -66,15 +66,32 @@
 
     <!-- TAB 1: Discovery Panel -->
     <div id="tab-content-discovery" class="space-y-4">
-        <!-- Search filter -->
-        <div class="bg-darkcard border border-slate-800 rounded-2xl p-4 flex items-center justify-between gap-3">
-            <div class="relative w-full sm:w-80">
+        <!-- Search filter & Pagination Controls -->
+        <div class="bg-darkcard border border-slate-800 rounded-2xl p-4 flex flex-col md:flex-row items-center justify-between gap-3">
+            <form action="/discovery" method="GET" class="relative w-full md:w-80 flex items-center">
                 <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2"></i>
-                <input type="text" id="discovery-search" oninput="filterDiscovery()" placeholder="Filter discovered manga..." class="w-full bg-slate-950/70 border border-slate-700/80 rounded-xl pl-10 pr-4 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500">
+                <input type="text" name="q" id="discovery-search" value="{{ search_query }}" oninput="filterDiscovery()" placeholder="Search or filter discovered manga..." class="w-full bg-slate-950/70 border border-slate-700/80 rounded-xl pl-10 pr-8 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500">
+                <input type="hidden" name="page_size" value="{{ page_size }}">
+                {% if search_query %}
+                <a href="/discovery?page_size={{ page_size }}" class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white" title="Clear search">
+                    <i data-lucide="x" class="w-3.5 h-3.5"></i>
+                </a>
+                {% endif %}
+            </form>
+            <div class="flex items-center justify-between w-full md:w-auto gap-4 text-xs text-slate-400">
+                <p class="hidden sm:block">
+                    Showing <strong class="text-white">{{ (current_page - 1) * page_size + 1 if total_count > 0 else 0 }}</strong> to <strong class="text-white">{{ [current_page * page_size, total_count]|min }}</strong> of <strong class="text-white">{{ total_count }}</strong> potential series
+                </p>
+                <div class="flex items-center gap-2">
+                    <span class="text-slate-400 text-xs">Per page:</span>
+                    <select onchange="changePageSize(this.value)" class="bg-slate-900 border border-slate-700 text-slate-200 rounded-xl px-2.5 py-1 text-xs focus:outline-none focus:border-brand-500 cursor-pointer">
+                        <option value="12" {% if page_size == 12 %}selected{% endif %}>12</option>
+                        <option value="24" {% if page_size == 24 %}selected{% endif %}>24</option>
+                        <option value="48" {% if page_size == 48 %}selected{% endif %}>48</option>
+                        <option value="96" {% if page_size == 96 %}selected{% endif %}>96</option>
+                    </select>
+                </div>
             </div>
-            <p class="text-xs text-slate-400 hidden sm:block">
-                Showing {{ discovered_releases|length }} potential new series
-            </p>
         </div>
 
         {% if discovered_releases %}
@@ -102,7 +119,7 @@
                     <!-- Manga info container -->
                     <div class="flex gap-3.5 mt-2 min-w-0">
                         {% if item.cover_url %}
-                        <img src="/api/covers?url={{ item.cover_url|urlencode }}" alt="Cover" loading="lazy" class="w-16 h-24 object-cover rounded-lg border border-slate-800 shrink-0 shadow-md">
+                        <img src="/api/covers?url={{ item.cover_url|urlencode }}" alt="Cover" loading="lazy" onclick="openImageModal(this.src, '{{ (item.series_name or item.title)|escape }}')" class="w-16 h-24 object-cover rounded-lg border border-slate-800 shrink-0 shadow-md cursor-pointer hover:opacity-90 hover:scale-[1.03] transition-all" title="Click to enlarge cover artwork">
                         {% else %}
                         <div class="w-16 h-24 rounded-lg bg-slate-900 border border-slate-800 flex flex-col items-center justify-center shrink-0 text-slate-600">
                             <i data-lucide="layers" class="w-6 h-6"></i>
@@ -179,6 +196,53 @@
             </div>
             {% endfor %}
         </div>
+
+        <!-- Pagination Controls -->
+        {% if total_pages and total_pages > 1 %}
+        <div class="mt-6 bg-darkcard border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400 shadow-lg">
+            <div>
+                Showing <strong class="text-white">{{ (current_page - 1) * page_size + 1 }}</strong> to <strong class="text-white">{{ [current_page * page_size, total_count]|min }}</strong> of <strong class="text-white">{{ total_count }}</strong> series
+            </div>
+            <div class="flex items-center space-x-1.5">
+                <!-- First & Prev -->
+                {% if current_page > 1 %}
+                <a href="/discovery?page=1&page_size={{ page_size }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="First Page">
+                    <i data-lucide="chevrons-left" class="w-3.5 h-3.5"></i>
+                </a>
+                <a href="/discovery?page={{ current_page - 1 }}&page_size={{ page_size }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
+                    <i data-lucide="chevron-left" class="w-3.5 h-3.5"></i>
+                    <span>Previous</span>
+                </a>
+                {% else %}
+                <span class="px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed flex items-center gap-1">
+                    <i data-lucide="chevron-left" class="w-3.5 h-3.5"></i>
+                    <span>Previous</span>
+                </span>
+                {% endif %}
+
+                <!-- Page Indicator -->
+                <span class="px-3 py-1.5 rounded-lg bg-brand-500/15 text-brand-300 border border-brand-500/30 font-bold">
+                    Page {{ current_page }} of {{ total_pages }}
+                </span>
+
+                <!-- Next & Last -->
+                {% if current_page < total_pages %}
+                <a href="/discovery?page={{ current_page + 1 }}&page_size={{ page_size }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1">
+                    <span>Next</span>
+                    <i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
+                </a>
+                <a href="/discovery?page={{ total_pages }}&page_size={{ page_size }}{% if search_query %}&q={{ search_query|urlencode }}{% endif %}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors flex items-center gap-1" title="Last Page">
+                    <i data-lucide="chevrons-right" class="w-3.5 h-3.5"></i>
+                </a>
+                {% else %}
+                <span class="px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed flex items-center gap-1">
+                    <span>Next</span>
+                    <i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
+                </span>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
         {% else %}
         <div class="bg-darkcard border border-slate-800/80 rounded-2xl p-12 text-center">
             <div class="w-14 h-14 rounded-2xl bg-brand-500/10 text-brand-400 border border-brand-500/20 flex items-center justify-center mx-auto mb-3">
@@ -310,6 +374,13 @@
             const series = c.dataset.series;
             c.style.display = (title.includes(query) || series.includes(query)) ? '' : 'none';
         });
+    }
+
+    function changePageSize(size) {
+        const url = new URL(window.location.href);
+        url.searchParams.set('page_size', size);
+        url.searchParams.set('page', '1');
+        window.location.href = url.toString();
     }
 
     function filterBlacklist() {

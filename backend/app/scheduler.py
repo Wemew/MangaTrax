@@ -15,6 +15,7 @@ from app.providers.nyaa import NyaaMangaProvider
 from app.metadata.anilist import AniListMetadataService
 from app.metadata.mangaupdates import MangaUpdatesService
 from app.parser import is_chapter_only, is_light_novel
+from app.notifier.webhook import NotificationService
 
 logger = logging.getLogger("mangatrax.scheduler")
 
@@ -29,6 +30,11 @@ class MangaScheduler:
         self._lock = threading.Lock()
         self.is_backfilling = False
         self.stop_backfill_requested = False
+
+    def get_notifier(self) -> NotificationService:
+        discord = self.db.get_setting("discord_webhook_url", "")
+        generic = self.db.get_setting("apprise_url", "") or self.db.get_setting("generic_webhook_url", "")
+        return NotificationService(discord_webhook=discord, generic_webhook=generic)
 
     def get_qbit_client(self) -> QBitClient:
         settings = self.db.get_all_settings()
@@ -67,6 +73,7 @@ class MangaScheduler:
             pending = self.db.get_pending_requests()
             resolved = matcher.resolve_pending_requests(pending)
 
+            notifier = self.get_notifier()
             for item in resolved:
                 self.db.update_release_status(item["release_id"], "IN_CALIBRE")
                 self.db.log_activity(
@@ -74,6 +81,12 @@ class MangaScheduler:
                     f"Resolved: '{item['title']}' is now available in your Calibre library.",
                     item["reason"]
                 )
+                try:
+                    rel_row = self.db.get_release_by_id(item["release_id"])
+                    if rel_row:
+                        notifier.notify_acquired(rel_row)
+                except Exception as e:
+                    logger.debug(f"Webhook notification failed for acquired release: {e}")
 
             summary = f"Synced {synced_count} manga series from Calibre; auto-resolved {len(resolved)} acquired requests."
             logger.info(summary)
@@ -217,6 +230,12 @@ class MangaScheduler:
                     if status == "REQUESTED":
                         feed_requested += 1
                         total_requested += 1
+
+                        if is_new:
+                            try:
+                                self.get_notifier().notify_new_request(rel_dict)
+                            except Exception as e:
+                                logger.debug(f"Webhook notification failed for new request: {e}")
 
                         if is_new and global_auto_download and feed.get("auto_download"):
                             success = qbit.add_torrent(
@@ -430,6 +449,13 @@ class MangaScheduler:
             total_found += 1
             if status == "REQUESTED":
                 total_requested += 1
+                if is_new:
+                    try:
+                        rel_data = self.db.get_release_by_id(rel_id) if rel_id else None
+                        if rel_data:
+                            self.get_notifier().notify_new_request(rel_data)
+                    except Exception as e:
+                        logger.debug(f"Webhook notification failed for backfill request: {e}")
                 if is_new and global_auto_download and rel_id:
                     success = qbit.add_torrent(
                         url_or_magnet=rel.download_url,

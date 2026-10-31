@@ -530,18 +530,99 @@ class MangaDatabase:
     def get_pending_requests(self) -> List[Dict[str, Any]]:
         return self.get_releases(status="REQUESTED", limit=1000)
 
-    def get_discovery_releases(self, limit: int = 100) -> List[Dict[str, Any]]:
+    def get_release_by_id(self, release_id: int) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("""
-                SELECT r.* 
-                FROM releases r
-                WHERE (r.volume_start = 1.0 OR r.volume_start IS NULL)
-                  AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED')
-                  AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
-                  AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1))
-                ORDER BY r.updated_at DESC LIMIT ?;
-            """, (limit,))
+            cur.execute("SELECT * FROM releases WHERE id = ?;", (release_id,))
+            row = cur.fetchone()
+            if row:
+                d = dict(row)
+                d["volumes"] = json.loads(d.get("volumes_json") or "[]")
+                return d
+            return None
+
+    def count_discovery_releases(self, search: Optional[str] = None) -> int:
+        """
+        Returns total count of unique discovered manga series (Volume 1 or unnumbered standalones)
+        which are not in Calibre, not monitored in series_tracking, and not blacklisted.
+        Deduplicates by series name so each series is counted at most once.
+        """
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            search_clause = ""
+            params = []
+            if search and search.strip():
+                clean_s = f"%{search.strip().lower()}%"
+                search_clause = "AND (lower(r.title) LIKE ? OR lower(r.series_name) LIKE ?)"
+                params.extend([clean_s, clean_s])
+
+            query = f"""
+                WITH ranked_discovery AS (
+                    SELECT r.id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY lower(trim(coalesce(nullif(r.series_name, ''), r.title)))
+                               ORDER BY 
+                                   (CASE WHEN r.cover_url IS NOT NULL AND length(trim(r.cover_url)) > 0 THEN 1 ELSE 0 END) DESC,
+                                   (CASE WHEN r.description IS NOT NULL AND length(trim(r.description)) > 0 THEN 1 ELSE 0 END) DESC,
+                                   (CASE WHEN r.mangaupdates_url IS NOT NULL AND length(trim(r.mangaupdates_url)) > 0 THEN 1 ELSE 0 END) DESC,
+                                   r.updated_at DESC,
+                                   r.id DESC
+                           ) as rn
+                    FROM releases r
+                    WHERE (r.volume_start = 1.0 OR r.volume_start IS NULL)
+                      AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED')
+                      AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
+                      AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1))
+                      {search_clause}
+                )
+                SELECT count(*) FROM ranked_discovery WHERE rn = 1;
+            """
+            cur.execute(query, tuple(params))
+            row = cur.fetchone()
+            return row[0] if row else 0
+
+    def get_discovery_releases(self, limit: int = 24, offset: int = 0, search: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Returns releases that are Volume 1 or unnumbered (standalone),
+        which are NOT currently in Calibre, NOT in series_tracking, and NOT blacklisted.
+        Deduplicates by series name so each potential manga series appears at most once.
+        Supports pagination with limit & offset, and optional keyword search.
+        """
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            search_clause = ""
+            params = []
+            if search and search.strip():
+                clean_s = f"%{search.strip().lower()}%"
+                search_clause = "AND (lower(r.title) LIKE ? OR lower(r.series_name) LIKE ?)"
+                params.extend([clean_s, clean_s])
+
+            query = f"""
+                WITH ranked_discovery AS (
+                    SELECT r.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY lower(trim(coalesce(nullif(r.series_name, ''), r.title)))
+                               ORDER BY 
+                                   (CASE WHEN r.cover_url IS NOT NULL AND length(trim(r.cover_url)) > 0 THEN 1 ELSE 0 END) DESC,
+                                   (CASE WHEN r.description IS NOT NULL AND length(trim(r.description)) > 0 THEN 1 ELSE 0 END) DESC,
+                                   (CASE WHEN r.mangaupdates_url IS NOT NULL AND length(trim(r.mangaupdates_url)) > 0 THEN 1 ELSE 0 END) DESC,
+                                   r.updated_at DESC,
+                                   r.id DESC
+                           ) as rn
+                    FROM releases r
+                    WHERE (r.volume_start = 1.0 OR r.volume_start IS NULL)
+                      AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED')
+                      AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
+                      AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1))
+                      {search_clause}
+                )
+                SELECT * FROM ranked_discovery
+                WHERE rn = 1
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ? OFFSET ?;
+            """
+            params.extend([limit, offset])
+            cur.execute(query, tuple(params))
             rows = [dict(row) for row in cur.fetchall()]
             for r in rows:
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
@@ -704,15 +785,7 @@ class MangaDatabase:
             cur.execute("SELECT count(*) FROM releases WHERE download_status = 'DOWNLOADING';")
             active_downloads = cur.fetchone()[0]
 
-            cur.execute("""
-                SELECT count(*) 
-                FROM releases r
-                WHERE (r.volume_start = 1.0 OR r.volume_start IS NULL)
-                  AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED')
-                  AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
-                  AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1));
-            """)
-            discovered_count = cur.fetchone()[0]
+            discovered_count = self.count_discovery_releases()
 
             return {
                 "monitored_series": monitored_series,
