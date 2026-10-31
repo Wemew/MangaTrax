@@ -116,7 +116,7 @@
                     <tbody class="divide-y divide-slate-800/60">
                         {% for t in torrents %}
                         <tr class="hover:bg-slate-850/50 transition-colors">
-                            <td class="py-3 px-4 max-w-xs font-semibold text-white line-clamp-1" title="{{ t.name }}">
+                            <td class="py-3 px-4 max-w-xs font-semibold text-white truncate break-words [overflow-wrap:anywhere]" title="{{ t.name }}">
                                 {{ t.name }}
                             </td>
                             <td class="py-3 px-4 text-slate-300">

@@ -494,7 +494,7 @@ def test_mangaupdates_and_rss_links():
     print("--> Testing MangaUpdates Service & RSS Feed Link Integration...")
     from app.metadata.mangaupdates import MangaUpdatesService, clean_description_text
 
-    # 1. BBCode, HTML, and publisher prefix cleaning
+    # 1. BBCode, HTML, Markdown links, and publisher prefix cleaning
     raw_desc = "[b]From Viz:[/b] In a world where <p>demons lurk</p>, young [url=https://example.com]Denji[/url] must survive."
     cleaned = clean_description_text(raw_desc)
     assert "[b]" not in cleaned
@@ -502,6 +502,11 @@ def test_mangaupdates_and_rss_links():
     assert "From Viz:" not in cleaned
     assert "<p>" not in cleaned
     assert "In a world where demons lurk, young Denji must survive." == cleaned
+
+    raw_markdown = "**Original Webtoon:** [Kakao Webtoon R19](https://webtoon.kakao.com/content/12345)"
+    cleaned_md = clean_description_text(raw_markdown)
+    assert cleaned_md == "Original Webtoon: Kakao Webtoon R19"
+    assert "https://" not in cleaned_md
 
     temp_dir = tempfile.mkdtemp(prefix="mangatrax_test_mu_")
     db_file = os.path.join(temp_dir, "mangatrax_mu_test.db")

@@ -10,13 +10,20 @@ logger = logging.getLogger("mangatrax.metadata.mangaupdates")
 MANGAUPDATES_SEARCH_API = "https://api.mangaupdates.com/v1/series/search"
 
 def clean_description_text(raw_desc: str) -> str:
-    """Cleans up MangaUpdates description text, stripping BBCode, HTML, and publisher tags."""
+    """Cleans up MangaUpdates description text, stripping BBCode, HTML, Markdown links, and raw URLs."""
     if not raw_desc:
         return ""
     # Strip HTML tags
     clean = re.sub(r"<[^>]+>", " ", raw_desc)
     # Strip BBCode tags e.g. [b], [/b], [i], [url=...], [/url]
     clean = re.sub(r"\[/?(?:b|i|u|s|url|quote|code|img|spoiler)[^\]]*\]", "", clean, flags=re.IGNORECASE)
+    # Convert markdown links [Label](https://...) -> Label
+    clean = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", clean)
+    # Strip raw URLs (http:// or https://...) to prevent unbroken links breaking layouts
+    clean = re.sub(r"https?://\S+", "", clean)
+    # Strip markdown bold/italic asterisks
+    clean = re.sub(r"\*\*([^*]+)\*\*", r"\1", clean)
+    clean = re.sub(r"\*([^*]+)\*", r"\1", clean)
     # Strip common publisher prefix lines e.g. "From Viz:", "From Yen Press:", "From Kodansha:"
     clean = re.sub(r"^\s*(?:From\s+[A-Za-z0-9\s\-]+:)\s*", "", clean, flags=re.IGNORECASE)
     # Clean up excessive whitespace
@@ -56,10 +63,13 @@ class MangaUpdatesService:
             try:
                 cached = self.db.get_cached_manga_metadata(cache_key)
                 if cached and cached.get("synopsis"):
+                    url = cached.get("romaji_title", "")
+                    if not url or not url.startswith("http"):
+                        url = f"https://www.mangaupdates.com/series.html?search={urllib.parse.quote_plus(clean_name)}"
                     return {
                         "title": cached.get("canonical_title") or clean_name,
                         "description": cached.get("synopsis", ""),
-                        "url": cached.get("romaji_title", ""), # using romaji_title as URL placeholder or custom field
+                        "url": url,
                         "cover_url": cached.get("cover_url", ""),
                         "genres": [],
                         "year": None,
