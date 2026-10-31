@@ -21,10 +21,9 @@ services:
       - DATA_DIR=/app/data
       - PUID=1000
       - PGID=1000
-      - QBIT_URL=http://qbittorrent:8080
-      - QBIT_USER=admin
-      - QBIT_PASS=adminadmin
       - TZ=UTC
+      # Note: BitTorrent downloader (qBittorrent, Flood, Torbox, etc.)
+      # is configured 100% in-app via the MangaTrax Web UI (Settings & Downloads tab).
     volumes:
       # 1. Mount your Calibre library network share (read-only for zero-lock safety)
       - /path/to/calibre/library:/calibre:ro
@@ -34,21 +33,3 @@ services:
 
       # 3. Persistent application database, cover cache, and logs
       - ./data:/app/data
-
-  # Optional: If you run qBittorrent in the same docker stack
-  # qbittorrent:
-  #   image: lscr.io/linuxserver/qbittorrent:latest
-  #   container_name: qbittorrent
-  #   environment:
-  #     - PUID=1000
-  #     - PGID=1000
-  #     - TZ=UTC
-  #     - WEBUI_PORT=8080
-  #   volumes:
-  #     - ./qbit-config:/config
-  #     - /path/to/manga/staging:/staging
-  #   ports:
-  #     - "8080:8080"
-  #     - "6881:6881"
-  #     - "6881:6881/udp"
-  #   restart: unless-stopped

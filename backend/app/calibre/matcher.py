@@ -55,7 +55,9 @@ class MangaCalibreMatcher:
             matched_series = self.find_series(series_name, alt_names=alt_series_names)
 
         if matched_series:
-            norm_name = matched_series["series_name"].lower()
+            matched_name = matched_series.get("series_name") or matched_series.get("name", "")
+            matched_series["series_name"] = matched_name
+            norm_name = matched_name.lower()
             owned = self.volumes_map.get(norm_name, set())
 
             if volumes:
@@ -79,7 +81,7 @@ class MangaCalibreMatcher:
                     "status": "REQUESTED" if auto_request_monitored else "NEW",
                     "matched_series": matched_series,
                     "missing_volumes": [],
-                    "reason": f"Release detected for monitored series '{matched_series['series_name']}'"
+                    "reason": f"Release detected for monitored series '{matched_name}'"
                 }
 
         # Not in Calibre

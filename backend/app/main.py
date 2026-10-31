@@ -190,7 +190,8 @@ async def downloads_view(request: Request):
             "qbit_status": qbit_status,
             "torrents": torrents,
             "staging_dir": staging_dir,
-            "staging_files": staging_files
+            "staging_files": staging_files,
+            "settings": db.get_all_settings()
         }
     )
 
@@ -334,11 +335,54 @@ async def api_staging_tag():
     return JSONResponse(res)
 
 @app.post("/api/downloader/test")
-async def api_downloader_test():
-    """Test connection to qBittorrent."""
-    qbit = scheduler.get_qbit_client()
-    res = qbit.test_connection()
+async def api_downloader_test(payload: Optional[Dict[str, Any]] = None):
+    """Test connection to qBittorrent, either with saved settings or transient test settings."""
+    p = payload or {}
+    url = p.get("qbit_url")
+    username = p.get("qbit_username")
+    password = p.get("qbit_password")
+
+    if url is not None or username is not None:
+        client = QBitClient(
+            base_url=url or "http://localhost:8080",
+            username=username or "",
+            password=password or "",
+            enabled=True
+        )
+    else:
+        client = scheduler.get_qbit_client()
+
+    res = client.test_connection()
     return JSONResponse(res)
+
+@app.post("/api/downloader/configure")
+async def api_downloader_configure(payload: Dict[str, Any]):
+    """Save in-app BitTorrent downloader configuration and test connection."""
+    qbit_url = (payload.get("qbit_url") or "").strip()
+    qbit_user = (payload.get("qbit_username") or "").strip()
+    qbit_pass = payload.get("qbit_password")
+    qbit_enabled = str(payload.get("qbit_enabled", "true")).lower()
+    qbit_category = (payload.get("qbit_category") or "manga").strip() or "manga"
+    qbit_tags = (payload.get("qbit_tags") or "mangatrax").strip() or "mangatrax"
+
+    if qbit_url:
+        db.set_setting("qbit_url", qbit_url)
+    db.set_setting("qbit_username", qbit_user)
+    if qbit_pass is not None:
+        db.set_setting("qbit_password", qbit_pass)
+    db.set_setting("qbit_enabled", qbit_enabled)
+    db.set_setting("qbit_category", qbit_category)
+    db.set_setting("qbit_tags", qbit_tags)
+
+    db.log_activity("DOWNLOADER_CONFIGURED", f"BitTorrent downloader configured in-app: {qbit_url} (Enabled: {qbit_enabled})")
+
+    client = scheduler.get_qbit_client()
+    test_res = client.test_connection()
+    return JSONResponse({
+        "status": "success",
+        "message": "Downloader settings saved successfully",
+        "connection": test_res
+    })
 
 @app.get("/api/downloader/queue")
 async def api_downloader_queue():
@@ -403,6 +447,29 @@ async def api_update_series_link(series_id: int, payload: Dict[str, Any]):
     website_url = payload.get("website_url", "")
     db.update_series_link(series_id, website_url)
     return JSONResponse({"status": "success", "website_url": website_url})
+
+@app.post("/api/series/{series_id}/backfill")
+async def api_series_backfill(series_id: int, payload: Optional[Dict[str, Any]] = None):
+    """Executes a targeted Nyaa search backfill specifically for a tracked series."""
+    series_list = db.get_all_series()
+    target = next((s for s in series_list if s["id"] == series_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    p = payload or {}
+    max_pages = int(p.get("max_pages", 3))
+    res = scheduler.backfill_series(target["name"], max_pages=max_pages)
+    return JSONResponse(res)
+
+@app.post("/api/series/backfill")
+async def api_series_backfill_by_name(payload: Dict[str, Any]):
+    """Executes a targeted Nyaa search backfill by series name."""
+    series_name = payload.get("series_name")
+    if not series_name:
+        return JSONResponse({"status": "error", "message": "Series name required"}, status_code=400)
+    max_pages = int(payload.get("max_pages", 3))
+    res = scheduler.backfill_series(series_name, max_pages=max_pages)
+    return JSONResponse(res)
 
 @app.post("/api/releases/{release_id}/status")
 async def api_update_release_status(release_id: int, payload: Dict[str, Any]):
@@ -547,10 +614,10 @@ async def api_backfill_start(payload: Optional[Dict[str, Any]] = None):
     if delay is not None:
         delay = float(delay)
 
-    asyncio.create_task(scheduler.run_polite_backfill(
+    scheduler.run_polite_backfill(
         max_pages=max_pages,
         delay_seconds=delay
-    ))
+    )
     return JSONResponse({"status": "started", "message": "Polite backfill started in background"})
 
 @app.post("/api/backfill/stop")

@@ -40,34 +40,61 @@
             </div>
         </div>
 
-        <!-- qBittorrent Downloader Integration Card -->
+        <!-- BitTorrent Downloader In-App Integration Card -->
         <div class="bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
-            <div class="flex items-center justify-between">
-                <h3 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
-                    <i data-lucide="download-cloud" class="w-4 h-4 text-cyan-400"></i>
-                    Downloader Integration (qBittorrent Web API)
-                </h3>
-                <button type="button" onclick="testDownloaderConnection()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
-                    <i data-lucide="activity" class="w-3.5 h-3.5 text-cyan-400"></i>
-                    Test Connection
-                </button>
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                    <h3 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                        <i data-lucide="download-cloud" class="w-4 h-4 text-cyan-400"></i>
+                        BitTorrent Downloader (In-App Integration)
+                    </h3>
+                    <p class="text-xs text-slate-400 mt-0.5">
+                        Configured 100% in-app. Connects to any qBittorrent-compatible Web API (qBittorrent, Flood, Torbox, Real-Debrid qBit emulator) without touching docker-compose.
+                    </p>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span id="downloader-status-badge" class="px-2.5 py-1 rounded-full text-[10px] font-semibold bg-slate-800 text-slate-400 border border-slate-700">
+                        Untested
+                    </span>
+                    <button type="button" onclick="testDownloaderConnection()" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                        <i data-lucide="activity" class="w-3.5 h-3.5 text-cyan-400"></i>
+                        Test Connection
+                    </button>
+                </div>
             </div>
-            <p class="text-xs text-slate-400">
-                Connects to any qBittorrent-compatible Web API to queue and download wanted manga releases.
-            </p>
+
+            <!-- Downloader Enabled Toggle -->
+            <div class="flex items-center gap-2.5 pt-1">
+                <input type="checkbox" id="setting-qbit-enabled" {% if settings.qbit_enabled != 'false' %}checked{% endif %} class="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-0">
+                <label for="setting-qbit-enabled" class="text-xs font-semibold text-white">Enable BitTorrent Downloader Integration</label>
+            </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div class="sm:col-span-1">
-                    <label class="block text-xs font-semibold text-slate-300 mb-1">Downloader Web API URL</label>
-                    <input type="url" id="setting-qbit-url" value="{{ settings.qbit_url }}" required placeholder="http://localhost:8080" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500">
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">Web API URL (Host & Port)</label>
+                    <input type="text" id="setting-qbit-url" value="{{ settings.qbit_url }}" required placeholder="http://192.168.1.50:8080" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500">
+                    <p class="text-[10px] text-slate-500 mt-1">E.g., http://192.168.1.100:8080 or http://localhost:8080</p>
                 </div>
                 <div class="sm:col-span-1">
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Username</label>
-                    <input type="text" id="setting-qbit-user" value="{{ settings.qbit_username }}" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+                    <input type="text" id="setting-qbit-user" value="{{ settings.qbit_username }}" placeholder="admin" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
                 </div>
                 <div class="sm:col-span-1">
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Password</label>
-                    <input type="password" id="setting-qbit-pass" value="{{ settings.qbit_password }}" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+                    <input type="password" id="setting-qbit-pass" value="{{ settings.qbit_password }}" placeholder="••••••••" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">Target Category</label>
+                    <input type="text" id="setting-qbit-category" value="{{ settings.qbit_category or 'manga' }}" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500">
+                    <p class="text-[10px] text-slate-500 mt-1">Downloader category to isolate manga releases (default: manga)</p>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">Tags</label>
+                    <input type="text" id="setting-qbit-tags" value="{{ settings.qbit_tags or 'mangatrax' }}" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500">
+                    <p class="text-[10px] text-slate-500 mt-1">Comma-separated tags added to downloaded torrents</p>
                 </div>
             </div>
         </div>
@@ -244,16 +271,42 @@ async function testCalibrePath() {
 }
 
 async function testDownloaderConnection() {
+    const badge = document.getElementById('downloader-status-badge');
+    if (badge) {
+        badge.textContent = 'Testing...';
+        badge.className = 'px-2.5 py-1 rounded-full text-[10px] font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20';
+    }
+    const payload = {
+        qbit_url: document.getElementById('setting-qbit-url').value.trim(),
+        qbit_username: document.getElementById('setting-qbit-user').value.trim(),
+        qbit_password: document.getElementById('setting-qbit-pass').value.trim()
+    };
     try {
-        const res = await fetch('/api/downloader/test', { method: 'POST' });
+        const res = await fetch('/api/downloader/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
         const data = await res.json();
         if (data.success) {
             showToast(data.message, 'success');
+            if (badge) {
+                badge.textContent = data.version ? `Connected: ${data.version}` : 'Connected';
+                badge.className = 'px-2.5 py-1 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+            }
         } else {
             showToast(data.message || 'Connection failed', 'error');
+            if (badge) {
+                badge.textContent = 'Disconnected';
+                badge.className = 'px-2.5 py-1 rounded-full text-[10px] font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20';
+            }
         }
     } catch (err) {
         showToast('Error: ' + err, 'error');
+        if (badge) {
+            badge.textContent = 'Error';
+            badge.className = 'px-2.5 py-1 rounded-full text-[10px] font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20';
+        }
     }
 }
 
@@ -261,9 +314,12 @@ async function saveSettings(e) {
     e.preventDefault();
     const payload = {
         calibre_path: document.getElementById('setting-calibre-path').value.trim(),
+        qbit_enabled: document.getElementById('setting-qbit-enabled').checked ? 'true' : 'false',
         qbit_url: document.getElementById('setting-qbit-url').value.trim(),
         qbit_username: document.getElementById('setting-qbit-user').value.trim(),
         qbit_password: document.getElementById('setting-qbit-pass').value.trim(),
+        qbit_category: document.getElementById('setting-qbit-category').value.trim() || 'manga',
+        qbit_tags: document.getElementById('setting-qbit-tags').value.trim() || 'mangatrax',
         staging_dir: document.getElementById('setting-staging-dir').value.trim(),
         auto_download: document.getElementById('setting-auto-download').checked ? 'true' : 'false',
         auto_tag: document.getElementById('setting-auto-tag').checked ? 'true' : 'false',

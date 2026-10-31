@@ -11,6 +11,7 @@ from app.calibre.matcher import MangaCalibreMatcher
 from app.downloader.qbit import QBitClient
 from app.tagger.cbz_tagger import auto_tag_staging_cbz_files
 from app.providers.registry import create_provider
+from app.providers.nyaa import NyaaMangaProvider
 from app.metadata.anilist import AniListMetadataService
 from app.metadata.mangaupdates import MangaUpdatesService
 from app.parser import is_chapter_only
@@ -31,10 +32,13 @@ class MangaScheduler:
 
     def get_qbit_client(self) -> QBitClient:
         settings = self.db.get_all_settings()
+        enabled_str = str(settings.get("qbit_enabled", "true")).lower()
+        is_enabled = enabled_str not in ("false", "0", "no", "off")
         return QBitClient(
             base_url=settings.get("qbit_url", "http://localhost:8080"),
             username=settings.get("qbit_username", "admin"),
-            password=settings.get("qbit_password", "adminadmin")
+            password=settings.get("qbit_password", "adminadmin"),
+            enabled=is_enabled
         )
 
     # --- Calibre Sync Task ---
@@ -288,17 +292,184 @@ class MangaScheduler:
             "progress": self.db.get_setting("backfill_progress", "Idle")
         }
 
-    async def run_polite_backfill(self, max_pages: Optional[int] = None, delay_seconds: Optional[float] = None):
+    def _process_release(self, rel, feed_name: str, matcher: MangaCalibreMatcher) -> tuple:
         """
-        Runs a polite historical backfill across feeds:
-        Fetches older pages with polite rate-limiting delays to populate discovery
-        and catch older missing volumes/bundles without causing tracker load.
-        If max_pages <= 0, scans until the end of the feed is reached.
+        Normalizes Romaji to canonical English title, checks Calibre matcher with aliases,
+        pulls MangaUpdates synopsis if Discovery, and upserts release into SQLite.
+        Returns (is_new, status, missing_volumes, rel_id, canonical_series).
         """
-        import asyncio
+        if is_chapter_only(rel.title):
+            return (False, "CHAPTER_ONLY", [], None, None)
+
+        rel_group = getattr(rel, "release_group", None) or rel.to_dict().get("release_group")
+
+        # 1. Canonical English series metadata & cover resolution
+        canonical_series = rel.series_name
+        cover_url = rel.cover_url
+        alt_names = []
+        if rel.series_name:
+            meta = self.anilist.resolve_manga_series(rel.series_name)
+            english_title = (meta.get("canonical_title") or meta.get("english_title") or "").strip()
+            if english_title:
+                canonical_series = english_title
+            if not cover_url and meta.get("cover_url"):
+                cover_url = meta["cover_url"]
+
+            romaji = (meta.get("romaji_title") or "").strip()
+            if romaji and romaji.lower() != canonical_series.lower():
+                alt_names.append(romaji)
+            if rel.series_name.lower() != canonical_series.lower():
+                alt_names.append(rel.series_name)
+
+            calibre_match = matcher.find_series(canonical_series, alt_names=alt_names)
+            if calibre_match and not english_title:
+                calibre_match_name = calibre_match.get("series_name") or calibre_match.get("name", "")
+                if calibre_match_name:
+                    canonical_series = calibre_match_name
+
+        if cover_url:
+            self.cover_cache.cache_sync(cover_url)
+
+        # 2. Blacklist check
+        test_name = canonical_series or rel.series_name
+        if test_name and self.db.is_series_blacklisted(test_name):
+            status = "BLACKLISTED"
+            missing_vols = []
+        else:
+            match_payload = rel.to_dict()
+            match_payload["series_name"] = canonical_series
+            match_res = matcher.check_release(match_payload, alt_series_names=alt_names)
+            status = match_res["status"]
+            missing_vols = match_res.get("missing_volumes", [])
+
+        desc = getattr(rel, "description", "") or ""
+        mu_url = ""
+        if status == "DISCOVERY" and canonical_series:
+            try:
+                mu_info = self.mangaupdates.get_series_info(canonical_series)
+                if mu_info:
+                    if mu_info.get("description"):
+                        desc = mu_info["description"]
+                    mu_url = mu_info.get("url", "")
+                    if not cover_url and mu_info.get("cover_url"):
+                        cover_url = mu_info["cover_url"]
+                        self.cover_cache.cache_sync(cover_url)
+            except Exception as e:
+                logger.debug(f"Backfill MangaUpdates fetch failed for '{canonical_series}': {e}")
+
+        rel_dict = {
+            "guid": rel.guid,
+            "title": rel.title,
+            "series_name": canonical_series,
+            "release_group": rel_group,
+            "is_bundle": rel.is_bundle,
+            "volume_start": rel.volume_start,
+            "volume_end": rel.volume_end,
+            "volumes": rel.volumes,
+            "missing_volumes": missing_vols,
+            "download_url": rel.download_url,
+            "link": rel.link,
+            "cover_url": cover_url,
+            "description": desc,
+            "mangaupdates_url": mu_url,
+            "source_feed_name": feed_name,
+            "status": status,
+            "download_status": "IDLE"
+        }
+
+        is_new, rel_id = self.db.upsert_release(rel_dict)
+        return (is_new, status, missing_vols, rel_id, canonical_series)
+
+    def backfill_series(self, series_name: str, max_pages: int = 3) -> Dict[str, Any]:
+        """
+        Targeted historical backfill for an individual manga series on Nyaa.
+        Queries all past volume releases & bundles on Nyaa for the series and resolves them against Calibre.
+        """
+        clean_name = series_name.strip()
+        if not clean_name:
+            return {"status": "error", "message": "Series name required"}
+
+        # 1. Resolve canonical English title and Romaji alias
+        meta = self.anilist.resolve_manga_series(clean_name)
+        english_name = (meta.get("canonical_title") or meta.get("english_title") or clean_name).strip()
+        romaji_name = (meta.get("romaji_title") or "").strip()
+
+        alt_names = []
+        if romaji_name and romaji_name.lower() != english_name.lower():
+            alt_names.append(romaji_name)
+        if clean_name.lower() != english_name.lower():
+            alt_names.append(clean_name)
+
+        # 2. Build Calibre matcher context
+        calibre_path = self.db.get_setting("calibre_path", "/calibre")
+        scanner = CalibreMangaScanner(calibre_path)
+        series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
+        volumes_map = scanner.get_all_volumes_per_series() if scanner.is_available() else {}
+        meta_cache = self.db.get_all_manga_metadata_cache()
+        matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
+
+        global_auto_download = self.db.get_setting("auto_download", "true").lower() == "true"
+        staging_dir = self.db.get_setting("staging_dir", "/staging")
+        qbit = self.get_qbit_client()
+
+        # 3. Query Nyaa targeted series search
+        nyaa = NyaaMangaProvider(name=f"Nyaa: {english_name}", config={"delay_seconds": 1.0})
+        releases = nyaa.search_series(english_name, max_pages=max_pages, alt_names=alt_names)
+
+        total_found = 0
+        total_requested = 0
+        total_sent_to_downloader = 0
+
+        for rel in releases:
+            is_new, status, missing_vols, rel_id, _ = self._process_release(rel, f"Nyaa: {english_name}", matcher)
+            if status == "CHAPTER_ONLY":
+                continue
+
+            total_found += 1
+            if status == "REQUESTED":
+                total_requested += 1
+                if is_new and global_auto_download and rel_id:
+                    success = qbit.add_torrent(
+                        url_or_magnet=rel.download_url,
+                        savepath=staging_dir,
+                        category="manga",
+                        tags="mangatrax"
+                    )
+                    if success:
+                        total_sent_to_downloader += 1
+                        self.db.update_download_status(rel_id, "DOWNLOADING")
+
+        summary = f"Backfilled '{english_name}': found {total_found} releases ({total_requested} wanted/missing volumes, {total_sent_to_downloader} sent to downloader)."
+        self.db.log_activity("SERIES_BACKFILLED", summary)
+        return {
+            "status": "success",
+            "message": summary,
+            "series_name": english_name,
+            "releases_found": total_found,
+            "requested": total_requested,
+            "sent_to_downloader": total_sent_to_downloader
+        }
+
+    def run_polite_backfill(self, max_pages: Optional[int] = None, delay_seconds: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Runs a polite historical backfill in a background daemon thread:
+        Paginates backwards through Nyaa Manga releases (p=1, 2, ... N) and configured feeds,
+        populating newly discovered series (Vol. 1 & standalones) and missing volumes for tracked series.
+        """
         if self.is_backfilling:
             return {"status": "in_progress", "message": "Backfill already running"}
 
+        self.is_backfilling = True
+        self.stop_backfill_requested = False
+        t = threading.Thread(
+            target=self._run_polite_backfill_worker,
+            args=(max_pages, delay_seconds),
+            daemon=True
+        )
+        t.start()
+        return {"status": "started", "message": "Polite backfill started in background"}
+
+    def _run_polite_backfill_worker(self, max_pages: Optional[int] = None, delay_seconds: Optional[float] = None):
         if max_pages is None:
             try:
                 max_pages = int(self.db.get_setting("backfill_max_pages", "15"))
@@ -312,15 +483,12 @@ class MangaScheduler:
                 delay_seconds = 2.0
 
         effective_max = 9999 if max_pages <= 0 else max_pages
-        target_pages_text = f"up to {max_pages} pages" if max_pages > 0 else "unlimited pages until end of feed"
+        target_pages_text = f"up to {max_pages} pages (~{max_pages * 75} releases)" if max_pages > 0 else "unlimited pages until end of feed"
 
-        self.is_backfilling = True
-        self.stop_backfill_requested = False
         self.db.set_setting("backfill_status", "running")
-        self.db.set_setting("backfill_progress", f"Starting polite manga feed backfill ({target_pages_text})...")
+        self.db.set_setting("backfill_progress", f"Starting polite manga historical backfill ({target_pages_text})...")
 
         try:
-            feeds = self.db.get_all_feeds()
             total_discovered = 0
             total_processed = 0
 
@@ -331,126 +499,48 @@ class MangaScheduler:
             meta_cache = self.db.get_all_manga_metadata_cache()
             matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
 
-            for feed in feeds:
+            nyaa_provider = NyaaMangaProvider(name="Nyaa Manga Backfill", config={"delay_seconds": delay_seconds})
+
+            for page_num in range(1, effective_max + 1):
                 if self.stop_backfill_requested:
                     break
 
-                if not feed.get("enabled"):
-                    continue
+                self.db.set_setting(
+                    "backfill_progress",
+                    f"Crawling Nyaa Manga Page {page_num} of {effective_max} (Found {total_discovered} discoveries, {total_processed} processed)..."
+                )
 
-                feed_name = feed["name"]
-                feed_config = json.loads(feed.get("config_json") or "{}") if isinstance(feed.get("config_json"), str) else (feed.get("config_json") or {})
-                feed_config["max_pages"] = effective_max
-                feed_dict = dict(feed)
-                feed_dict["config_json"] = json.dumps(feed_config)
+                page_releases = nyaa_provider.crawl_pages(
+                    max_pages=1,
+                    start_page=page_num,
+                    delay=0,
+                    stop_check=lambda: self.stop_backfill_requested
+                )
 
-                self.db.set_setting("backfill_progress", f"Scanning {feed_name} ({target_pages_text})...")
+                if not page_releases:
+                    logger.info(f"Nyaa backfill reached end of available pages at page {page_num}.")
+                    break
 
-                provider = create_provider(feed_dict)
-                if not provider:
-                    continue
-
-                releases = await asyncio.to_thread(provider.fetch_releases)
-
-                for rel in releases:
+                for rel in page_releases:
                     if self.stop_backfill_requested:
                         break
 
-                    if is_chapter_only(rel.title):
+                    is_new, status, missing_vols, _, _ = self._process_release(rel, "Nyaa Manga", matcher)
+                    if status == "CHAPTER_ONLY":
                         continue
 
                     total_processed += 1
-                    rel_group = getattr(rel, "release_group", None) or rel.to_dict().get("release_group")
-
-                    # Canonical English series metadata & cover resolution
-                    canonical_series = rel.series_name
-                    cover_url = rel.cover_url
-                    alt_names = []
-                    if rel.series_name:
-                        # Convert any Romaji title to official English equivalent via AniList
-                        meta = await asyncio.to_thread(self.anilist.resolve_manga_series, rel.series_name)
-                        english_title = (meta.get("canonical_title") or meta.get("english_title") or "").strip()
-                        if english_title:
-                            canonical_series = english_title
-                        if not cover_url and meta.get("cover_url"):
-                            cover_url = meta["cover_url"]
-
-                        romaji = (meta.get("romaji_title") or "").strip()
-                        if romaji and romaji.lower() != canonical_series.lower():
-                            alt_names.append(romaji)
-                        if rel.series_name.lower() != canonical_series.lower():
-                            alt_names.append(rel.series_name)
-
-                        # Match against Calibre
-                        calibre_match = matcher.find_series(canonical_series, alt_names=alt_names)
-                        if calibre_match and not english_title:
-                            canonical_series = calibre_match["series_name"]
-
-                    if cover_url:
-                        await asyncio.to_thread(self.cover_cache.cache_sync, cover_url)
-
-                    # Blacklist check
-                    test_name = canonical_series or rel.series_name
-                    if test_name and self.db.is_series_blacklisted(test_name):
-                        status = "BLACKLISTED"
-                        missing_vols = []
-                    else:
-                        match_payload = rel.to_dict()
-                        match_payload["series_name"] = canonical_series
-                        match_res = matcher.check_release(match_payload, alt_series_names=alt_names)
-                        status = match_res["status"]
-                        missing_vols = match_res.get("missing_volumes", [])
-
-                    desc = ""
-                    mu_url = ""
-                    if status == "DISCOVERY" and canonical_series:
-                        try:
-                            mu_info = await asyncio.to_thread(self.mangaupdates.get_series_info, canonical_series)
-                            if mu_info:
-                                desc = mu_info.get("description", "")
-                                mu_url = mu_info.get("url", "")
-                                if not cover_url and mu_info.get("cover_url"):
-                                    cover_url = mu_info["cover_url"]
-                                    await asyncio.to_thread(self.cover_cache.cache_sync, cover_url)
-                        except Exception as e:
-                            logger.debug(f"Backfill MangaUpdates fetch failed for '{canonical_series}': {e}")
-
-                    rel_dict = {
-                        "guid": rel.guid,
-                        "title": rel.title,
-                        "series_name": canonical_series,
-                        "release_group": rel_group,
-                        "is_bundle": rel.is_bundle,
-                        "volume_start": rel.volume_start,
-                        "volume_end": rel.volume_end,
-                        "volumes": rel.volumes,
-                        "missing_volumes": missing_vols,
-                        "download_url": rel.download_url,
-                        "link": rel.link,
-                        "cover_url": cover_url,
-                        "description": desc,
-                        "mangaupdates_url": mu_url,
-                        "source_feed_name": feed_name,
-                        "status": status,
-                        "download_status": "IDLE"
-                    }
-
-                    is_new, _ = self.db.upsert_release(rel_dict)
                     if is_new and status == "DISCOVERY":
                         total_discovered += 1
 
-                    if delay_seconds > 0:
-                        await asyncio.sleep(min(delay_seconds, 0.1))
+                # Polite delay between pages
+                if page_num < effective_max and delay_seconds > 0 and not self.stop_backfill_requested:
+                    time.sleep(delay_seconds)
 
-                # Polite delay between feeds
-                if delay_seconds > 0 and not self.stop_backfill_requested:
-                    await asyncio.sleep(delay_seconds)
-
-            summary = f"Backfill complete: processed {total_processed} releases, found {total_discovered} new discoveries."
+            summary = f"Historical backfill complete: crawled {page_num if 'page_num' in locals() else 0} pages, processed {total_processed} releases, found {total_discovered} new discoveries."
             self.db.set_setting("backfill_status", "idle")
             self.db.set_setting("backfill_progress", summary)
             self.db.log_activity("BACKFILL_COMPLETED", summary)
-            return {"status": "success", "processed": total_processed, "discovered": total_discovered}
 
         except Exception as e:
             err = f"Backfill error: {e}"
@@ -458,7 +548,6 @@ class MangaScheduler:
             self.db.set_setting("backfill_status", "error")
             self.db.set_setting("backfill_progress", err)
             self.db.log_activity("BACKFILL_ERROR", err)
-            return {"status": "error", "message": err}
         finally:
             self.is_backfilling = False
 

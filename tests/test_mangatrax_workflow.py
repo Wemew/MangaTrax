@@ -686,6 +686,209 @@ def test_romaji_to_english_titles_conversion():
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+def test_nyaa_historical_crawl_and_series_backfill():
+    print("--> Testing Nyaa Historical Paginated Crawl & Targeted Series Backfill...")
+    from app.providers.nyaa import NyaaMangaProvider
+    from app.scheduler import MangaScheduler
+    from app.covers import CoverCache
+    from unittest.mock import patch, MagicMock
+    import asyncio
+
+    sample_nyaa_html = """
+    <html>
+    <body>
+    <table class="torrent-list">
+    <tbody>
+        <tr>
+            <td><a href="/c/3_1"><img src="/static/img/icons/nyaa/3_1.png"></a></td>
+            <td>
+                <a href="/view/2180362#comments" class="comments"><i class="fa fa-comments"></i> 2</a>
+                <a href="/view/2180362" title="Chainsaw Man 180">Chainsaw Man 180</a>
+            </td>
+            <td>
+                <a href="/download/2180362.torrent"><i class="fa fa-download"></i></a>
+                <a href="magnet:?xt=urn:btih:mockhash1"><i class="fa fa-magnet"></i></a>
+            </td>
+            <td class="text-center">8.0 MiB</td>
+            <td class="text-center" data-timestamp="1729794900">2026-10-24 18:35</td>
+            <td class="text-center">50</td>
+            <td class="text-center">2</td>
+            <td class="text-center">100</td>
+        </tr>
+        <tr>
+            <td><a href="/c/3_1"><img src="/static/img/icons/nyaa/3_1.png"></a></td>
+            <td>
+                <a href="/view/2180200" title="[danke-Empire] Chainsaw Man Vol. 04-06 [Digital]">
+                    [danke-Empire] Chainsaw Man Vol. 04-06 [Digital]
+                </a>
+            </td>
+            <td>
+                <a href="/download/2180200.torrent"><i class="fa fa-download"></i></a>
+                <a href="magnet:?xt=urn:btih:mockhash2"><i class="fa fa-magnet"></i></a>
+            </td>
+            <td class="text-center">450.0 MiB</td>
+            <td class="text-center" data-timestamp="1729700000">2026-10-23 15:00</td>
+            <td class="text-center">75</td>
+            <td class="text-center">1</td>
+            <td class="text-center">250</td>
+        </tr>
+    </tbody>
+    </table>
+    </body>
+    </html>
+    """
+
+    # 1. Test Nyaa HTML table parsing & chapter-only discard
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.read.return_value = sample_nyaa_html.encode("utf-8")
+    mock_resp.__enter__.return_value = mock_resp
+    mock_resp.__exit__.return_value = None
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        nyaa = NyaaMangaProvider()
+        releases = nyaa.crawl_pages(max_pages=1)
+        # Chainsaw Man 180 is pure chapter update -> must be discarded
+        # Only Chainsaw Man Vol. 04-06 bundle must remain!
+        assert len(releases) == 1
+        bundle = releases[0]
+        assert bundle.series_name == "Chainsaw Man"
+        assert bundle.release_group == "danke-Empire"
+        assert bundle.is_bundle is True
+        assert bundle.volumes == [4.0, 5.0, 6.0]
+        assert bundle.link == "https://nyaa.si/view/2180200"
+        assert bundle.download_url == "magnet:?xt=urn:btih:mockhash2"
+        assert bundle.raw_data["post_size"] == "450.0 MiB"
+        assert bundle.raw_data["seeders"] == 75
+
+    # 2. Test targeted series backfill in Scheduler
+    temp_dir = tempfile.mkdtemp(prefix="mangatrax_test_sched_backfill_")
+    db_file = os.path.join(temp_dir, "mangatrax_sb_test.db")
+
+    try:
+        db = MangaDatabase(db_file)
+        covers = CoverCache(temp_dir)
+        sched = MangaScheduler(db, covers)
+
+        # Mock Calibre having Chainsaw Man Vol 1-3
+        calibre_library = [
+            {"series_id": 10, "series_name": "Chainsaw Man", "book_count": 3, "latest_index": 3.0}
+        ]
+        db.sync_calibre_series(calibre_library)
+
+        # Mock AniList, MangaUpdates, and qBittorrent to prevent live network calls during tests
+        sched.anilist.resolve_manga_series = MagicMock(return_value={
+            "canonical_title": "Chainsaw Man",
+            "romaji_title": "Chainsaw Man",
+            "english_title": "Chainsaw Man",
+            "total_volumes": 20
+        })
+        sched.mangaupdates.get_series_info = MagicMock(return_value={
+            "title": "Chainsaw Man",
+            "description": "Mock description",
+            "url": "https://www.mangaupdates.com/series/mock"
+        })
+        mock_qbit = MagicMock()
+        mock_qbit.add_torrent.return_value = True
+        sched.get_qbit_client = MagicMock(return_value=mock_qbit)
+
+        # Mock Nyaa search returning the bundle
+        with patch.object(NyaaMangaProvider, "search_series", return_value=[bundle]):
+            res = sched.backfill_series("Chainsaw Man", max_pages=1)
+
+            assert res["status"] == "success"
+            assert res["releases_found"] == 1
+            assert res["requested"] == 1
+
+            # Verify saved release in DB
+            db_releases = db.get_releases(status="REQUESTED")
+            assert len(db_releases) == 1
+            assert db_releases[0]["series_name"] == "Chainsaw Man"
+            assert db_releases[0]["missing_volumes"] == [4.0, 5.0, 6.0]
+
+        print("    [PASSED] Nyaa historical paginated crawl and series backfill verified 100%.")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+def test_in_app_bittorrent_downloader_setup():
+    print("--> Testing In-App BitTorrent Downloader Configuration & Lifecycle...")
+    from unittest.mock import MagicMock, patch
+    from app.downloader.qbit import QBitClient
+    from app.scheduler import MangaScheduler
+    from app.covers import CoverCache
+
+    temp_dir = tempfile.mkdtemp(prefix="mangatrax_test_qbit_inapp_")
+    db_file = os.path.join(temp_dir, "mangatrax_qbit.db")
+
+    try:
+        db = MangaDatabase(db_file)
+        covers = CoverCache(temp_dir)
+        sched = MangaScheduler(db, covers)
+
+        # 1. Verify default in-app downloader settings are initialized in database
+        settings = db.get_all_settings()
+        assert "qbit_url" in settings
+        assert "qbit_username" in settings
+        assert "qbit_password" in settings
+        assert "qbit_enabled" in settings
+        assert "qbit_category" in settings
+        assert "qbit_tags" in settings
+
+        # 2. Test QBitClient disabled state
+        disabled_client = QBitClient(enabled=False)
+        assert disabled_client.login() is False
+        assert disabled_client.add_torrent("magnet:?xt=test") is False
+        test_res = disabled_client.test_connection()
+        assert test_res["success"] is False
+        assert "disabled" in test_res["message"].lower()
+
+        # 3. Test dynamic in-app reconfiguration without compose variables
+        db.set_setting("qbit_url", "http://192.168.1.150:9091")
+        db.set_setting("qbit_username", "mangauser")
+        db.set_setting("qbit_password", "secretpass")
+        db.set_setting("qbit_enabled", "true")
+        db.set_setting("qbit_category", "manga-custom")
+        db.set_setting("qbit_tags", "tag1,tag2")
+
+        client = sched.get_qbit_client()
+        assert client.base_url == "http://192.168.1.150:9091"
+        assert client.username == "mangauser"
+        assert client.password == "secretpass"
+        assert client.enabled is True
+
+        # 4. Mock successful authentication and connection test
+        mock_login_resp = MagicMock()
+        mock_login_resp.status = 200
+        mock_login_resp.read.return_value = b"Ok."
+
+        mock_version_resp = MagicMock()
+        mock_version_resp.status = 200
+        mock_version_resp.read.return_value = b"v4.6.5"
+
+        with patch.object(client.opener, "open", side_effect=[mock_login_resp, mock_version_resp]):
+            conn_res = client.test_connection()
+            assert conn_res["success"] is True
+            assert conn_res["version"] == "v4.6.5"
+            assert "Connected to qBittorrent v4.6.5" in conn_res["message"]
+
+        # 5. Mock add_torrent call
+        mock_add_resp = MagicMock()
+        mock_add_resp.status = 200
+        mock_add_resp.read.return_value = b"Ok."
+
+        with patch.object(client.opener, "open", return_value=mock_add_resp):
+            success = client.add_torrent(
+                url_or_magnet="magnet:?xt=urn:btih:mockhash123",
+                savepath="/custom/staging",
+                category="manga-custom",
+                tags="tag1,tag2"
+            )
+            assert success is True
+
+        print("    [PASSED] In-app BitTorrent downloader setup, dynamic reload, and API operations verified 100%.")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
 if __name__ == "__main__":
     print("==================================================")
     print("Running MangaTrax Comprehensive Integration Suite")
@@ -699,6 +902,8 @@ if __name__ == "__main__":
     test_prioritized_release_groups()
     test_mangaupdates_and_rss_links()
     test_romaji_to_english_titles_conversion()
+    test_nyaa_historical_crawl_and_series_backfill()
+    test_in_app_bittorrent_downloader_setup()
     print("==================================================")
     print("ALL TESTS PASSED SUCCESSFULLY! (100% VERIFIED)")
     print("==================================================")

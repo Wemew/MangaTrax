@@ -209,6 +209,9 @@ class MangaDatabase:
                     "qbit_url": os.getenv("QBIT_URL", "http://localhost:8080"),
                     "qbit_username": os.getenv("QBIT_USER", "admin"),
                     "qbit_password": os.getenv("QBIT_PASS", "adminadmin"),
+                    "qbit_enabled": "true",
+                    "qbit_category": "manga",
+                    "qbit_tags": "mangatrax",
                     "staging_dir": os.getenv("STAGING_DIR", "/staging"),
                     "auto_download": "true",
                     "auto_tag": "true",
@@ -220,6 +223,10 @@ class MangaDatabase:
                 }
                 for k, v in defaults.items():
                     cur.execute("INSERT INTO app_settings (key, value) VALUES (?, ?);", (k, v))
+
+            # Ensure in-app downloader keys exist in case of upgrade
+            for k, v in [("qbit_enabled", "true"), ("qbit_category", "manga"), ("qbit_tags", "mangatrax")]:
+                cur.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);", (k, v))
 
             # Seed sample manga feed if empty
             cur.execute("SELECT count(*) FROM feeds;")

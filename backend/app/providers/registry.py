@@ -3,11 +3,15 @@ from typing import Dict, Any, Optional
 from app.providers.base import BaseFeedProvider
 from app.providers.rss import RSSFeedProvider
 from app.providers.html_scraper import HtmlScraperProvider
+from app.providers.nyaa import NyaaMangaProvider
 
 PROVIDER_CLASSES = {
     "rss": RSSFeedProvider,
     "html": HtmlScraperProvider,
     "html_scraper": HtmlScraperProvider,
+    "nyaa": NyaaMangaProvider,
+    "nyaa_scraper": NyaaMangaProvider,
+    "nyaa_manga": NyaaMangaProvider,
 }
 
 def create_provider(feed_dict: Dict[str, Any]) -> Optional[BaseFeedProvider]:

@@ -435,15 +435,18 @@
     let backfillPollTimer = null;
 
     async function toggleBackfill() {
+        const pagesInput = prompt("How many historical pages on Nyaa to crawl? (Each page is 75 releases; 15 pages ≈ 1,125 releases):", "15");
+        if (pagesInput === null) return;
+        const maxPages = parseInt(pagesInput) || 15;
         try {
             const res = await fetch('/api/backfill/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ max_pages: 15, delay: 2.0 })
+                body: JSON.stringify({ max_pages: maxPages, delay: 1.5 })
             });
             const data = await res.json();
             if (data.status === 'started' || data.status === 'in_progress') {
-                showToast('Polite backfill started...', 'info');
+                showToast(`Historical backfill started (${maxPages} pages)...`, 'info');
                 pollBackfill();
             } else {
                 showToast(data.message || 'Backfill failed to start', 'error');

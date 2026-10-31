@@ -87,10 +87,9 @@ services:
       - CALIBRE_DIR=/calibre
       - STAGING_DIR=/staging
       - DATA_DIR=/app/data
-      - QBIT_URL=http://qbittorrent:8080
-      - QBIT_USER=admin
-      - QBIT_PASS=adminadmin
       - TZ=UTC
+      # Note: BitTorrent downloader (qBittorrent, Flood, Torbox, etc.)
+      # is configured 100% in-app via the MangaTrax Web UI (Settings & Downloads tab).
     volumes:
       # Calibre library network share (read-only for zero-lock safety)
       - /mnt/storage/CalibreLibrary:/calibre:ro
@@ -112,7 +111,7 @@ Access the dashboard at `http://your-server-ip:8082`.
 
 ### 3. TrueNAS SCALE Setup (`docker-compose.truenas.yml`)
 
-For TrueNAS SCALE users, MangaTrax includes a hardened `docker-compose.truenas.yml` configured for the `apps` user (`user: "568:568"`):
+For TrueNAS SCALE users, MangaTrax includes a hardened `docker-compose.truenas.yml` configured for the `apps` user (`PUID=568`, `PGID=568`):
 
 ```yaml
 services:
@@ -123,7 +122,6 @@ services:
     image: mangatrax:latest
     container_name: mangatrax
     restart: unless-stopped
-    user: "568:568"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -135,9 +133,15 @@ services:
       - CALIBRE_DIR=/calibre
       - STAGING_DIR=/staging
       - DATA_DIR=/app/data
-      - QBIT_URL=http://qbittorrent:8080
-      - QBIT_USER=admin
-      - QBIT_PASS=adminadmin
+      - PUID=568
+      - PGID=568
+      - TZ=Etc/UTC
+      # BitTorrent downloader is configured 100% in-app via Settings/Downloads tabs
+    volumes:
+      - /mnt/tank/media/calibre:/calibre:ro
+      - /mnt/tank/media/manga/staging:/staging
+      - ./data:/app/data
+```
       - TZ=Etc/UTC
     volumes:
       - /mnt/tank/media/calibre:/calibre:ro
