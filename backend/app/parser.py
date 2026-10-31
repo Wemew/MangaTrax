@@ -22,61 +22,30 @@ def string_similarity(a: str, b: str) -> float:
         return 1.0
     return SequenceMatcher(None, norm_a, norm_b).ratio()
 
-def extract_release_group(raw_title: str) -> Optional[str]:
-    """
-    Extracts the scanlation or release group tag from raw release titles.
-    e.g., '[danke-Empire] Bleach v01-v20' -> 'danke-Empire'
-          '[Lu自主规制] Chainsaw Man Vol. 01-11' -> 'Lu自主规制'
-          '[1R0N] One Piece Vol. 108' -> '1R0N'
-          'Bleach v01-v20 (danke-Empire)' -> 'danke-Empire'
-    """
-    if not raw_title:
-        return None
-
-    buzzwords = {
-        "cbz", "cbr", "pdf", "epub", "zip", "rar",
-        "1080p", "720p", "480p", "2160p", "4k", "hd", "sd", "webrip",
-        "digital", "retail", "scan", "scanlation", "complete", "batch",
-        "manga", "raw", "translated", "english", "eng", "repack"
-    }
-
-    def is_valid_group(name: str) -> bool:
-        clean = name.strip()
-        if not clean or len(clean) < 2 or len(clean) > 40:
-            return False
-        # If it's a year or year range like 2020 or 2020-2022
-        if re.match(r"^(?:19|20)\d{2}(?:\s*[-–—~to]\s*(?:19|20)\d{2})?$", clean):
-            return False
-        # If it's a volume or chapter tag like v01, Vol 1, Ch. 10
-        if re.match(r"^(?:vol\.?|volume|v|ch\.?|chapter|c)\s*\d+", clean, re.IGNORECASE):
-            return False
-        # If it's purely buzzwords
-        lower = clean.lower()
-        if lower in buzzwords:
-            return False
-        # If all words in it are buzzwords
-        tokens = [t.strip().lower() for t in re.split(r"[\s\-_]+", clean) if t.strip()]
-        if tokens and all(t in buzzwords for t in tokens):
-            return False
-        return True
-
-    # 1. Leading bracket [Group] or (Group)
-    m_lead = re.match(r"^\s*\[([^\]]+)\]", raw_title)
-    if not m_lead:
-        m_lead = re.match(r"^\s*\(([^\)]+)\)", raw_title)
-    if m_lead:
-        candidate = m_lead.group(1).strip()
-        if is_valid_group(candidate):
-            return candidate
-
-    # 2. Brackets inside or at end of title e.g. "Bleach v01 (danke-Empire)"
-    all_brackets = re.findall(r"\[([^\]]+)\]|\(([^\)]+)\)", raw_title)
-    for b1, b2 in reversed(all_brackets):
-        cand = (b1 or b2).strip()
-        if is_valid_group(cand):
-            return cand
-
-    return None
+BUZZWORDS = {
+    # Format & container
+    "cbz", "cbr", "pdf", "epub", "zip", "rar", "7z", "tar", "azw3", "mobi",
+    "cbz ver", "cbz version", "cbr ver", "pdf ver", "epub ver", "ver", "version",
+    # Image types & resolution
+    "1080p", "720p", "480p", "2160p", "1600p", "4k", "8k", "hd", "sd", "hq", "lq",
+    "avif", "webp", "png", "jpg", "jpeg",
+    # Source & rip
+    "digital", "retail", "scan", "scans", "scanlation", "scanlations",
+    "webrip", "siterip", "site-rip", "site rip", "rip", "web-rip", "web",
+    "raw", "raws", "tankoubon", "tankobon", "magazine", "doujinshi", "artbook",
+    # Status
+    "complete", "completed", "complete series", "completed series",
+    "ongoing", "dropped", "hiatus", "end", "finished",
+    "batch", "pack", "repack", "v2", "v3", "fixed", "remaster", "remastered",
+    "uncensored", "censored", "r18", "r-18", "18+", "mature",
+    # Media & type
+    "manga", "manhwa", "manhua", "webtoon", "comic", "comics", "novel", "light novel", "ln",
+    # Language
+    "translated", "translation", "tl", "english", "eng", "en", "multi", "all languages",
+    "all language", "japanese", "jp", "french", "fr", "spanish", "esp",
+    "german", "ger", "italian", "ita", "portuguese", "pt", "russian", "ru",
+    "chinese", "chi", "korean", "kor", "official", "official release", "series"
+}
 
 KNOWN_PUBLISHERS = {
     'seven seas', 'seven seas entertainment', 'airship', 'ghost ship',
@@ -87,6 +56,89 @@ KNOWN_PUBLISHERS = {
     'titan', 'titan comics', 'titan manga', 'kaiten books', 'denpa', 'vertical',
     'seven seas siren', 'monogatari'
 }
+
+DEFAULT_KNOWN_GROUPS = [
+    "danke-Empire", "LuCirAn", "1stKind", "TenmaLand", "Stick",
+    "danke", "Empire", "1R0N", "NaBi", "aKraa", "LostYears",
+    "Shinigami", "FlameScans", "AsuraScans", "ReaperScans", "ZeroScans",
+    "Lu自主规制", "a-sloth"
+]
+
+def is_valid_group_candidate(clean: str) -> bool:
+    clean = clean.strip()
+    if not clean or len(clean) < 2 or len(clean) > 40:
+        return False
+    # If it's a year or year range like 2020 or 2012-2018
+    if re.match(r"^(?:19|20)\d{2}(?:\s*[-–—~to/]\s*(?:19|20)\d{2})?$", clean):
+        return False
+    # If it's a volume or chapter tag like v01, Vol 1, Ch. 10
+    if re.match(r"^(?:vol\.?|volume|v|ch\.?|chapter|c)\s*\d+", clean, re.IGNORECASE):
+        return False
+    # Pure numbers or ranges
+    if re.match(r"^\d+(?:\s*[-–—~to/]\s*\d+)?$", clean):
+        return False
+    lower = clean.lower()
+    if lower in BUZZWORDS:
+        return False
+    # If all tokens in it are buzzwords or technical markers
+    tokens = [t.strip().lower() for t in re.split(r"[\s\-_.]+", clean) if t.strip()]
+    if tokens and all(t in BUZZWORDS or re.match(r"^\d+p?$", t) or re.match(r"^(?:19|20)\d{2}$", t) for t in tokens):
+        return False
+    return True
+
+def extract_release_group(raw_title: str, known_groups: Optional[Iterable[str]] = None) -> Optional[str]:
+    """
+    Extracts the scanlation or release group tag from raw release titles.
+    Correctly ignores buzzwords, status tags like [Complete], [Completed],
+    resolutions, and formats, and correctly identifies groups regardless
+    of bracket position or scene naming conventions.
+    """
+    if not raw_title:
+        return None
+
+    groups_to_check = sorted(list(known_groups or []) + DEFAULT_KNOWN_GROUPS, key=len, reverse=True)
+
+    # 1. Extract all bracketed candidates [Group] or (Group)
+    bracket_pairs = re.findall(r'\[([^\]]+)\]|\(([^\)]+)\)', raw_title)
+    all_candidates = []
+    for b1, b2 in bracket_pairs:
+        cand = (b1 or b2).strip()
+        if is_valid_group_candidate(cand):
+            all_candidates.append(cand)
+
+    if all_candidates:
+        # Match against known groups first
+        for cand in all_candidates:
+            for kg in groups_to_check:
+                if cand.lower() == kg.lower():
+                    return cand
+
+        # Separate into non-publishers vs publishers
+        non_publishers = [c for c in all_candidates if c.lower() not in KNOWN_PUBLISHERS]
+        publishers = [c for c in all_candidates if c.lower() in KNOWN_PUBLISHERS]
+
+        if non_publishers:
+            if len(non_publishers) > 1 and all_candidates[0].lower() in KNOWN_PUBLISHERS:
+                return non_publishers[-1]
+            return non_publishers[0]
+        if publishers:
+            return publishers[0]
+
+    # 2. Scene release group pattern: -GROUP before trailing brackets or end of string
+    # e.g., Manga.Million.SiteRip.1600p.AVIF.2026-TenmaLand (Multi)
+    m_scene = re.search(r'[-–—]([A-Za-z0-9_]{2,30})(?:\s*[\(\[]|\s*$)', raw_title)
+    if m_scene:
+        cand = m_scene.group(1).strip()
+        if is_valid_group_candidate(cand) and cand.lower() not in KNOWN_PUBLISHERS:
+            return cand
+
+    # 3. Known groups substring search
+    for kg in groups_to_check:
+        escaped = re.escape(kg)
+        if re.search(r'(?:^|[\s_.\-\(\[])' + escaped + r'(?:$|[\s_.\-\)\]])', raw_title, re.IGNORECASE):
+            return kg
+
+    return None
 
 def is_light_novel(raw_title: str) -> bool:
     """
@@ -188,6 +240,10 @@ def clean_manga_title(raw_title: str) -> str:
     # Strip file extensions if present
     cleaned = re.sub(r"\.(?:cbz|cbr|zip|rar|epub|pdf)$", "", cleaned, flags=re.IGNORECASE)
 
+    # For scene dot-separated titles e.g. Manga.Million.SiteRip.1600p.AVIF.2026-TenmaLand
+    # Replace dots between letters/digits with spaces while preserving decimal floats (e.g. 1.5)
+    cleaned = re.sub(r'(?<=[a-zA-Z])\.(?=[a-zA-Z0-9])|(?<=[0-9])\.(?=[a-zA-Z])', ' ', cleaned)
+
     # Remove brackets like [1080p], [Digital], [CBZ], [CBR], [Scanlation], (2020-2022)
     # But preserve volume ranges or numbers if inside brackets e.g. [Vol 1-5], (v01-v07), [v01-v20]
     # Discard brackets that are purely chapter markers like (Ch. 1-7) or (Chapters 001-007)
@@ -196,7 +252,7 @@ def clean_manga_title(raw_title: str) -> str:
         unbracketed = inner[1:-1].strip()
 
         # Check if it's purely a year or year range like (2020), (2020-2022)
-        if re.match(r"^(?:19|20)\d{2}(?:\s*[-–—~to]+\s*(?:19|20)\d{2})?$", unbracketed):
+        if re.match(r"^(?:19|20)\d{2}(?:\s*[-–—~to/]+\s*(?:19|20)\d{2})?$", unbracketed):
             return " "
 
         has_chap = re.search(r"(?:chapters?|ch|c)\.?\s*\d+", unbracketed, re.IGNORECASE)
@@ -219,27 +275,42 @@ def clean_manga_title(raw_title: str) -> str:
     cleaned = re.sub(r"(?i)\b(?:chapters?|ch)\b\.?\s*\d+(?:\s*[-–—~to]+\s*\d+)?(?:\s*\+\s*extra)?", " ", cleaned)
     cleaned = re.sub(r"(?i)\bc\d+(?:\s*[-–—~to]+\s*c?\d+)?\b", " ", cleaned)
 
-    # Strip format buzzwords
+    # Strip format buzzwords, scene tokens, and status tags
     buzzwords = [
-        r"\bcbz\b", r"\bcbr\b", r"\bpdf\b", r"\bepub\b", r"\bzip\b", r"\brar\b",
-        r"\bdigital\b", r"\bretail\b", r"\bscan\b", r"\bscanlation\b",
-        r"\b1080p\b", r"\b720p\b", r"\bwebrip\b", r"\bmanga\b",
-        r"\btranslated\b", r"\benglish\b", r"\beng\b", r"\bcomplete\b"
+        r"\bcbz\b", r"\bcbr\b", r"\bpdf\b", r"\bepub\b", r"\bzip\b", r"\brar\b", r"\b7z\b",
+        r"\bcbz\s*ver(?:sion)?\b", r"\bcbr\s*ver(?:sion)?\b", r"\bver(?:sion)?\b",
+        r"\bdigital\b", r"\bretail\b", r"\bscan\b", r"\bscanlation\b", r"\bscans\b",
+        r"\bsiterip\b", r"\bsite-rip\b", r"\bwebrip\b", r"\bweb-rip\b", r"\brip\b", r"\braws?\b",
+        r"\b1080p\b", r"\b720p\b", r"\b480p\b", r"\b2160p\b", r"\b1600p\b", r"\b4k\b", r"\b8k\b", r"\bhd\b", r"\bsd\b", r"\bhq\b", r"\blq\b",
+        r"\bavif\b", r"\bwebp\b",
+        r"\bmanga\b", r"\bmanhwa\b", r"\bmanhua\b", r"\bwebtoon\b", r"\bcomic\b", r"\bcomics\b",
+        r"\btranslated\b", r"\btranslation\b", r"\benglish\b", r"\beng\b", r"\bmulti\b", r"\ball\s+languages?\b",
+        r"\bcompleted?\s*(?:series)?\b", r"\bcomplete\s*(?:series)?\b", r"\bbatch\b", r"\bpack\b", r"\brepack\b"
     ]
     for bw in buzzwords:
         cleaned = re.sub(bw, " ", cleaned, flags=re.IGNORECASE)
 
+    # Strip scene year attached to scene tags or -Group
+    scene_kw = r'(?:1080p|720p|480p|2160p|1600p|4k|8k|avif|webp|siterip|webrip|digital|cbz|cbr|raw)'
+    cleaned = re.sub(rf'(?i)(?:\b{scene_kw}\b[.\s\-–—]+)\b(?:19|20)\d{{2}}\b', ' ', cleaned)
+    cleaned = re.sub(r'\b(?:19|20)\d{2}\b(?=\s*[-–—]\s*[A-Za-z0-9_]+)', ' ', cleaned)
+
     cleaned = re.sub(r"^[\s\-–—:;,|.]+|[\s\-–—:;,|.]+$", "", cleaned)
     return " ".join(cleaned.split())
 
-def extract_manga_bundle_and_volumes(raw_title: str) -> Dict[str, Any]:
+def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """
     Parses manga titles for series name, bundle ranges (e.g. Vol 01-05), or single volumes.
     Always generates ALL individual volumes in bundle ranges (e.g., 1 to 7 for v1-v7).
     Extracts release group and handles mixed volume/chapter updates by focusing on volumes.
     """
     cleaned = clean_manga_title(raw_title)
-    release_group = extract_release_group(raw_title)
+    release_group = extract_release_group(raw_title, known_groups=known_groups)
+
+    if release_group:
+        # Strip extracted release group from cleaned title if present (e.g. from scene format -Group)
+        cleaned = re.sub(r'(?i)(?:[-–—]\s*)?' + re.escape(release_group) + r'\b', ' ', cleaned)
+        cleaned = " ".join(cleaned.split()).strip(" -–—:,|.")
 
     result = {
         "raw_title": raw_title,

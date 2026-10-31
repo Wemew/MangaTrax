@@ -124,7 +124,7 @@
                             {% endif %}
                             {% endif %}
                             <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold shrink-0 {% if item.volume_start == 1.0 %}bg-brand-500/15 text-brand-300 border border-brand-500/30{% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
-                                {{ 'Vol. 1' if item.volume_start == 1.0 else 'Standalone' }}
+                                {% if item.is_bundle and item.volume_start is not none and item.volume_end is not none %}Vol. {{ item.volume_start|int }}-{{ item.volume_end|int }}{% elif item.volume_start is not none %}Vol. {{ item.volume_start|int }}{% else %}Standalone{% endif %}
                             </span>
                         </div>
                     </div>

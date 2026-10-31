@@ -151,6 +151,18 @@ class MangaDatabase:
             except Exception:
                 pass
 
+            # Re-evaluate and sanitize release_group in releases table
+            try:
+                cur.execute("SELECT id, title, release_group FROM releases;")
+                all_rel = cur.fetchall()
+                from app.parser import extract_release_group
+                for r in all_rel:
+                    correct_rg = extract_release_group(r["title"]) or ""
+                    if (r["release_group"] or "") != correct_rg:
+                        cur.execute("UPDATE releases SET release_group = ? WHERE id = ?;", (correct_rg, r["id"]))
+            except Exception:
+                pass
+
             # Prioritized Release Groups table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS prioritized_groups (

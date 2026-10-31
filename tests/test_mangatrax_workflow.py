@@ -422,12 +422,26 @@ def test_prioritized_release_groups():
     db_file = os.path.join(temp_dir, "mangatrax_prioritized_test.db")
 
     try:
-        # 1. Group extraction
+        # 1. Group extraction & ignoring [Completed]/[Complete] tags regardless of position
         assert extract_release_group("[danke-Empire] Bleach v01-v20 [Digital] [1080p] [CBZ]") == "danke-Empire"
         assert extract_release_group("[Lu自主规制] Chainsaw Man Vol. 01-11 [Digital] [HD]") == "Lu自主规制"
         assert extract_release_group("[1R0N] One Piece Vol. 108") == "1R0N"
         assert extract_release_group("Bleach v01-v20 (danke-Empire)") == "danke-Empire"
         assert extract_release_group("One Piece Vol 108 [Digital] [CBZ]") is None
+        # Releases where [Completed] is after or before group
+        assert extract_release_group("[Manga] Frieren Vol. 01-10 [danke-Empire] [Completed]") == "danke-Empire"
+        assert extract_release_group("Frieren Vol. 01-10 [Completed] [danke-Empire]") == "danke-Empire"
+        assert extract_release_group("[danke-Empire] Bleach v01-v20 [Completed]") == "danke-Empire"
+        assert extract_release_group("Bleach v01-v20 (danke-Empire) [Complete]") == "danke-Empire"
+        assert extract_release_group("[Seven Seas] [Stick] The Tale of a Little Alchemist v01-04 [Digital] [Completed]") == "Stick"
+        # Releases with [Completed] or [Complete] but NO release group
+        assert extract_release_group("Ore ga Ojousama Gakkou ni Shomin Sample Toshite Rachirareta Ken v01-15 [Completed]") is None
+        assert extract_release_group("[Manga] Ore ga Ojousama Gakkou ni Shomin Sample Toshite Rachirareta Ken v01-15 (2012-2018) [Complete] | Shomin Sample cbz ver") is None
+        assert extract_release_group("Attack on Titan v01-v34 [Completed Series] [CBZ ver]") is None
+        assert extract_release_group("Dandadan Vol. 01-05 [Completed]") is None
+        # Scene releases with unbracketed groups
+        assert extract_release_group("Manga.Million.SiteRip.1600p.AVIF.2026-TenmaLand (Multi) (All languages) (CBZ) (Digital)") == "TenmaLand"
+        assert extract_release_group("Manga.Million.SiteRip.1600p.AVIF.2026 TenmaLand (Multi) (All languages) (CBZ) (Digital)") == "TenmaLand"
 
         db = MangaDatabase(db_file)
 
@@ -486,6 +500,22 @@ def test_prioritized_release_groups():
         assert len(p_series_groups) == 1
         assert len(p_series_groups[0]["releases"]) == 1
         assert p_series_groups[0]["releases"][0]["release_group"] == "danke-Empire"
+
+        # 3. Test automatic database sanitization of legacy erroneous "Completed" release groups
+        with db.get_connection() as conn:
+            conn.execute("INSERT INTO releases (guid, title, series_name, release_group) VALUES ('guid-legacy-completed-1', '[Manga] Frieren Vol. 01-10 [danke-Empire] [Completed]', 'Frieren', 'Completed');")
+            conn.execute("INSERT INTO releases (guid, title, series_name, release_group) VALUES ('guid-legacy-completed-2', 'Ore ga Ojousama v01-15 [Completed]', 'Ore ga Ojousama', 'Completed');")
+            conn.commit()
+
+        # Run init_db which triggers the migration
+        db.init_db()
+
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT release_group FROM releases WHERE guid = 'guid-legacy-completed-1';")
+            assert cur.fetchone()[0] == "danke-Empire"
+            cur.execute("SELECT release_group FROM releases WHERE guid = 'guid-legacy-completed-2';")
+            assert cur.fetchone()[0] == ""
 
         print("    [PASSED] Prioritized groups extracted, stored, and filtered with complete accuracy.")
     finally:
