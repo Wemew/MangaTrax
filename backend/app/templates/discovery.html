@@ -110,7 +110,7 @@
                     <!-- Manga info container -->
                     <div class="flex gap-3.5 mt-2 min-w-0">
                         {% if item.cover_url %}
-                        <img src="/api/covers?url={{ item.cover_url|urlencode }}" alt="Cover" loading="lazy" onclick="openImageModal(this.src, '{{ (item.series_name or item.title)|escape }}')" class="w-16 h-24 object-cover rounded-lg border border-slate-800 shrink-0 shadow-md cursor-pointer hover:opacity-90 hover:scale-[1.03] transition-all" title="Click to enlarge cover artwork">
+                        <img src="/api/covers?url={{ item.cover_url|urlencode }}" alt="Cover" loading="lazy" decoding="async" onclick="openImageModal(this.src, '{{ (item.series_name or item.title)|escape }}')" class="w-16 h-24 object-cover rounded-lg border border-slate-800 shrink-0 shadow-md cursor-pointer hover:opacity-90 hover:scale-[1.03] transition-all cover-placeholder" title="Click to enlarge cover artwork">
                         {% else %}
                         <div class="w-16 h-24 rounded-lg bg-slate-900 border border-slate-800 flex flex-col items-center justify-center shrink-0 text-slate-600">
                             <i data-lucide="layers" class="w-6 h-6"></i>

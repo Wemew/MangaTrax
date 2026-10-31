@@ -47,8 +47,10 @@ class MangaDatabase:
         return conn
 
     def init_db(self):
-        with self.get_connection() as conn:
-            cur = conn.cursor()
+        conn = self.get_connection()
+        try:
+            with conn:
+                cur = conn.cursor()
 
             # Manga series tracking (from Calibre)
             cur.execute("""
@@ -276,7 +278,20 @@ class MangaDatabase:
                     json.dumps({"description": "Monitors CBZ Manga releases."})
                 ))
 
+            # Performance indexes for fast queries and instant tab switches
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_series_name ON releases(series_name);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_lower_sname ON releases(lower(series_name));")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_status ON releases(status);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_updated_at ON releases(updated_at);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_rg ON releases(release_group);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_vol_start ON releases(volume_start);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_series_tracking_name ON series_tracking(name);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_series_tracking_monitored ON series_tracking(is_monitored);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_meta_cache_term ON manga_metadata_cache(search_term);")
+
             conn.commit()
+        finally:
+            conn.close()
 
     # --- Settings ---
     def get_setting(self, key: str, default: str = "") -> str:

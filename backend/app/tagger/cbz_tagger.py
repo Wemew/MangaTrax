@@ -7,6 +7,8 @@ from app.parser import extract_manga_bundle_and_volumes, normalize_text
 
 logger = logging.getLogger("mangatrax.tagger")
 
+_COMICINFO_CACHE: Dict[Any, bool] = {}
+
 def generate_comicinfo_xml(metadata: Dict[str, Any]) -> str:
     """
     Generates standard ComicInfo.xml compliant with ComicRack, Calibre, Komga, and Kavita specs.
@@ -38,9 +40,19 @@ def generate_comicinfo_xml(metadata: Dict[str, Any]) -> str:
 
 def has_comicinfo(cbz_path: str) -> bool:
     try:
+        mtime = os.path.getmtime(cbz_path)
+        cache_key = (cbz_path, mtime)
+        if cache_key in _COMICINFO_CACHE:
+            return _COMICINFO_CACHE[cache_key]
+
         with zipfile.ZipFile(cbz_path, "r") as z:
-            names = [n.lower() for n in z.namelist()]
-            return "comicinfo.xml" in names
+            found = False
+            for n in z.namelist():
+                if n.lower() == "comicinfo.xml":
+                    found = True
+                    break
+            _COMICINFO_CACHE[cache_key] = found
+            return found
     except Exception:
         return False
 
@@ -60,6 +72,10 @@ def inject_comicinfo(cbz_path: str, metadata: Dict[str, Any], overwrite: bool = 
         # Standard ZIP append mode
         with zipfile.ZipFile(cbz_path, "a") as z:
             z.writestr("ComicInfo.xml", xml_content.encode("utf-8"))
+        try:
+            _COMICINFO_CACHE[(cbz_path, os.path.getmtime(cbz_path))] = True
+        except Exception:
+            pass
         logger.info(f"Successfully tagged {os.path.basename(cbz_path)} with series '{metadata.get('series_name')}' Vol {metadata.get('volume')}")
         return True
     except Exception as e:

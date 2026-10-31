@@ -5,6 +5,8 @@ from typing import List, Dict, Any, Optional, Set
 
 logger = logging.getLogger("mangatrax.calibre")
 
+_SUMMARY_CACHE: Dict[str, Any] = {}
+
 class CalibreMangaScanner:
     """
     Zero-lock reader for Calibre's metadata.db.
@@ -41,6 +43,15 @@ class CalibreMangaScanner:
         if not self.is_available():
             return {"available": False, "total_books": 0, "total_series": 0, "total_authors": 0}
 
+        mtime = 0
+        try:
+            mtime = os.path.getmtime(self.db_path)
+            cached = _SUMMARY_CACHE.get(self.db_path)
+            if cached and cached.get("mtime") == mtime:
+                return cached["data"]
+        except Exception:
+            mtime = 0
+
         conn = None
         try:
             conn = self._get_connection()
@@ -51,13 +62,16 @@ class CalibreMangaScanner:
             total_series = cur.fetchone()[0]
             cur.execute("SELECT count(*) FROM authors;")
             total_authors = cur.fetchone()[0]
-            return {
+            res = {
                 "available": True,
                 "db_path": self.db_path,
                 "total_books": total_books,
                 "total_series": total_series,
                 "total_authors": total_authors
             }
+            if mtime:
+                _SUMMARY_CACHE[self.db_path] = {"mtime": mtime, "data": res}
+            return res
         except Exception as e:
             return {"available": False, "error": str(e), "total_books": 0, "total_series": 0, "total_authors": 0}
         finally:

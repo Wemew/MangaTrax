@@ -92,12 +92,12 @@ async def dashboard_view(request: Request):
     calibre_path = db.get_setting("calibre_path", CALIBRE_DIR)
     scanner = CalibreMangaScanner(calibre_path)
     calibre_status = scanner.get_library_summary()
-    pending_requests = db.get_pending_requests()
+    pending_requests = db.get_pending_requests(limit=10)
     recent_logs = db.get_logs(limit=10)
 
-    # Get active qBit torrents
+    # Get active qBit torrents with fast timeout to prevent UI stall
     qbit = scheduler.get_qbit_client()
-    torrents = qbit.get_torrents(category="manga") if qbit.test_connection().get("success") else []
+    torrents = qbit.get_torrents(category="manga") if qbit.test_connection(timeout=1.5).get("success") else []
 
     return templates.TemplateResponse(
         request=request,
@@ -126,17 +126,20 @@ async def series_view(request: Request):
 
 @app.get("/releases", response_class=HTMLResponse)
 async def releases_view(request: Request, status: Optional[str] = None, view: str = Query("series")):
-    releases = db.get_releases(status=status, limit=500)
-    # Deduplicate flat releases by release signature
-    seen_sigs = set()
-    deduped_releases = []
-    for r in releases:
-        sig = r.get("guid") or (r.get("download_url") or r.get("link") or r.get("title"), tuple(sorted(r.get("volumes", []))), (r.get("release_group") or "").lower())
-        if sig not in seen_sigs:
-            seen_sigs.add(sig)
-            deduped_releases.append(r)
+    if view == "flat":
+        releases = db.get_releases(status=status, limit=100)
+        seen_sigs = set()
+        deduped_releases = []
+        for r in releases:
+            sig = r.get("guid") or (r.get("download_url") or r.get("link") or r.get("title"), tuple(sorted(r.get("volumes", []))), (r.get("release_group") or "").lower())
+            if sig not in seen_sigs:
+                seen_sigs.add(sig)
+                deduped_releases.append(r)
+        grouped_series = []
+    else:
+        deduped_releases = []
+        grouped_series = db.get_releases_grouped_by_series(status=status)
 
-    grouped_series = db.get_releases_grouped_by_series(status=status)
     return templates.TemplateResponse(
         request=request,
         name="releases.html",
@@ -152,12 +155,25 @@ async def releases_view(request: Request, status: Optional[str] = None, view: st
 @app.get("/prioritized", response_class=HTMLResponse)
 async def prioritized_view(request: Request, status: Optional[str] = None, view: str = Query("series")):
     prioritized_groups = db.get_prioritized_groups()
-    releases = db.get_prioritized_releases(status=status, limit=500)
-    grouped_series = db.get_releases_grouped_by_series(status=status, prioritized_only=True)
+    if view == "flat":
+        releases = db.get_prioritized_releases(status=status, limit=100)
+        grouped_series = []
+    else:
+        releases = []
+        grouped_series = db.get_releases_grouped_by_series(status=status, prioritized_only=True)
+
     return templates.TemplateResponse(
         request=request,
         name="prioritized.html",
         context={
+            "active_page": "prioritized",
+            "prioritized_groups": prioritized_groups,
+            "releases": releases,
+            "grouped_series": grouped_series,
+            "current_status": status,
+            "current_view": view
+        }
+    )
             "active_page": "prioritized",
             "prioritized_groups": prioritized_groups,
             "releases": releases,
@@ -205,7 +221,7 @@ async def discovery_view(
 @app.get("/downloads", response_class=HTMLResponse)
 async def downloads_view(request: Request):
     qbit = scheduler.get_qbit_client()
-    qbit_status = qbit.test_connection()
+    qbit_status = qbit.test_connection(timeout=2.0)
     torrents = qbit.get_torrents(category="manga") if qbit_status.get("success") else []
 
     # Check files in staging directory

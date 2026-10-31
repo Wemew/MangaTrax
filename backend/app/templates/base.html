@@ -43,9 +43,47 @@
             word-break: break-word !important;
             hyphens: auto;
         }
+
+        /* Instant page loading bar */
+        #page-progress-bar.loading {
+            opacity: 1 !important;
+        }
+        .nav-link-loading {
+            position: relative;
+            opacity: 0.85;
+            pointer-events: none;
+        }
+        .nav-link-loading::after {
+            content: '';
+            display: inline-block;
+            width: 0.75rem;
+            height: 0.75rem;
+            margin-left: 0.35rem;
+            border: 2px solid currentColor;
+            border-right-color: transparent;
+            border-radius: 9999px;
+            animation: spin 0.6s linear infinite;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Cover shimmer placeholder */
+        .cover-placeholder {
+            background: linear-gradient(110deg, #161e2e 8%, #1f2a3d 18%, #161e2e 33%);
+            background-size: 200% 100%;
+            animation: shimmer 1.5s linear infinite;
+        }
+        @keyframes shimmer {
+            to { background-position-x: -200%; }
+        }
     </style>
 </head>
 <body class="bg-[#0b0f19] text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-brand-500 selection:text-white">
+
+    <!-- Global Top Loading Progress Bar for Instant Click Feedback -->
+    <div id="page-progress-bar" class="fixed top-0 left-0 h-[2.5px] bg-gradient-to-r from-rose-500 via-brand-500 to-amber-400 z-50 transition-all duration-300 pointer-events-none opacity-0 shadow-sm shadow-brand-500/50" style="width: 0%;"></div>
 
     <!-- Top Navigation Bar -->
     <header class="bg-[#111827]/90 backdrop-blur-md border-b border-slate-800 sticky top-0 z-40">
@@ -354,6 +392,78 @@
         }
 
         window.addEventListener('DOMContentLoaded', initGlobalBackfillPolling);
+
+        // Global Navigation Progress Bar & Instant Click Feedback
+        const ProgressBar = {
+            bar: null,
+            timer: null,
+            width: 0,
+            init() {
+                this.bar = document.getElementById('page-progress-bar');
+            },
+            start() {
+                if (!this.bar) this.init();
+                if (!this.bar) return;
+                clearInterval(this.timer);
+                this.width = 15;
+                this.bar.style.width = '15%';
+                this.bar.classList.add('loading');
+                document.body.style.cursor = 'progress';
+
+                this.timer = setInterval(() => {
+                    if (this.width < 75) {
+                        this.width += Math.random() * 12 + 5;
+                    } else if (this.width < 90) {
+                        this.width += Math.random() * 3 + 1;
+                    }
+                    this.bar.style.width = `${Math.min(this.width, 92)}%`;
+                }, 120);
+            },
+            done() {
+                if (!this.bar) return;
+                clearInterval(this.timer);
+                this.bar.style.width = '100%';
+                document.body.style.cursor = '';
+                setTimeout(() => {
+                    this.bar.classList.remove('loading');
+                    setTimeout(() => {
+                        this.bar.style.width = '0%';
+                    }, 250);
+                }, 150);
+            }
+        };
+
+        // Instant click feedback for all navigation tabs and links
+        document.addEventListener('click', (e) => {
+            const link = e.target.closest('a');
+            if (!link) return;
+
+            const href = link.getAttribute('href');
+            if (!href) return;
+
+            // Ignore anchors, JS triggers, external links, modals, or download actions
+            if (href.startsWith('#') || href.startsWith('javascript:') || link.target === '_blank' || link.hasAttribute('download')) {
+                return;
+            }
+
+            // Ignore modifier keys
+            if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+
+            // Trigger instant progress bar & tab spinner on internal navigation
+            if (href.startsWith('/') || href.startsWith('?') || !href.includes('://')) {
+                ProgressBar.start();
+                if (link.closest('nav') || link.classList.contains('nav-tab') || link.closest('.pagination-btn')) {
+                    link.classList.add('nav-link-loading');
+                }
+            }
+        });
+
+        // Reset progress bar & cursor when page is displayed (including bfcache back/forward)
+        window.addEventListener('pageshow', () => {
+            ProgressBar.done();
+            document.querySelectorAll('.nav-link-loading').forEach(el => el.classList.remove('nav-link-loading'));
+            document.body.style.cursor = '';
+        });
     </script>
     {% block scripts %}{% endblock %}
 </body>

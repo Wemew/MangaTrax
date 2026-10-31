@@ -27,8 +27,10 @@ class QBitClient:
         self.cj = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cj))
         self.authenticated = False
+        self._last_test_res: Optional[Dict[str, Any]] = None
+        self._last_test_time: float = 0.0
 
-    def login(self) -> bool:
+    def login(self, timeout: float = 3.0) -> bool:
         if not self.enabled:
             logger.info("Downloader is disabled in settings. Skipping login.")
             return False
@@ -49,7 +51,7 @@ class QBitClient:
         )
 
         try:
-            with self.opener.open(req, timeout=10.0) as resp:
+            with self.opener.open(req, timeout=timeout) as resp:
                 text = resp.read().decode("utf-8", errors="replace")
                 # qBittorrent returns 'Ok.' and sets a SID cookie upon successful authentication
                 has_cookie = any(c.name == "SID" for c in self.cj)
@@ -71,47 +73,71 @@ class QBitClient:
             return self.login()
         return True
 
-    def test_connection(self) -> Dict[str, Any]:
-        """Verifies connectivity and returns downloader app version and state."""
+    def test_connection(self, timeout: float = 3.0, force: bool = False, max_age: float = 8.0) -> Dict[str, Any]:
+        """Verifies connectivity and returns downloader app version and state, caching results briefly."""
+        import time
+        now = time.time()
+        if not force and self._last_test_res and (now - self._last_test_time < max_age):
+            return self._last_test_res
+
         if not self.enabled:
-            return {
+            res = {
                 "success": False,
                 "version": "",
                 "message": "Downloader is currently disabled in MangaTrax settings."
             }
+            self._last_test_res = res
+            self._last_test_time = now
+            return res
 
         if not self.base_url:
-            return {
+            res = {
                 "success": False,
                 "version": "",
                 "message": "Downloader URL is not configured."
             }
+            self._last_test_res = res
+            self._last_test_time = now
+            return res
 
         try:
-            if not self.login():
-                return {
+            if not self.login(timeout=timeout):
+                res = {
                     "success": False,
                     "version": "",
                     "message": f"Authentication failed connecting to {self.base_url}. Verify username and password."
                 }
+                self._last_test_res = res
+                self._last_test_time = now
+                return res
 
             req = urllib.request.Request(
                 f"{self.base_url}/api/v2/app/version",
                 headers={"User-Agent": "MangaTrax/1.0"}
             )
-            with self.opener.open(req, timeout=8.0) as resp:
+            with self.opener.open(req, timeout=timeout) as resp:
                 if resp.status == 200:
                     version = resp.read().decode("utf-8", errors="replace").strip()
-                    return {
+                    res = {
                         "success": True,
                         "version": version,
                         "message": f"Connected to qBittorrent {version} at {self.base_url}"
                     }
-                return {"success": False, "version": "", "message": f"HTTP {resp.status} from downloader"}
+                else:
+                    res = {"success": False, "version": "", "message": f"HTTP {resp.status} from downloader"}
+                self._last_test_res = res
+                self._last_test_time = now
+                return res
         except urllib.error.HTTPError as e:
-            return {"success": False, "version": "", "message": f"HTTP {e.code}: {e.reason}"}
+            res = {"success": False, "version": "", "message": f"HTTP {e.code}: {e.reason}"}
+            self._last_test_res = res
+            self._last_test_time = now
+            return res
         except Exception as e:
-            return {"success": False, "version": "", "message": f"Connection error: {e}"}
+            res = {"success": False, "version": "", "message": f"Connection error: {e}"}
+            self._last_test_res = res
+            self._last_test_time = now
+            return res
 
     def add_torrent(
         self,
