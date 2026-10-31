@@ -111,9 +111,22 @@
                             </span>
                             {% endif %}
                         </div>
-                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold shrink-0 {% if item.volume_start == 1.0 %}bg-brand-500/15 text-brand-300 border border-brand-500/30{% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
-                            {{ 'Vol. 1' if item.volume_start == 1.0 else 'Standalone' }}
-                        </span>
+                        <div class="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+                            {% if item.release_group %}
+                            {% if item.is_prioritized %}
+                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-bold shrink-0" title="Prioritized VIP Group: {{ item.release_group }}">
+                                <i data-lucide="star" class="w-2.5 h-2.5 fill-amber-400"></i> {{ item.release_group }}
+                            </span>
+                            {% else %}
+                            <button type="button" onclick="quickPrioritizeGroup('{{ item.release_group|escape }}')" title="Add '{{ item.release_group }}' to Prioritized VIP Groups" class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-900/90 hover:bg-slate-800 text-slate-400 hover:text-amber-300 border border-slate-800 hover:border-amber-500/30 text-[10px] font-medium transition-colors shrink-0">
+                                <i data-lucide="star" class="w-2.5 h-2.5"></i> {{ item.release_group }}
+                            </button>
+                            {% endif %}
+                            {% endif %}
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold shrink-0 {% if item.volume_start == 1.0 %}bg-brand-500/15 text-brand-300 border border-brand-500/30{% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
+                                {{ 'Vol. 1' if item.volume_start == 1.0 else 'Standalone' }}
+                            </span>
+                        </div>
                     </div>
 
                     <!-- Manga info container -->
@@ -436,6 +449,26 @@
         }
     }
 
+    async function quickPrioritizeGroup(name) {
+        if (!name) return;
+        try {
+            const res = await fetch('/api/prioritized/groups', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name, notes: 'Added from Discovery' })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                showToast(`Group "${name}" added to Prioritized VIPs!`, 'success');
+                setTimeout(() => location.reload(), 600);
+            } else {
+                showToast(data.message || 'Could not add group', 'error');
+            }
+        } catch (err) {
+            showToast('Error: ' + err, 'error');
+        }
+    }
+
     async function trackDiscovered(seriesName, releaseId) {
         try {
             const res = await fetch('/api/discovery/track', {
@@ -454,8 +487,6 @@
     }
 
     async function blacklistDiscovered(seriesName) {
-        if (!confirm(`Are you sure you want to blacklist "${seriesName}"? Any active requests will be cleared and future releases will not be tracked.`)) return;
-
         try {
             const res = await fetch('/api/discovery/blacklist', {
                 method: 'POST',
@@ -464,7 +495,7 @@
             });
             const data = await res.json();
             if (data.status === 'success') {
-                showToast(`Blacklisted "${seriesName}" and cleared requests.`, 'success');
+                showToast(`Blacklisted "${seriesName}" (can be undone in Blacklisted Series tab).`, 'success');
                 setTimeout(() => location.reload(), 600);
             }
         } catch (err) {

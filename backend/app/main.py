@@ -706,6 +706,14 @@ async def api_debug_action(payload: Dict[str, Any]):
     elif action == "normalize-english-titles":
         count = db.normalize_series_titles_to_english(scheduler.anilist)
         return JSONResponse({"status": "success", "message": f"Normalized {count} manga releases to official English titles."})
+    elif action == "reset-all-data":
+        db.reset_all_data()
+        cover_cache.clear_cache()
+        try:
+            scheduler.sync_calibre_library()
+        except Exception:
+            pass
+        return JSONResponse({"status": "success", "message": "All application data, release history, and caches have been reset successfully."})
     else:
         return JSONResponse({"status": "error", "message": f"Unknown action: {action}"}, status_code=400)
 

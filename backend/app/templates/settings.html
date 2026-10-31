@@ -290,6 +290,28 @@
                     Convert Romaji to English Titles
                 </button>
             </div>
+
+            <!-- Danger Zone: Reset Application Data -->
+            <div class="mt-4 pt-4 border-t border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-rose-950/20 border border-rose-900/30 rounded-xl p-4">
+                <div>
+                    <h4 class="text-xs font-bold text-rose-300 flex items-center gap-1.5 uppercase tracking-wide">
+                        <i data-lucide="alert-triangle" class="w-3.5 h-3.5 text-rose-400"></i>
+                        Danger Zone: Reset All Application Data
+                    </h4>
+                    <p class="text-[11px] text-slate-400 mt-0.5">
+                        Wipes all release history, download statuses, blacklist, tracked series, and cache. Preserves your Calibre path and qBittorrent login settings.
+                    </p>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                    <button type="button" id="btn-reset-data" onclick="handleResetDataClick()" class="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-rose-900/40 text-rose-400 hover:text-rose-300 border border-rose-900/50 hover:border-rose-500 text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm">
+                        <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                        <span id="reset-data-text">Reset All Application Data</span>
+                    </button>
+                    <button type="button" id="btn-cancel-reset" onclick="cancelResetConfirmation()" class="hidden px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition-colors">
+                        Cancel
+                    </button>
+                </div>
+            </div>
         </div>
 
         <!-- Submit Button -->
@@ -481,6 +503,71 @@ async function debugAction(action) {
         }
     } catch (err) {
         showToast('Error: ' + err, 'error');
+    }
+}
+
+let resetDataClickCount = 0;
+let resetDataTimer = null;
+
+function handleResetDataClick() {
+    const btn = document.getElementById('btn-reset-data');
+    const btnText = document.getElementById('reset-data-text');
+    const cancelBtn = document.getElementById('btn-cancel-reset');
+
+    if (resetDataClickCount === 0) {
+        resetDataClickCount = 1;
+        btn.className = "px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-xs flex items-center gap-2 transition-all shadow-lg shadow-rose-600/30 animate-pulse";
+        btnText.textContent = "Click again to confirm FULL reset";
+        if (cancelBtn) cancelBtn.classList.remove('hidden');
+        if (window.lucide) lucide.createIcons();
+
+        resetDataTimer = setTimeout(() => {
+            cancelResetConfirmation();
+        }, 6000);
+    } else {
+        clearTimeout(resetDataTimer);
+        cancelResetConfirmation();
+        executeFullDataReset();
+    }
+}
+
+function cancelResetConfirmation() {
+    resetDataClickCount = 0;
+    if (resetDataTimer) clearTimeout(resetDataTimer);
+    const btn = document.getElementById('btn-reset-data');
+    const btnText = document.getElementById('reset-data-text');
+    const cancelBtn = document.getElementById('btn-cancel-reset');
+    if (btn) {
+        btn.className = "px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-rose-900/40 text-rose-400 hover:text-rose-300 border border-rose-900/50 hover:border-rose-500 text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm";
+    }
+    if (btnText) btnText.textContent = "Reset All Application Data";
+    if (cancelBtn) cancelBtn.classList.add('hidden');
+    if (window.lucide) lucide.createIcons();
+}
+
+async function executeFullDataReset() {
+    const btn = document.getElementById('btn-reset-data');
+    if (btn) btn.disabled = true;
+    showToast('Resetting application database and caches...', 'info');
+    try {
+        const res = await fetch('/api/debug/action', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'reset-all-data' })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast('Application data reset successfully! Reloading...', 'success');
+            setTimeout(() => {
+                window.location.href = '/';
+            }, 1200);
+        } else {
+            showToast(data.message || 'Reset failed', 'error');
+            if (btn) btn.disabled = false;
+        }
+    } catch (err) {
+        showToast('Error resetting application: ' + err, 'error');
+        if (btn) btn.disabled = false;
     }
 }
 

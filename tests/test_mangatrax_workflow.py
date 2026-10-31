@@ -1207,6 +1207,80 @@ def test_timezone_conversion_and_formatting():
 
     print("    [PASSED] Timezone conversion and automatic daylight saving time handling verified 100%.")
 
+def test_discovery_vip_groups_and_full_data_reset():
+    print("--> Testing Discovery VIP Group Matching & Full Data Reset...")
+    temp_dir = tempfile.mkdtemp()
+    try:
+        db_path = os.path.join(temp_dir, "test_reset.db")
+        db = MangaDatabase(db_path)
+
+        # 1. Insert discovery items: one with default VIP group, one unknown
+        db.upsert_release({
+            "guid": "vip-disc-1",
+            "title": "[danke-Empire] Frieren Vol. 1",
+            "series_name": "Frieren",
+            "release_group": "danke-Empire",
+            "volume_start": 1.0,
+            "status": "DISCOVERY"
+        })
+        db.upsert_release({
+            "guid": "vip-disc-2",
+            "title": "[NewScanGroup] Dandadan Vol. 1",
+            "series_name": "Dandadan",
+            "release_group": "NewScanGroup",
+            "volume_start": 1.0,
+            "status": "DISCOVERY"
+        })
+
+        disc = db.get_discovery_releases()
+        frieren = next(r for r in disc if r["series_name"] == "Frieren")
+        dandadan = next(r for r in disc if r["series_name"] == "Dandadan")
+
+        assert frieren["is_prioritized"] is True, "danke-Empire should be recognized as prioritized"
+        assert dandadan["is_prioritized"] is False, "NewScanGroup is not yet prioritized"
+
+        # Dynamically prioritize NewScanGroup (as if user clicked VIP button on Discovery)
+        db.add_prioritized_group("NewScanGroup")
+        disc_after = db.get_discovery_releases()
+        dandadan_after = next(r for r in disc_after if r["series_name"] == "Dandadan")
+        assert dandadan_after["is_prioritized"] is True, "NewScanGroup should now be prioritized"
+
+        # 2. Add tracked series, blacklist, activity log, cache
+        db.track_discovered_series("Frieren", 1)
+        db.add_to_blacklist("Bad Manga", "Testing blacklist")
+        db.log_activity("TEST_EVENT", "Sample message")
+        db.cache_manga_metadata("sample_key", {"title": "Sample"})
+
+        assert len(db.get_all_series()) > 0
+        assert len(db.get_blacklisted_series()) > 0
+        assert len(db.get_logs(limit=10)) > 0
+
+        # 3. Trigger full application reset
+        res = db.reset_all_data()
+        assert res["status"] == "success"
+
+        # Verify all data was completely wiped
+        assert len(db.get_releases()) == 0
+        assert len(db.get_all_series()) == 0
+        assert len(db.get_blacklisted_series()) == 0
+        assert len(db.get_cached_manga_metadata("sample_key") or {}) == 0
+        
+        # Verify default feeds and groups were cleanly restored
+        feeds = db.get_all_feeds()
+        assert len(feeds) == 1
+        assert "Manga Releases" in feeds[0]["name"]
+
+        groups = db.get_prioritized_groups()
+        assert any(g["name"] == "danke-Empire" for g in groups)
+
+        logs = db.get_logs(limit=10)
+        assert len(logs) == 1
+        assert logs[0]["event_type"] == "SYSTEM_RESET"
+
+        print("    [PASSED] Discovery VIP group recognition and full application data wipe verified 100%.")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
 if __name__ == "__main__":
     print("==================================================")
     print("Running MangaTrax Comprehensive Integration Suite")
@@ -1227,6 +1301,7 @@ if __name__ == "__main__":
     test_webhook_notifications_service()
     test_selective_volume_download()
     test_timezone_conversion_and_formatting()
+    test_discovery_vip_groups_and_full_data_reset()
     print("==================================================")
     print("ALL TESTS PASSED SUCCESSFULLY! (100% VERIFIED)")
     print("==================================================")

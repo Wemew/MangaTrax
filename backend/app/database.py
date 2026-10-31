@@ -625,7 +625,12 @@ class MangaDatabase:
             params.extend([limit, offset])
             cur.execute(query, tuple(params))
             rows = [dict(row) for row in cur.fetchall()]
+
+            cur.execute("SELECT lower(name) FROM prioritized_groups;")
+            p_groups = {row[0] for row in cur.fetchall()}
+
             for r in rows:
+                r["is_prioritized"] = bool(r.get("release_group") and r["release_group"].lower() in p_groups)
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
                 # Fallback to cache if description, mangaupdates_url, or canonical English title wasn't directly populated on release
                 s_name = r.get("series_name")
@@ -1126,3 +1131,46 @@ class MangaDatabase:
                 r["missing_volumes"] = json.loads(r["missing_vols_json"] or "[]")
                 r["is_prioritized"] = True
             return rows
+
+    def reset_all_data(self) -> Dict[str, Any]:
+        """
+        Completely resets all application data: clears releases, tracked series,
+        blacklist entries, activity logs, and metadata caches, while restoring default feeds and groups.
+        """
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM releases;")
+            cur.execute("DELETE FROM series_tracking;")
+            cur.execute("DELETE FROM series_blacklist;")
+            cur.execute("DELETE FROM activity_logs;")
+            cur.execute("DELETE FROM manga_metadata_cache;")
+
+            # Reset feeds to defaults
+            cur.execute("DELETE FROM feeds;")
+            cur.execute("""
+                INSERT INTO feeds (name, feed_type, url, config_json, enabled, auto_download, check_interval_minutes)
+                VALUES ('Manga Releases (RSS)', 'rss', 'https://nyaa.si/?page=rss&q=manga+cbz&c=3_1&f=0', '{"description": "Monitors CBZ Manga releases."}', 1, 1, 60);
+            """)
+
+            # Reset prioritized groups to standard defaults
+            cur.execute("DELETE FROM prioritized_groups;")
+            default_groups = [
+                ("danke-Empire", "High quality digital manga releases"),
+                ("LuCirAn", "Official digital manga rips"),
+                ("1stKind", "Clean digital CBZ releases"),
+                ("TenmaLand", "Multi-language digital manga rips"),
+                ("Stick", "Verified publisher digital releases")
+            ]
+            cur.executemany("INSERT INTO prioritized_groups (name, notes) VALUES (?, ?);", default_groups)
+
+            # Reset backfill status in settings
+            cur.execute("UPDATE app_settings SET value = 'idle' WHERE key = 'backfill_status';")
+            cur.execute("UPDATE app_settings SET value = '' WHERE key = 'backfill_progress';")
+
+            # Log system reset
+            cur.execute("""
+                INSERT INTO activity_logs (event_type, message, details, created_at)
+                VALUES ('SYSTEM_RESET', 'All application data, releases, and caches have been reset.', NULL, CURRENT_TIMESTAMP);
+            """)
+            conn.commit()
+            return {"status": "success", "message": "All application data and release history have been reset successfully."}
