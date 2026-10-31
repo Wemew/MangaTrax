@@ -424,10 +424,23 @@ def test_chapters_and_mixed_updates():
     assert is_chapter_only("[Group] Bleach Ch. 01 - 10") is True
     assert is_chapter_only("Oshi no Ko c140 [English]") is True
 
+    # Numbers without 'v' or 'vol' in front indicate chapter releases, not volumes
+    assert is_chapter_only("[Group] 7 dai Tatarimasu node Hayaku Kekkon Shitekudasai! | Get Married So I Can Curse Your Firstborn and Finally Be Free! - 01-02") is True
+    assert is_chapter_only("7 dai Tatarimasu node Hayaku Kekkon Shitekudasai! | Get Married So I Can Curse Your Firstborn and Finally Be Free! 01-02") is True
+    assert is_chapter_only("[ScanGroup] Manga Title - 01 [English]") is True
+    assert is_chapter_only("[ScanGroup] Manga Title 01-02 [English]") is True
+    assert is_chapter_only("[ScanGroup] Manga Title - 15 [English]") is True
+    assert is_chapter_only("[ScanGroup] Manga Title #01-02") is True
+    assert is_chapter_only("[ScanGroup] Manga Title [01-02]") is True
+    assert is_chapter_only("Mob Psycho 100 - 01") is True
+
     # 2. Volumes must NOT be flagged as chapter-only
     assert is_chapter_only("One Piece Vol. 108") is False
     assert is_chapter_only("Bleach v01-v07") is False
     assert is_chapter_only("[danke-Empire] Bleach v01-v20 [Digital]") is False
+    assert is_chapter_only("Look Back [Digital] [CBZ]") is False
+    assert is_chapter_only("Goodbye, Eri (2022) [Digital]") is False
+    assert is_chapter_only("Mob Psycho 100 [Digital]") is False
 
     # 3. Mixed releases must NOT be flagged as chapter-only, and only volume info extracted
     assert is_chapter_only("Bleach Vol. 1 (Ch. 1-7)") is False

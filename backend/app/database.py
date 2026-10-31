@@ -155,10 +155,15 @@ class MangaDatabase:
             try:
                 cur.execute("SELECT id, title FROM releases;")
                 all_releases = cur.fetchall()
-                from app.parser import is_light_novel
+                from app.parser import is_light_novel, is_chapter_only
                 ln_ids = [r["id"] for r in all_releases if is_light_novel(r["title"])]
                 if ln_ids:
                     cur.executemany("DELETE FROM releases WHERE id = ?;", [(lid,) for lid in ln_ids])
+                
+                # Purge any chapter-only releases (without volume indicators) inadvertently stored
+                ch_ids = [r["id"] for r in all_releases if is_chapter_only(r["title"])]
+                if ch_ids:
+                    cur.executemany("DELETE FROM releases WHERE id = ?;", [(cid,) for cid in ch_ids])
             except Exception:
                 pass
 

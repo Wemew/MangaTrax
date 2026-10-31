@@ -201,6 +201,7 @@ def is_chapter_only(raw_title: str) -> bool:
     """
     Returns True if the release is purely a chapter update with no volume information.
     MangaTrax only tracks volumes and bundles; pure chapter releases are discarded.
+    Releases without a 'v' or 'vol' in front of numbers indicate chapters, not volumes.
     """
     if not raw_title:
         return False
@@ -208,27 +209,49 @@ def is_chapter_only(raw_title: str) -> bool:
     title = raw_title.lower()
 
     # Check for volume indicators
-    # e.g., vol 1, volume 1, vol. 1, v01, v1-v7, volumes 1-5, (v01-v07)
+    # e.g., vol 1, volume 1, vol. 1, v01, v1-v7, volumes 1-5, (v01-v07), [v01]
     has_volume = bool(
-        re.search(r"\b(?:volumes?|vol)\b\.?\s*\d+", title) or
-        re.search(r"\bv\d+", title) or
-        re.search(r"\(v\d+", title) or
-        re.search(r"\[v\d+", title)
+        re.search(r"\b(?:volumes?|volume|vols?|vol|books?|book)\b\.?\s*\d+", title) or
+        re.search(r"(?:^|[\s_.\-\(\[])v\d+", title)
     )
 
     if has_volume:
         return False
 
-    # Check for chapter indicators:
-    # e.g., ch 100, ch. 100, chapter 100, chapters 1-5, c100, c01-c10
-    has_chapter = bool(
-        re.search(r"\b(?:chapters?|ch)\b\.?\s*\d+", title) or
-        re.search(r"\bc\d+\b", title) or
-        re.search(r"\(c\d+", title) or
-        re.search(r"\[c\d+", title)
-    )
+    # 1. Explicit chapter keywords: ch, chapter, c
+    if re.search(r"\b(?:chapters?|ch)\b\.?\s*\d+", title) or re.search(r"\bc\d+\b", title) or re.search(r"[\(\[]c\d+", title):
+        return True
 
-    return has_chapter
+    # 2. Explicit chapter symbols: #01, #100
+    if re.search(r"#\s*\d+", title):
+        return True
+
+    # Clean brackets of non-chapter metadata like [Digital], [CBZ], [English], years (2020)
+    cleaned = title
+    cleaned = re.sub(r"\[(?:digital|cbz|cbr|pdf|epub|scanlation|scans?|raw|retail|multi|english|eng|ita|fra|esp|ger)\]", " ", cleaned)
+    cleaned = re.sub(r"\((?:19|20)\d{2}(?:\s*[-–—~to/]+\s*(?:19|20)\d{2})?\)", " ", cleaned)
+    cleaned = re.sub(r"\[(?:19|20)\d{2}(?:\s*[-–—~to/]+\s*(?:19|20)\d{2})?\]", " ", cleaned)
+
+    # 3. Bracketed bare numbers without 'v' e.g. [01], [01-02], (01), (01-02)
+    m_bracket = re.search(r"[\(\[]\s*(\d+(?:\.\d+)?(?:\s*[-–—~to/]+\s*\d+(?:\.\d+)?)?)\s*[\)\]]", cleaned)
+    if m_bracket:
+        inner = m_bracket.group(1).strip()
+        if not re.match(r"^(?:19|20)\d{2}$", inner):
+            return True
+
+    # 4. Trailing separator + number/range: e.g. ' - 01', ' - 01-02', ' - 15.5', ' ~ 01'
+    if re.search(r"(?:[-–—~:]|\s+-\s+)\s*\d+(?:\.\d+)?(?:\s*[-–—~to/]+\s*\d+(?:\.\d+)?)?\s*(?:\[|\(|$|\s)", cleaned):
+        return True
+
+    # 5. Trailing bare range: e.g. ' 01-02', ' 1-2'
+    if re.search(r"\b\d{1,4}(?:\.\d+)?\s*[-–—~to/]+\s*\d{1,4}(?:\.\d+)?\b\s*(?:\[|\(|$|\s)", cleaned):
+        return True
+
+    # 6. Zero-padded trailing number: e.g. ' 01', ' 005'
+    if re.search(r"\b0\d{1,3}(?:\.\d+)?\b\s*(?:\[|\(|$|\s)", cleaned):
+        return True
+
+    return False
 
 def clean_manga_title(raw_title: str) -> str:
     """Strips release group tags like [Group], formats [CBZ], [Digital], resolutions, etc."""
@@ -263,8 +286,8 @@ def clean_manga_title(raw_title: str) -> str:
         if has_chap and not has_vol:
             return " "
 
-        # Volume or volume range bracket -> preserve
-        if has_vol or (has_range and not re.search(r"(?:19|20)\d{2}", unbracketed)):
+        # Volume or volume range bracket -> preserve only if it has an explicit volume indicator (v, vol, volume)
+        if has_vol:
             return f" {unbracketed} "
         return " "
 
@@ -325,7 +348,7 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
         "confidence": 0.0
     }
 
-    if not cleaned:
+    if not cleaned or is_chapter_only(raw_title):
         return result
 
     # Pattern 1: Multi-volume bundle range:
@@ -417,32 +440,6 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
                 "volumes": [vol],
                 "confidence": 0.95
             }
-        except ValueError:
-            pass
-
-    # Pattern 3: Series + Number direct
-    p3 = re.compile(
-        r"^(?P<series>[A-Za-z0-9\s\'\"?!,\.]+?)\s+[-–—]?\s*(?P<vol>\d+(?:\.\d+)?)"
-        r"(?:\s*(?:[:\-–—]|\b).*)?$",
-        re.IGNORECASE
-    )
-    m3 = p3.match(cleaned)
-    if m3:
-        series = m3.group("series").strip(" -–—:,|.")
-        try:
-            vol = float(m3.group("vol"))
-            if not (1900 <= vol <= 2099):
-                return {
-                    "raw_title": raw_title,
-                    "clean_title": cleaned,
-                    "series_name": series,
-                    "release_group": release_group,
-                    "is_bundle": False,
-                    "volume_start": vol,
-                    "volume_end": vol,
-                    "volumes": [vol],
-                    "confidence": 0.80
-                }
         except ValueError:
             pass
 
