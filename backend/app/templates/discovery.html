@@ -84,9 +84,16 @@
                 <div>
                     <!-- Top series & volume badge -->
                     <div class="flex items-start justify-between gap-2 mb-2">
-                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                            {{ item.series_name or 'New Manga' }}
-                        </span>
+                        <div class="flex flex-col">
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                                {{ item.series_name or 'New Manga' }}
+                            </span>
+                            {% if item.romaji_name and item.romaji_name.lower() != (item.series_name or '').lower() %}
+                            <span class="text-[10px] text-slate-400 mt-0.5 italic ml-0.5" title="Original Japanese/Romaji Title">
+                                Romaji: {{ item.romaji_name }}
+                            </span>
+                            {% endif %}
+                        </div>
                         <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold {% if item.volume_start == 1.0 %}bg-brand-500/15 text-brand-300 border border-brand-500/30{% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
                             {{ 'Vol. 1' if item.volume_start == 1.0 else 'Standalone' }}
                         </span>

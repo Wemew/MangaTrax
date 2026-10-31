@@ -56,7 +56,8 @@ class MangaScheduler:
 
             # Build matcher
             volumes_map = scanner.get_all_volumes_per_series()
-            matcher = MangaCalibreMatcher(series_list, volumes_map)
+            meta_cache = self.db.get_all_manga_metadata_cache()
+            matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
 
             # Check pending requests against Calibre
             pending = self.db.get_pending_requests()
@@ -101,7 +102,8 @@ class MangaScheduler:
         scanner = CalibreMangaScanner(calibre_path)
         series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
         volumes_map = scanner.get_all_volumes_per_series() if scanner.is_available() else {}
-        matcher = MangaCalibreMatcher(series_list, volumes_map)
+        meta_cache = self.db.get_all_manga_metadata_cache()
+        matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
 
         global_auto_download = self.db.get_setting("auto_download", "true").lower() == "true"
         staging_dir = self.db.get_setting("staging_dir", "/staging")
@@ -131,19 +133,29 @@ class MangaScheduler:
 
                     rel_group = getattr(rel, "release_group", None) or rel.to_dict().get("release_group")
 
-                    # Canonical series metadata & cover resolution
+                    # Canonical English series metadata & cover resolution
                     canonical_series = rel.series_name
                     cover_url = rel.cover_url
+                    alt_names = []
                     if rel.series_name:
-                        calibre_match = matcher.find_series(rel.series_name)
-                        if calibre_match:
+                        # Convert any Romaji title to official English equivalent via AniList
+                        meta = self.anilist.resolve_manga_series(rel.series_name)
+                        english_title = (meta.get("canonical_title") or meta.get("english_title") or "").strip()
+                        if english_title:
+                            canonical_series = english_title
+                        if not cover_url and meta.get("cover_url"):
+                            cover_url = meta["cover_url"]
+
+                        romaji = (meta.get("romaji_title") or "").strip()
+                        if romaji and romaji.lower() != canonical_series.lower():
+                            alt_names.append(romaji)
+                        if rel.series_name.lower() != canonical_series.lower():
+                            alt_names.append(rel.series_name)
+
+                        # Match against Calibre
+                        calibre_match = matcher.find_series(canonical_series, alt_names=alt_names)
+                        if calibre_match and not english_title:
                             canonical_series = calibre_match["series_name"]
-                        else:
-                            meta = self.anilist.resolve_manga_series(rel.series_name)
-                            if meta.get("canonical_title"):
-                                canonical_series = meta["canonical_title"]
-                            if not cover_url and meta.get("cover_url"):
-                                cover_url = meta["cover_url"]
 
                     # SSRF safe sync cover caching
                     if cover_url:
@@ -157,7 +169,7 @@ class MangaScheduler:
                     else:
                         match_payload = rel.to_dict()
                         match_payload["series_name"] = canonical_series
-                        match_result = matcher.check_release(match_payload)
+                        match_result = matcher.check_release(match_payload, alt_series_names=alt_names)
                         status = match_result["status"]
                         missing_vols = match_result.get("missing_volumes", [])
 
@@ -316,7 +328,8 @@ class MangaScheduler:
             scanner = CalibreMangaScanner(calibre_path)
             series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
             volumes_map = scanner.get_all_volumes_per_series() if scanner.is_available() else {}
-            matcher = MangaCalibreMatcher(series_list, volumes_map)
+            meta_cache = self.db.get_all_manga_metadata_cache()
+            matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
 
             for feed in feeds:
                 if self.stop_backfill_requested:
@@ -349,19 +362,29 @@ class MangaScheduler:
                     total_processed += 1
                     rel_group = getattr(rel, "release_group", None) or rel.to_dict().get("release_group")
 
-                    # Canonical series metadata & cover resolution
+                    # Canonical English series metadata & cover resolution
                     canonical_series = rel.series_name
                     cover_url = rel.cover_url
+                    alt_names = []
                     if rel.series_name:
-                        calibre_match = matcher.find_series(rel.series_name)
-                        if calibre_match:
+                        # Convert any Romaji title to official English equivalent via AniList
+                        meta = await asyncio.to_thread(self.anilist.resolve_manga_series, rel.series_name)
+                        english_title = (meta.get("canonical_title") or meta.get("english_title") or "").strip()
+                        if english_title:
+                            canonical_series = english_title
+                        if not cover_url and meta.get("cover_url"):
+                            cover_url = meta["cover_url"]
+
+                        romaji = (meta.get("romaji_title") or "").strip()
+                        if romaji and romaji.lower() != canonical_series.lower():
+                            alt_names.append(romaji)
+                        if rel.series_name.lower() != canonical_series.lower():
+                            alt_names.append(rel.series_name)
+
+                        # Match against Calibre
+                        calibre_match = matcher.find_series(canonical_series, alt_names=alt_names)
+                        if calibre_match and not english_title:
                             canonical_series = calibre_match["series_name"]
-                        else:
-                            meta = await asyncio.to_thread(self.anilist.resolve_manga_series, rel.series_name)
-                            if meta.get("canonical_title"):
-                                canonical_series = meta["canonical_title"]
-                            if not cover_url and meta.get("cover_url"):
-                                cover_url = meta["cover_url"]
 
                     if cover_url:
                         await asyncio.to_thread(self.cover_cache.cache_sync, cover_url)
@@ -374,7 +397,7 @@ class MangaScheduler:
                     else:
                         match_payload = rel.to_dict()
                         match_payload["series_name"] = canonical_series
-                        match_res = matcher.check_release(match_payload)
+                        match_res = matcher.check_release(match_payload, alt_series_names=alt_names)
                         status = match_res["status"]
                         missing_vols = match_res.get("missing_volumes", [])
 

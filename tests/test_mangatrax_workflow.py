@@ -566,6 +566,103 @@ def test_mangaupdates_and_rss_links():
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+def test_romaji_to_english_titles_conversion():
+    print("--> Testing Romaji to English Titles Normalization & Cross-Matching...")
+    from app.metadata.anilist import AniListMetadataService
+
+    temp_dir = tempfile.mkdtemp(prefix="mangatrax_test_english_")
+    db_file = os.path.join(temp_dir, "mangatrax_eng_test.db")
+
+    try:
+        db = MangaDatabase(db_file)
+        anilist = AniListMetadataService(db=db)
+
+        # 1. Seed or resolve English vs Romaji mapping in cache
+        db.cache_manga_metadata("shingeki no kyojin", {
+            "canonical_title": "Attack on Titan",
+            "romaji_title": "Shingeki no Kyojin",
+            "synopsis": "Humanity fights giant man-eating humanoids.",
+            "source": "anilist"
+        })
+        db.cache_manga_metadata("attack on titan", {
+            "canonical_title": "Attack on Titan",
+            "romaji_title": "Shingeki no Kyojin",
+            "synopsis": "Humanity fights giant man-eating humanoids.",
+            "source": "anilist"
+        })
+
+        db.cache_manga_metadata("kimetsu no yaiba", {
+            "canonical_title": "Demon Slayer: Kimetsu no Yaiba",
+            "romaji_title": "Kimetsu no Yaiba",
+            "synopsis": "Tanjiro fights demons to save his sister.",
+            "source": "anilist"
+        })
+
+        # Test resolve_english_title
+        assert anilist.resolve_english_title("Shingeki no Kyojin") == "Attack on Titan"
+        assert anilist.resolve_english_title("Kimetsu no Yaiba") == "Demon Slayer: Kimetsu no Yaiba"
+        assert anilist.resolve_english_title("Attack on Titan") == "Attack on Titan"
+
+        # 2. Test Calibre Cross-Matching (Calibre has English, release has Romaji)
+        calibre_library = [
+            {"series_id": 1, "series_name": "Attack on Titan", "book_count": 34, "latest_index": 34.0},
+            {"series_id": 2, "series_name": "Demon Slayer: Kimetsu no Yaiba", "book_count": 23, "latest_index": 23.0}
+        ]
+        volumes_map = {
+            "attack on titan": {1.0, 2.0, 3.0},
+            "demon slayer: kimetsu no yaiba": {1.0, 2.0}
+        }
+        meta_cache = db.get_all_manga_metadata_cache()
+        matcher = MangaCalibreMatcher(calibre_library, volumes_map, meta_cache)
+
+        # Release with Romaji name "Shingeki no Kyojin"
+        match_snk = matcher.find_series("Shingeki no Kyojin")
+        assert match_snk is not None
+        assert match_snk["series_name"] == "Attack on Titan"
+
+        # Check release evaluation with Romaji title against English Calibre library
+        rel_snk = {
+            "title": "[Group] Shingeki no Kyojin Vol. 04 [Digital]",
+            "series_name": "Shingeki no Kyojin",
+            "volumes": [4.0],
+            "is_bundle": False
+        }
+        res = matcher.check_release(rel_snk, auto_request_monitored=True)
+        assert res["status"] == "REQUESTED"
+        assert res["matched_series"]["series_name"] == "Attack on Titan"
+        assert 4.0 in res["missing_volumes"]
+
+        # 3. Test Database Title Normalization (normalize_series_titles_to_english)
+        rel_db = {
+            "guid": "guid-test-snk-vol1",
+            "title": "[Group] Shingeki no Kyojin Vol. 01",
+            "series_name": "Shingeki no Kyojin",
+            "volume_start": 1.0,
+            "volume_end": 1.0,
+            "volumes": [1.0],
+            "missing_volumes": [],
+            "status": "DISCOVERY"
+        }
+        db.upsert_release(rel_db)
+
+        # Before normalization, discovery sees English via cache
+        disc_releases = db.get_discovery_releases()
+        assert len(disc_releases) == 1
+        assert disc_releases[0]["series_name"] == "Attack on Titan"
+        assert disc_releases[0]["romaji_name"] == "Shingeki no Kyojin"
+
+        # Run database normalization
+        updated = db.normalize_series_titles_to_english(anilist)
+        assert updated >= 1
+
+        all_rel = db.get_releases()
+        snk_in_db = next(r for r in all_rel if r["guid"] == "guid-test-snk-vol1")
+        assert snk_in_db["series_name"] == "Attack on Titan"
+
+        print("    [PASSED] Romaji titles successfully converted to English and cross-matched against Calibre.")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
 if __name__ == "__main__":
     print("==================================================")
     print("Running MangaTrax Comprehensive Integration Suite")
@@ -578,6 +675,7 @@ if __name__ == "__main__":
     test_chapters_and_mixed_updates()
     test_prioritized_release_groups()
     test_mangaupdates_and_rss_links()
+    test_romaji_to_english_titles_conversion()
     print("==================================================")
     print("ALL TESTS PASSED SUCCESSFULLY! (100% VERIFIED)")
     print("==================================================")

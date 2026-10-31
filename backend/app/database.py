@@ -508,14 +508,27 @@ class MangaDatabase:
             rows = [dict(row) for row in cur.fetchall()]
             for r in rows:
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
-                # Fallback to cache if description or mangaupdates_url wasn't directly populated on release
-                if (not r.get("description") or not r.get("mangaupdates_url")) and r.get("series_name"):
-                    cached = self.get_cached_manga_metadata(f"mu:{r['series_name'].lower()}")
-                    if cached:
-                        if not r.get("description") and cached.get("synopsis"):
-                            r["description"] = cached["synopsis"]
-                        if not r.get("mangaupdates_url") and cached.get("romaji_title"):
-                            r["mangaupdates_url"] = cached["romaji_title"]
+                # Fallback to cache if description, mangaupdates_url, or canonical English title wasn't directly populated on release
+                s_name = r.get("series_name")
+                if s_name:
+                    # Check AniList cache for canonical English title
+                    meta_cached = self.get_cached_manga_metadata(s_name.lower())
+                    if meta_cached:
+                        canonical = meta_cached.get("canonical_title")
+                        if canonical and canonical.strip().lower() != s_name.strip().lower():
+                            r["series_name"] = canonical
+                            r["romaji_name"] = meta_cached.get("romaji_title") or s_name
+                        if not r.get("cover_url") and meta_cached.get("cover_url"):
+                            r["cover_url"] = meta_cached["cover_url"]
+
+                    # Check MangaUpdates cache
+                    if not r.get("description") or not r.get("mangaupdates_url"):
+                        mu_cached = self.get_cached_manga_metadata(f"mu:{s_name.lower()}") or (meta_cached if meta_cached and "synopsis" in meta_cached else None)
+                        if mu_cached:
+                            if not r.get("description") and mu_cached.get("synopsis"):
+                                r["description"] = mu_cached["synopsis"]
+                            if not r.get("mangaupdates_url") and mu_cached.get("romaji_title"):
+                                r["mangaupdates_url"] = mu_cached["romaji_title"]
             return rows
 
     def update_release_details(self, release_id: int, description: Optional[str] = None, link: Optional[str] = None, cover_url: Optional[str] = None, mangaupdates_url: Optional[str] = None):
@@ -730,6 +743,45 @@ class MangaDatabase:
             ))
             conn.commit()
 
+    def get_all_manga_metadata_cache(self) -> Dict[str, Dict[str, Any]]:
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM manga_metadata_cache;")
+            return {row["search_term"].lower(): dict(row) for row in cur.fetchall()}
+
+    def normalize_series_titles_to_english(self, anilist_service) -> int:
+        """
+        Scans all releases in the database, queries their canonical English titles
+        via metadata/AniList, and updates any Romaji titles to their English equivalents.
+        """
+        updated_count = 0
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT DISTINCT series_name FROM releases WHERE series_name IS NOT NULL AND series_name != '';")
+            distinct_series = [row[0] for row in cur.fetchall()]
+
+            for s_name in distinct_series:
+                try:
+                    meta = anilist_service.resolve_manga_series(s_name)
+                    canonical = (meta.get("canonical_title") or meta.get("english_title") or "").strip()
+                    if canonical and canonical.lower() != s_name.strip().lower():
+                        cur.execute("""
+                            UPDATE releases 
+                            SET series_name = ?, updated_at = CURRENT_TIMESTAMP
+                            WHERE lower(series_name) = lower(?);
+                        """, (canonical, s_name))
+                        updated_count += cur.rowcount
+                except Exception as e:
+                    logger.debug(f"Normalization failed for '{s_name}': {e}")
+
+            conn.commit()
+            if updated_count > 0:
+                self.log_activity(
+                    "TITLES_NORMALIZED",
+                    f"Converted {updated_count} release titles to official English equivalents."
+                )
+        return updated_count
+
     # --- Group Releases by Series ---
     def get_releases_grouped_by_series(self, status: Optional[str] = None, prioritized_only: bool = False) -> List[Dict[str, Any]]:
         """
@@ -796,11 +848,11 @@ class MangaDatabase:
                             calibre_match = t_row
                             break
 
-                    meta_match = cache_map.get(s_key) or {}
+                    meta_match = cache_map.get(s_key) or cache_map.get(s_name.lower()) or {}
 
                     canonical_title = (
-                        (calibre_match.get("name") if calibre_match else None)
-                        or meta_match.get("canonical_title")
+                        meta_match.get("canonical_title")
+                        or (calibre_match.get("name") if calibre_match else None)
                         or s_name
                     )
 

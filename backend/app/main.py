@@ -465,15 +465,19 @@ async def api_get_prioritized_releases(status: Optional[str] = None):
 
 @app.post("/api/discovery/track")
 async def api_discovery_track(payload: Dict[str, Any]):
-    """Track a newly discovered series and request the volume."""
+    """Track a newly discovered series and request the volume, using canonical English series name."""
     series_name = payload.get("series_name")
     release_id = payload.get("release_id")
     if not series_name:
         return JSONResponse({"status": "error", "message": "Series name required"}, status_code=400)
 
-    db.track_discovered_series(series_name, release_id)
-    db.log_activity("SERIES_TRACKED", f"Started tracking new series: {series_name}")
-    return JSONResponse({"status": "success"})
+    # Prefer canonical English title
+    english_name = scheduler.anilist.resolve_english_title(series_name)
+    target_name = english_name if english_name else series_name
+
+    db.track_discovered_series(target_name, release_id)
+    db.log_activity("SERIES_TRACKED", f"Started tracking new series: {target_name}")
+    return JSONResponse({"status": "success", "tracked_name": target_name})
 
 @app.post("/api/discovery/blacklist")
 async def api_discovery_blacklist(payload: Dict[str, Any]):
@@ -573,6 +577,9 @@ async def api_debug_action(payload: Dict[str, Any]):
     elif action == "clear-thumbnails":
         count = cover_cache.clear_cache()
         return JSONResponse({"status": "success", "message": f"Purged {count} cached cover images from disk."})
+    elif action == "normalize-english-titles":
+        count = db.normalize_series_titles_to_english(scheduler.anilist)
+        return JSONResponse({"status": "success", "message": f"Normalized {count} manga releases to official English titles."})
     else:
         return JSONResponse({"status": "error", "message": f"Unknown action: {action}"}, status_code=400)
 

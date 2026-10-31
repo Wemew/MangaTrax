@@ -2,17 +2,46 @@ from typing import List, Dict, Any, Optional, Set
 from app.parser import normalize_text, clean_manga_title, match_manga_series_in_calibre
 
 class MangaCalibreMatcher:
-    def __init__(self, calibre_series: List[Dict[str, Any]], volumes_map: Dict[str, Set[float]]):
+    def __init__(self, calibre_series: List[Dict[str, Any]], volumes_map: Dict[str, Set[float]], metadata_cache: Optional[Dict[str, Dict[str, Any]]] = None):
         self.calibre_series = calibre_series
         self.volumes_map = volumes_map
+        self.metadata_cache = metadata_cache or {}
 
-    def find_series(self, series_name: str) -> Optional[Dict[str, Any]]:
-        """Matches a raw or extracted series name to an existing Calibre series."""
+    def find_series(self, series_name: str, alt_names: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+        """
+        Matches a raw or extracted series name to an existing Calibre series.
+        Cross-references canonical English titles and Romaji aliases.
+        """
         if not series_name:
             return None
-        return match_manga_series_in_calibre(series_name, self.calibre_series)
 
-    def check_release(self, release: Dict[str, Any], auto_request_monitored: bool = True) -> Dict[str, Any]:
+        # 1. Direct match
+        match = match_manga_series_in_calibre(series_name, self.calibre_series)
+        if match:
+            return match
+
+        # 2. Check explicit alt names (e.g. English canonical title or Romaji)
+        if alt_names:
+            for alt in alt_names:
+                if alt:
+                    alt_match = match_manga_series_in_calibre(alt, self.calibre_series)
+                    if alt_match:
+                        return alt_match
+
+        # 3. Check metadata cache for English <-> Romaji translation
+        clean_key = series_name.strip().lower()
+        cached = self.metadata_cache.get(clean_key)
+        if cached:
+            for field in ["canonical_title", "romaji_title"]:
+                candidate = (cached.get(field) or "").strip()
+                if candidate and candidate.lower() != clean_key:
+                    m = match_manga_series_in_calibre(candidate, self.calibre_series)
+                    if m:
+                        return m
+
+        return None
+
+    def check_release(self, release: Dict[str, Any], auto_request_monitored: bool = True, alt_series_names: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Evaluates a single manga volume or multi-volume bundle against Calibre.
         """
@@ -23,7 +52,7 @@ class MangaCalibreMatcher:
 
         matched_series = None
         if series_name:
-            matched_series = match_manga_series_in_calibre(series_name, self.calibre_series)
+            matched_series = self.find_series(series_name, alt_names=alt_series_names)
 
         if matched_series:
             norm_name = matched_series["series_name"].lower()

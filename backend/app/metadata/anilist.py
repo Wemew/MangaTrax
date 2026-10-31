@@ -112,10 +112,29 @@ class AniListMetadataService:
         if self.db:
             try:
                 self.db.cache_manga_metadata(cache_key, metadata)
+                # Also cross-cache under romaji and canonical titles if different
+                romaji = (metadata.get("romaji_title") or "").strip().lower()
+                canonical = (metadata.get("canonical_title") or "").strip().lower()
+                if romaji and romaji != cache_key:
+                    self.db.cache_manga_metadata(romaji, metadata)
+                if canonical and canonical != cache_key:
+                    self.db.cache_manga_metadata(canonical, metadata)
             except Exception as e:
                 logger.debug(f"Failed to cache metadata for '{cache_key}': {e}")
 
         return metadata
+
+    def resolve_english_title(self, raw_series_name: str) -> str:
+        """
+        Returns the official or canonical English title for a series name,
+        converting romaji titles (e.g. 'Shingeki no Kyojin' -> 'Attack on Titan').
+        Falls back to raw_series_name if no distinct English title is found.
+        """
+        if not raw_series_name:
+            return ""
+        info = self.resolve_manga_series(raw_series_name)
+        canonical = info.get("canonical_title")
+        return canonical if canonical else raw_series_name
 
     def _fetch_from_anilist(self, search_term: str) -> Optional[Dict[str, Any]]:
         payload = {
@@ -143,8 +162,21 @@ class AniListMetadataService:
                     return None
 
                 titles = media.get("title", {})
-                canonical = titles.get("english") or titles.get("romaji") or search_term
-                romaji = titles.get("romaji") or ""
+                english = (titles.get("english") or "").strip()
+                romaji = (titles.get("romaji") or "").strip()
+                synonyms = media.get("synonyms") or []
+
+                # Prefer English title over romaji
+                canonical = english
+                if not canonical and synonyms:
+                    for syn in synonyms:
+                        s_clean = syn.strip()
+                        if s_clean and s_clean.lower() != romaji.lower() and re.search(r"\b(?:the|a|an|of|in|to|is|for|my|no|war|voice|shape|world|demon|titan|hero)\b", s_clean, re.IGNORECASE):
+                            canonical = s_clean
+                            break
+                if not canonical:
+                    canonical = romaji or search_term
+
                 cover = media.get("coverImage", {}).get("extraLarge") or media.get("coverImage", {}).get("large") or ""
                 volumes = media.get("volumes")
                 status = media.get("status") or "UNKNOWN"
@@ -153,6 +185,7 @@ class AniListMetadataService:
 
                 return {
                     "canonical_title": canonical,
+                    "english_title": canonical,
                     "romaji_title": romaji,
                     "cover_url": cover,
                     "total_volumes": volumes,
