@@ -12,6 +12,7 @@ from app.downloader.qbit import QBitClient
 from app.tagger.cbz_tagger import auto_tag_staging_cbz_files
 from app.providers.registry import create_provider
 from app.metadata.anilist import AniListMetadataService
+from app.metadata.mangaupdates import MangaUpdatesService
 from app.parser import is_chapter_only
 
 logger = logging.getLogger("mangatrax.scheduler")
@@ -21,6 +22,7 @@ class MangaScheduler:
         self.db = db
         self.cover_cache = cover_cache
         self.anilist = AniListMetadataService(db=self.db)
+        self.mangaupdates = MangaUpdatesService(db=self.db)
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -159,6 +161,20 @@ class MangaScheduler:
                         status = match_result["status"]
                         missing_vols = match_result.get("missing_volumes", [])
 
+                    desc = ""
+                    mu_url = ""
+                    if status == "DISCOVERY" and canonical_series:
+                        try:
+                            mu_info = self.mangaupdates.get_series_info(canonical_series)
+                            if mu_info:
+                                desc = mu_info.get("description", "")
+                                mu_url = mu_info.get("url", "")
+                                if not cover_url and mu_info.get("cover_url"):
+                                    cover_url = mu_info["cover_url"]
+                                    self.cover_cache.cache_sync(cover_url)
+                        except Exception as e:
+                            logger.debug(f"Failed to fetch MangaUpdates info for '{canonical_series}': {e}")
+
                     rel_dict = {
                         "guid": rel.guid,
                         "title": rel.title,
@@ -172,6 +188,8 @@ class MangaScheduler:
                         "download_url": rel.download_url,
                         "link": rel.link,
                         "cover_url": cover_url,
+                        "description": desc,
+                        "mangaupdates_url": mu_url,
                         "source_feed_name": feed_name,
                         "status": status,
                         "download_status": "IDLE"
@@ -360,6 +378,20 @@ class MangaScheduler:
                         status = match_res["status"]
                         missing_vols = match_res.get("missing_volumes", [])
 
+                    desc = ""
+                    mu_url = ""
+                    if status == "DISCOVERY" and canonical_series:
+                        try:
+                            mu_info = await asyncio.to_thread(self.mangaupdates.get_series_info, canonical_series)
+                            if mu_info:
+                                desc = mu_info.get("description", "")
+                                mu_url = mu_info.get("url", "")
+                                if not cover_url and mu_info.get("cover_url"):
+                                    cover_url = mu_info["cover_url"]
+                                    await asyncio.to_thread(self.cover_cache.cache_sync, cover_url)
+                        except Exception as e:
+                            logger.debug(f"Backfill MangaUpdates fetch failed for '{canonical_series}': {e}")
+
                     rel_dict = {
                         "guid": rel.guid,
                         "title": rel.title,
@@ -373,6 +405,8 @@ class MangaScheduler:
                         "download_url": rel.download_url,
                         "link": rel.link,
                         "cover_url": cover_url,
+                        "description": desc,
+                        "mangaupdates_url": mu_url,
                         "source_feed_name": feed_name,
                         "status": status,
                         "download_status": "IDLE"

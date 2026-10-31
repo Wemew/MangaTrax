@@ -15,6 +15,7 @@ from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
 from app.tagger.cbz_tagger import has_comicinfo
+from app.metadata.mangaupdates import MangaUpdatesService
 
 # Setup Logging
 logging.basicConfig(
@@ -33,6 +34,7 @@ CALIBRE_DIR = os.getenv("CALIBRE_DIR", "/calibre")
 # Initialize Database, Cache & Scheduler
 db = MangaDatabase(DB_PATH)
 cover_cache = CoverCache(DATA_DIR)
+mangaupdates = MangaUpdatesService(db=db)
 scheduler = MangaScheduler(db, cover_cache)
 
 # Lifespan Context Manager
@@ -484,6 +486,37 @@ async def api_discovery_blacklist(payload: Dict[str, Any]):
     db.add_to_blacklist(series_name, reason)
     db.log_activity("SERIES_BLACKLISTED", f"Blacklisted series from discovery: {series_name}")
     return JSONResponse({"status": "success"})
+
+@app.post("/api/discovery/{release_id}/fetch-info")
+async def api_discovery_fetch_info(release_id: int):
+    """Fetches series synopsis and MangaUpdates link for a discovery release on demand."""
+    import asyncio
+    releases = db.get_discovery_releases(limit=500)
+    target = next((r for r in releases if r["id"] == release_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Discovery release not found")
+
+    series_name = target.get("series_name") or target.get("title")
+    info = await asyncio.to_thread(mangaupdates.get_series_info, series_name)
+    desc = info.get("description", "")
+    mu_url = info.get("url", "")
+    cover_url = info.get("cover_url", "")
+
+    db.update_release_details(
+        release_id=release_id,
+        description=desc,
+        mangaupdates_url=mu_url,
+        cover_url=cover_url if cover_url else None
+    )
+    if cover_url:
+        await asyncio.to_thread(cover_cache.cache_sync, cover_url)
+
+    return JSONResponse({
+        "status": "success",
+        "description": desc,
+        "mangaupdates_url": mu_url,
+        "cover_url": cover_url
+    })
 
 @app.post("/api/settings")
 async def api_save_settings(payload: Dict[str, Any]):

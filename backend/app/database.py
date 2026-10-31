@@ -92,6 +92,8 @@ class MangaDatabase:
                     title TEXT NOT NULL,
                     series_name TEXT,
                     release_group TEXT DEFAULT '',
+                    description TEXT DEFAULT '',
+                    mangaupdates_url TEXT DEFAULT '',
                     is_bundle INTEGER DEFAULT 0,
                     volume_start REAL,
                     volume_end REAL,
@@ -109,11 +111,15 @@ class MangaDatabase:
                 );
             """)
 
-            # Add release_group column if missing on upgrade
+            # Add release_group, description, mangaupdates_url columns if missing on upgrade
             cur.execute("PRAGMA table_info(releases);")
             r_cols = [r["name"] for r in cur.fetchall()]
             if "release_group" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN release_group TEXT DEFAULT '';")
+            if "description" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN description TEXT DEFAULT '';")
+            if "mangaupdates_url" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN mangaupdates_url TEXT DEFAULT '';")
 
             # Prioritized Release Groups table
             cur.execute("""
@@ -379,6 +385,8 @@ class MangaDatabase:
                         title = ?,
                         series_name = ?,
                         release_group = COALESCE(?, release_group),
+                        description = CASE WHEN ? != '' AND ? IS NOT NULL THEN ? ELSE description END,
+                        mangaupdates_url = CASE WHEN ? != '' AND ? IS NOT NULL THEN ? ELSE mangaupdates_url END,
                         is_bundle = ?,
                         volume_start = ?,
                         volume_end = ?,
@@ -393,6 +401,12 @@ class MangaDatabase:
                     rel["title"],
                     rel.get("series_name"),
                     rel.get("release_group"),
+                    rel.get("description", ""),
+                    rel.get("description"),
+                    rel.get("description", ""),
+                    rel.get("mangaupdates_url", ""),
+                    rel.get("mangaupdates_url"),
+                    rel.get("mangaupdates_url", ""),
                     1 if rel.get("is_bundle") else 0,
                     rel.get("volume_start"),
                     rel.get("volume_end"),
@@ -408,15 +422,17 @@ class MangaDatabase:
             else:
                 cur.execute("""
                     INSERT INTO releases (
-                        guid, title, series_name, release_group, is_bundle, volume_start,
-                        volume_end, volumes_json, missing_vols_json, download_url,
-                        link, cover_url, source_feed_name, status, download_status, torrent_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        guid, title, series_name, release_group, description, mangaupdates_url,
+                        is_bundle, volume_start, volume_end, volumes_json, missing_vols_json,
+                        download_url, link, cover_url, source_feed_name, status, download_status, torrent_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     guid,
                     rel["title"],
                     rel.get("series_name"),
                     rel.get("release_group") or "",
+                    rel.get("description") or "",
+                    rel.get("mangaupdates_url") or "",
                     1 if rel.get("is_bundle") else 0,
                     rel.get("volume_start"),
                     rel.get("volume_end"),
@@ -492,18 +508,28 @@ class MangaDatabase:
             rows = [dict(row) for row in cur.fetchall()]
             for r in rows:
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
+                # Fallback to cache if description or mangaupdates_url wasn't directly populated on release
+                if (not r.get("description") or not r.get("mangaupdates_url")) and r.get("series_name"):
+                    cached = self.get_cached_manga_metadata(f"mu:{r['series_name'].lower()}")
+                    if cached:
+                        if not r.get("description") and cached.get("synopsis"):
+                            r["description"] = cached["synopsis"]
+                        if not r.get("mangaupdates_url") and cached.get("romaji_title"):
+                            r["mangaupdates_url"] = cached["romaji_title"]
             return rows
 
-    def update_release_details(self, release_id: int, description: Optional[str] = None, link: Optional[str] = None, cover_url: Optional[str] = None):
+    def update_release_details(self, release_id: int, description: Optional[str] = None, link: Optional[str] = None, cover_url: Optional[str] = None, mangaupdates_url: Optional[str] = None):
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
                 UPDATE releases 
                 SET link = COALESCE(?, link),
                     cover_url = COALESCE(?, cover_url),
+                    description = COALESCE(?, description),
+                    mangaupdates_url = COALESCE(?, mangaupdates_url),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?;
-            """, (link, cover_url, release_id))
+            """, (link, cover_url, description, mangaupdates_url, release_id))
             conn.commit()
 
     def track_discovered_series(self, series_name: str, release_id: Optional[int] = None) -> bool:
@@ -514,21 +540,36 @@ class MangaDatabase:
         with self.get_connection() as conn:
             cur = conn.cursor()
             default_link = f"https://www.mangaupdates.com/series.html?search={quote_plus(clean)}"
+            description = ""
 
-            # If release has a valid link, prioritize it
+            # If release has a valid link or mangaupdates_url, prioritize it
             if release_id:
-                cur.execute("SELECT link FROM releases WHERE id = ?;", (release_id,))
+                cur.execute("SELECT link, mangaupdates_url, description FROM releases WHERE id = ?;", (release_id,))
                 row = cur.fetchone()
-                if row and row["link"] and not row["link"].startswith("magnet:"):
-                    default_link = row["link"]
+                if row:
+                    if row["mangaupdates_url"]:
+                        default_link = row["mangaupdates_url"]
+                    elif row["link"] and not row["link"].startswith("magnet:"):
+                        default_link = row["link"]
+                    if row["description"]:
+                        description = row["description"]
+
+            # If description is still empty, check cache
+            if not description:
+                cached = self.get_cached_manga_metadata(f"mu:{clean.lower()}")
+                if cached and cached.get("synopsis"):
+                    description = cached["synopsis"]
+                    if not default_link or "search=" in default_link:
+                        default_link = cached.get("romaji_title") or default_link
 
             cur.execute("""
-                INSERT INTO series_tracking (name, book_count, latest_index, is_monitored, website_url, last_sync)
-                VALUES (?, 0, 0.0, 1, ?, CURRENT_TIMESTAMP)
+                INSERT INTO series_tracking (name, book_count, latest_index, is_monitored, website_url, description, last_sync)
+                VALUES (?, 0, 0.0, 1, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(name) DO UPDATE SET 
                     is_monitored = 1,
-                    website_url = CASE WHEN series_tracking.website_url = '' OR series_tracking.website_url IS NULL OR series_tracking.website_url LIKE '%search=%' THEN excluded.website_url ELSE series_tracking.website_url END;
-            """, (clean, default_link))
+                    website_url = CASE WHEN series_tracking.website_url = '' OR series_tracking.website_url IS NULL OR series_tracking.website_url LIKE '%search=%' THEN excluded.website_url ELSE series_tracking.website_url END,
+                    description = CASE WHEN series_tracking.description = '' OR series_tracking.description IS NULL THEN excluded.description ELSE series_tracking.description END;
+            """, (clean, default_link, description))
             if release_id:
                 cur.execute("UPDATE releases SET status = 'REQUESTED', updated_at = CURRENT_TIMESTAMP WHERE id = ?;", (release_id,))
             else:

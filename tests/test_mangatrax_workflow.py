@@ -490,6 +490,82 @@ def test_prioritized_release_groups():
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+def test_mangaupdates_and_rss_links():
+    print("--> Testing MangaUpdates Service & RSS Feed Link Integration...")
+    from app.metadata.mangaupdates import MangaUpdatesService, clean_description_text
+
+    # 1. BBCode, HTML, and publisher prefix cleaning
+    raw_desc = "[b]From Viz:[/b] In a world where <p>demons lurk</p>, young [url=https://example.com]Denji[/url] must survive."
+    cleaned = clean_description_text(raw_desc)
+    assert "[b]" not in cleaned
+    assert "[/b]" not in cleaned
+    assert "From Viz:" not in cleaned
+    assert "<p>" not in cleaned
+    assert "In a world where demons lurk, young Denji must survive." == cleaned
+
+    temp_dir = tempfile.mkdtemp(prefix="mangatrax_test_mu_")
+    db_file = os.path.join(temp_dir, "mangatrax_mu_test.db")
+
+    try:
+        db = MangaDatabase(db_file)
+        mu_service = MangaUpdatesService(db=db)
+
+        # 2. Cache seeding and retrieval
+        db.cache_manga_metadata("mu:dandadan", {
+            "canonical_title": "Dandadan",
+            "romaji_title": "https://www.mangaupdates.com/series/test-dandadan",
+            "synopsis": "A nerdy high school boy and an occult-obsessed girl meet bizarre spirits and extraterrestrials.",
+            "cover_url": "https://example.com/dandadan.jpg",
+            "source": "mangaupdates"
+        })
+
+        info = mu_service.get_series_info("Dandadan")
+        assert info["title"] == "Dandadan"
+        assert "extraterrestrials" in info["description"]
+        assert info["url"] == "https://www.mangaupdates.com/series/test-dandadan"
+        assert info["source"] == "cache"
+
+        # 3. Discovery release with RSS link, MangaUpdates synopsis and URL
+        rss_permalink = "https://nyaa.si/view/1234567"
+        rel = {
+            "guid": "guid-dandadan-vol1",
+            "title": "[Group] Dandadan Vol. 01 [Digital]",
+            "series_name": "Dandadan",
+            "release_group": "Group",
+            "is_bundle": False,
+            "volume_start": 1.0,
+            "volume_end": 1.0,
+            "volumes": [1.0],
+            "missing_volumes": [],
+            "download_url": "magnet:?xt=urn:btih:mock",
+            "link": rss_permalink,
+            "cover_url": info["cover_url"],
+            "description": info["description"],
+            "mangaupdates_url": info["url"],
+            "source_feed_name": "Nyaa Manga",
+            "status": "DISCOVERY"
+        }
+        db.upsert_release(rel)
+
+        discovery_items = db.get_discovery_releases()
+        assert len(discovery_items) == 1
+        d_item = discovery_items[0]
+        assert d_item["link"] == rss_permalink
+        assert d_item["mangaupdates_url"] == "https://www.mangaupdates.com/series/test-dandadan"
+        assert "extraterrestrials" in d_item["description"]
+
+        # 4. Track discovered series inherits MangaUpdates link and description
+        db.track_discovered_series("Dandadan", release_id=d_item["id"])
+        tracked_list = db.get_all_series()
+        assert len(tracked_list) == 1
+        tracked_dandadan = tracked_list[0]
+        assert tracked_dandadan["website_url"] == "https://www.mangaupdates.com/series/test-dandadan"
+        assert "extraterrestrials" in tracked_dandadan["description"]
+
+        print("    [PASSED] MangaUpdates metadata and specific RSS links verified end-to-end.")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
 if __name__ == "__main__":
     print("==================================================")
     print("Running MangaTrax Comprehensive Integration Suite")
@@ -501,6 +577,7 @@ if __name__ == "__main__":
     test_series_grouping_and_metadata()
     test_chapters_and_mixed_updates()
     test_prioritized_release_groups()
+    test_mangaupdates_and_rss_links()
     print("==================================================")
     print("ALL TESTS PASSED SUCCESSFULLY! (100% VERIFIED)")
     print("==================================================")
