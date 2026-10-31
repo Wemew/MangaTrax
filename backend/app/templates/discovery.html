@@ -85,11 +85,11 @@
                     <!-- Top series & volume badge -->
                     <div class="flex items-start justify-between gap-2 mb-2 min-w-0">
                         <div class="flex flex-col min-w-0 flex-1">
-                            <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20 truncate max-w-full" title="{{ item.series_name }}">
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20 truncate max-w-full break-words-anywhere" title="{{ item.series_name }}">
                                 {{ item.series_name or 'New Manga' }}
                             </span>
                             {% if item.romaji_name and item.romaji_name.lower() != (item.series_name or '').lower() %}
-                            <span class="text-[10px] text-slate-400 mt-0.5 italic ml-0.5 truncate max-w-full" title="Original Japanese/Romaji Title: {{ item.romaji_name }}">
+                            <span class="text-[10px] text-slate-400 mt-0.5 italic ml-0.5 truncate max-w-full break-words-anywhere" title="Original Japanese/Romaji Title: {{ item.romaji_name }}">
                                 Romaji: {{ item.romaji_name }}
                             </span>
                             {% endif %}
@@ -113,27 +113,27 @@
                         <div class="min-w-0 flex-1 flex flex-col justify-between">
                             <div class="min-w-0">
                                 {% if item.link %}
-                                <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer" class="text-xs sm:text-sm font-bold text-white hover:text-brand-400 transition-colors block group/link break-words [overflow-wrap:anywhere]" title="Open RSS Feed Post: {{ item.title }}">
-                                    <span class="line-clamp-3">{{ item.title }}</span>
+                                <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer" class="text-xs sm:text-sm font-bold text-white hover:text-brand-400 transition-colors block group/link break-words-anywhere" title="Open RSS Feed Post: {{ item.title }}">
+                                    <span class="block line-clamp-3 break-words-anywhere">{{ item.title }}</span>
                                 </a>
                                 {% else %}
-                                <h3 class="text-xs sm:text-sm font-bold text-white group-hover:text-brand-400 transition-colors block break-words [overflow-wrap:anywhere]" title="{{ item.title }}">
-                                    <span class="line-clamp-3">{{ item.title }}</span>
+                                <h3 class="text-xs sm:text-sm font-bold text-white group-hover:text-brand-400 transition-colors block break-words-anywhere" title="{{ item.title }}">
+                                    <span class="block line-clamp-3 break-words-anywhere">{{ item.title }}</span>
                                 </h3>
                                 {% endif %}
                             </div>
 
                             <div class="flex flex-wrap items-center gap-1.5 mt-2 text-[11px] shrink-0">
                                 {% if item.link %}
-                                <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-slate-400 hover:text-brand-400 transition-colors bg-slate-900/90 px-2 py-0.5 rounded-md border border-slate-800 shrink-0 max-w-full" title="Open RSS feed post">
+                                <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-slate-400 hover:text-brand-400 transition-colors bg-slate-900/90 px-2 py-0.5 rounded-md border border-slate-800 shrink-0 max-w-[150px]" title="Open RSS feed post">
                                     <i data-lucide="rss" class="w-3 h-3 text-amber-400 shrink-0"></i>
-                                    <span class="truncate max-w-[120px]">{{ item.source_feed_name or 'Feed Post' }}</span>
+                                    <span class="truncate max-w-[100px]">{{ item.source_feed_name or 'Feed Post' }}</span>
                                     <i data-lucide="external-link" class="w-2.5 h-2.5 opacity-60 shrink-0"></i>
                                 </a>
                                 {% else %}
-                                <span class="inline-flex items-center gap-1 text-slate-400 bg-slate-900/90 px-2 py-0.5 rounded-md border border-slate-800 shrink-0 max-w-full">
+                                <span class="inline-flex items-center gap-1 text-slate-400 bg-slate-900/90 px-2 py-0.5 rounded-md border border-slate-800 shrink-0 max-w-[150px]">
                                     <i data-lucide="globe" class="w-3 h-3 text-slate-500 shrink-0"></i>
-                                    <span class="truncate max-w-[120px]">{{ item.source_feed_name or 'Manga Feed' }}</span>
+                                    <span class="truncate max-w-[100px]">{{ item.source_feed_name or 'Manga Feed' }}</span>
                                 </span>
                                 {% endif %}
 
@@ -157,7 +157,7 @@
                                 <i data-lucide="refresh-cw" class="w-2.5 h-2.5"></i> Fetch
                             </button>
                         </div>
-                        <div id="desc-text-{{ item.id }}" class="line-clamp-3 hover:line-clamp-none transition-all cursor-pointer break-words [overflow-wrap:anywhere] {% if not item.description %}text-slate-500 italic{% else %}text-slate-300/90{% endif %}" title="Click to expand/collapse synopsis">
+                        <div id="desc-text-{{ item.id }}" class="line-clamp-3 hover:line-clamp-none transition-all cursor-pointer break-words-anywhere overflow-hidden {% if not item.description %}text-slate-500 italic{% else %}text-slate-300/90{% endif %}" title="Click to expand/collapse synopsis">
                             {{ item.description if item.description else "No synopsis loaded yet. Click 'Fetch' to pull from MangaUpdates." }}
                         </div>
                     </div>

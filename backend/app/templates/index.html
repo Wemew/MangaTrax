@@ -150,8 +150,8 @@
         {% if pending_requests %}
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {% for r in pending_requests[:8] %}
-            <div class="bg-darkcard border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden shadow-lg flex flex-col justify-between transition-all group">
-                <div class="flex gap-3 p-4">
+            <div class="bg-darkcard border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden shadow-lg flex flex-col justify-between transition-all group min-w-0">
+                <div class="flex gap-3 p-4 min-w-0">
                     <!-- Cover Image -->
                     <div class="w-16 h-24 shrink-0 rounded-lg overflow-hidden bg-slate-900 border border-slate-800 relative shadow">
                         {% if r.cover_url %}
@@ -179,7 +179,7 @@
                             <span class="text-[10px] text-slate-400 truncate">{{ r.source_feed_name }}</span>
                         </div>
 
-                        <h3 class="text-sm font-semibold text-white leading-snug line-clamp-2" title="{{ r.title }}">
+                        <h3 class="text-sm font-semibold text-white leading-snug line-clamp-2 break-words-anywhere" title="{{ r.title }}">
                             {{ r.title }}
                         </h3>
 

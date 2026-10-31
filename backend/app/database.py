@@ -128,6 +128,18 @@ class MangaDatabase:
                 WHERE link LIKE '%nyaa.si/download/%.torrent';
             """)
 
+            # Sanitize legacy uncleaned markdown/HTML descriptions in database
+            try:
+                cur.execute("SELECT id, description FROM releases WHERE description LIKE '%http%' OR description LIKE '%[%';")
+                dirty_rows = cur.fetchall()
+                if dirty_rows:
+                    from app.metadata.mangaupdates import clean_description_text
+                    for r_id, r_desc in dirty_rows:
+                        if r_desc:
+                            cur.execute("UPDATE releases SET description = ? WHERE id = ?;", (clean_description_text(r_desc), r_id))
+            except Exception:
+                pass
+
             # Prioritized Release Groups table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS prioritized_groups (
@@ -524,6 +536,10 @@ class MangaDatabase:
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
                 # Fallback to cache if description, mangaupdates_url, or canonical English title wasn't directly populated on release
                 s_name = r.get("series_name")
+                from app.metadata.mangaupdates import clean_description_text
+                if r.get("description"):
+                    r["description"] = clean_description_text(r["description"])
+
                 if s_name:
                     # Check AniList cache for canonical English title
                     meta_cached = self.get_cached_manga_metadata(s_name.lower())
@@ -540,15 +556,20 @@ class MangaDatabase:
                         mu_cached = self.get_cached_manga_metadata(f"mu:{s_name.lower()}")
                         if mu_cached:
                             if not r.get("description") and mu_cached.get("synopsis"):
-                                r["description"] = mu_cached["synopsis"]
+                                r["description"] = clean_description_text(mu_cached["synopsis"])
                             if mu_cached.get("romaji_title") and str(mu_cached["romaji_title"]).startswith("http"):
                                 r["mangaupdates_url"] = mu_cached["romaji_title"]
-                    if not r.get("mangaupdates_url") or not str(r.get("mangaupdates_url", "")).startswith("http"):
-                        from urllib.parse import quote_plus
-                        r["mangaupdates_url"] = f"https://www.mangaupdates.com/series.html?search={quote_plus(s_name)}"
+
+                if not r.get("mangaupdates_url") or not str(r.get("mangaupdates_url", "")).startswith("http"):
+                    from urllib.parse import quote_plus
+                    target_query = s_name or r.get("title") or "manga"
+                    r["mangaupdates_url"] = f"https://www.mangaupdates.com/series.html?search={quote_plus(target_query)}"
             return rows
 
     def update_release_details(self, release_id: int, description: Optional[str] = None, link: Optional[str] = None, cover_url: Optional[str] = None, mangaupdates_url: Optional[str] = None):
+        if description:
+            from app.metadata.mangaupdates import clean_description_text
+            description = clean_description_text(description)
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""

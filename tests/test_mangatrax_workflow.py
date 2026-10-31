@@ -508,6 +508,22 @@ def test_mangaupdates_and_rss_links():
     assert cleaned_md == "Original Webtoon: Kakao Webtoon R19"
     assert "https://" not in cleaned_md
 
+    # Multiline markdown link with newline between ] and ( (exact user issue from screenshot)
+    raw_multiline = """**Original Webtoon:**
+[Kakao Webtoon R19]
+(https://webtoon.kakao.com/content/%EC%9B%94%EC%95%BC%ED%99%98%EB%8B%B4-19%EC%84%B8-%EC%99%84%EC%A0%84%ED%8C%90/4764)
+[Kakao Page R19](https://page.kakao.com/content/68152126)"""
+    cleaned_multiline = clean_description_text(raw_multiline)
+    assert "https://" not in cleaned_multiline
+    assert "%EC%9B%94" not in cleaned_multiline
+    assert "Original Webtoon: Kakao Webtoon R19 Kakao Page R19" in cleaned_multiline
+
+    # HTML entity unescaping
+    raw_entities = "Kimito Kagurazaka is a commoner with a fetish for men&#039;s muscles or at least that&#039;s the lie..."
+    cleaned_entities = clean_description_text(raw_entities)
+    assert "men's muscles" in cleaned_entities
+    assert "&#039;" not in cleaned_entities
+
     temp_dir = tempfile.mkdtemp(prefix="mangatrax_test_mu_")
     db_file = os.path.join(temp_dir, "mangatrax_mu_test.db")
 

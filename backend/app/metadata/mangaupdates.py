@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import html
 import urllib.request
 import urllib.error
 from typing import Dict, Any, Optional
@@ -13,17 +14,25 @@ def clean_description_text(raw_desc: str) -> str:
     """Cleans up MangaUpdates description text, stripping BBCode, HTML, Markdown links, and raw URLs."""
     if not raw_desc:
         return ""
+    # Unescape HTML entities e.g. &quot;, &#039;, &amp;, &lt;, &gt;
+    clean = html.unescape(raw_desc)
     # Strip HTML tags
-    clean = re.sub(r"<[^>]+>", " ", raw_desc)
-    # Strip BBCode tags e.g. [b], [/b], [i], [url=...], [/url]
+    clean = re.sub(r"<[^>]+>", " ", clean)
+    # BBCode: convert [url=LINK]LABEL[/url] to LABEL
+    clean = re.sub(r"\[url=[^\]]*\](.*?)\[/url\]", r"\1", clean, flags=re.IGNORECASE)
+    # Strip remaining BBCode tags e.g. [b], [/b], [i], [url], [/url], [spoiler]
     clean = re.sub(r"\[/?(?:b|i|u|s|url|quote|code|img|spoiler)[^\]]*\]", "", clean, flags=re.IGNORECASE)
-    # Convert markdown links [Label](https://...) -> Label
-    clean = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", clean)
+    # Convert markdown links [Label](url) or [Label]\s*(url) -> Label (handles newlines between ] and ()
+    clean = re.sub(r"\[([^\]]+)\]\s*\((?:[^)]+)\)", r"\1", clean)
     # Strip raw URLs (http:// or https://...) to prevent unbroken links breaking layouts
-    clean = re.sub(r"https?://\S+", "", clean)
-    # Strip markdown bold/italic asterisks
-    clean = re.sub(r"\*\*([^*]+)\*\*", r"\1", clean)
-    clean = re.sub(r"\*([^*]+)\*", r"\1", clean)
+    clean = re.sub(r"https?://[^\s)\]]+", "", clean)
+    # Clean up empty parens or brackets left behind after stripping URLs
+    clean = re.sub(r"\(\s*\)", "", clean)
+    clean = re.sub(r"\[\s*\]", "", clean)
+    # Strip markdown bold/italic/strikethrough markers
+    clean = re.sub(r"\*{1,3}([^*]+)\*{1,3}", r"\1", clean)
+    clean = re.sub(r"_{1,3}([^_]+)_{1,3}", r"\1", clean)
+    clean = re.sub(r"~~([^~]+)~~", r"\1", clean)
     # Strip common publisher prefix lines e.g. "From Viz:", "From Yen Press:", "From Kodansha:"
     clean = re.sub(r"^\s*(?:From\s+[A-Za-z0-9\s\-]+:)\s*", "", clean, flags=re.IGNORECASE)
     # Clean up excessive whitespace
