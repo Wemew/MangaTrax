@@ -1,3 +1,5 @@
+import json
+import re
 from typing import List, Dict, Any, Optional, Set
 from app.parser import normalize_text, clean_manga_title, match_manga_series_in_calibre
 
@@ -41,6 +43,50 @@ class MangaCalibreMatcher:
 
         return None
 
+    def get_owned_volumes(self, matched_series: Dict[str, Any], alt_names: Optional[List[str]] = None) -> Set[float]:
+        """Retrieves all owned volume numbers for a matched Calibre series across all indexing keys."""
+        owned: Set[float] = set()
+        keys_to_try = []
+
+        # 1. By Calibre series ID
+        s_id = matched_series.get("series_id") or matched_series.get("id") or matched_series.get("calibre_series_id")
+        if s_id is not None:
+            keys_to_try.extend([str(s_id), s_id])
+
+        # 2. By series names
+        s_name = matched_series.get("series_name") or matched_series.get("name") or ""
+        if s_name:
+            keys_to_try.extend([s_name.lower(), normalize_text(s_name)])
+            parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", s_name) if p.strip()]
+            if len(parts) > 1:
+                for p in parts:
+                    keys_to_try.extend([p.lower(), normalize_text(p)])
+
+        # 3. By alt names
+        if alt_names:
+            for alt in alt_names:
+                if alt:
+                    keys_to_try.extend([alt.lower(), normalize_text(alt)])
+                    alt_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", alt) if p.strip()]
+                    if len(alt_parts) > 1:
+                        for ap in alt_parts:
+                            keys_to_try.extend([ap.lower(), normalize_text(ap)])
+
+        for k in keys_to_try:
+            v_set = self.volumes_map.get(k)
+            if v_set:
+                owned.update(v_set)
+
+        # 4. If matched_series already carries owned_volumes_json from database
+        if not owned and matched_series.get("owned_volumes_json"):
+            try:
+                ov = json.loads(matched_series["owned_volumes_json"])
+                owned.update([float(v) for v in ov])
+            except Exception:
+                pass
+
+        return owned
+
     def check_release(self, release: Dict[str, Any], auto_request_monitored: bool = True, alt_series_names: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Evaluates a single manga volume or multi-volume bundle against Calibre.
@@ -57,8 +103,7 @@ class MangaCalibreMatcher:
         if matched_series:
             matched_name = matched_series.get("series_name") or matched_series.get("name", "")
             matched_series["series_name"] = matched_name
-            norm_name = matched_name.lower()
-            owned = self.volumes_map.get(norm_name, set())
+            owned = self.get_owned_volumes(matched_series, alt_names=alt_series_names)
 
             if volumes:
                 missing = [v for v in volumes if round(float(v), 2) not in owned]

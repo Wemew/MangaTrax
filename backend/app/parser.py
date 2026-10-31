@@ -526,13 +526,21 @@ def parse_calibre_volumes_and_series(
     if not title:
         return detected_series, vols
 
-    # 2. Check full title using general bundle extractor
+    # 2. Check full title using general bundle/volume extractor (bundles or single volumes)
     bundle_info = extract_manga_bundle_and_volumes(title)
-    if bundle_info.get("is_bundle") and bundle_info.get("volumes"):
+    if bundle_info.get("volumes"):
         for v in bundle_info["volumes"]:
             vols.add(round(float(v), 2))
-        if not detected_series and bundle_info.get("series_name"):
-            detected_series = bundle_info["series_name"]
+        # If series_index was default 1.0 but title explicitly specified another volume number, discard default 1.0
+        if series_index == 1.0 and 1.0 not in bundle_info["volumes"]:
+            vols.discard(1.0)
+    elif bundle_info.get("volume_start") is not None:
+        vs = round(float(bundle_info["volume_start"]), 2)
+        vols.add(vs)
+        if series_index == 1.0 and vs != 1.0:
+            vols.discard(1.0)
+    if not detected_series and bundle_info.get("series_name"):
+        detected_series = bundle_info["series_name"]
 
     # 3. Test combinations / substrings if title is just volume or has custom notations
     candidates = [title]
@@ -578,6 +586,23 @@ def parse_calibre_volumes_and_series(
             for n in raw_nums:
                 vols.add(float(int(n)))
             break
+
+        # Single volume pattern: Vol. 23, v05, Volume 12, Book 3
+        m_single = re.search(
+            r"(?i)\b(?:volumes?|volume|vols?|vol|books?|book|bk|v)\b\.?\s*(\d+(?:\.\d+)?)\b",
+            c
+        )
+        if m_single:
+            try:
+                s_num = float(m_single.group(1))
+                if 0 < s_num <= 2000:
+                    vols.add(s_num)
+                    # If series_index had Calibre's default 1.0 but title explicitly states e.g. Vol 23, drop default 1.0
+                    if series_index == 1.0 and s_num != 1.0 and "1" not in re.findall(r"\d+", m_single.group(0)):
+                        vols.discard(1.0)
+                    break
+            except ValueError:
+                pass
 
     # If still no series detected and title has volume info, extract base series
     if not detected_series:

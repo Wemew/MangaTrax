@@ -312,6 +312,104 @@ def test_fast_init_db_and_background_scheduler_expansion():
         pass
     print(" [PASSED] Instant init_db and background scheduler expansion verified.")
 
+def test_reconciliation_23_of_24_volumes():
+    import sqlite3
+    from app.calibre.scanner import CalibreMangaScanner
+
+    calibre_tmp = tempfile.mkdtemp()
+    calibre_db_path = os.path.join(calibre_tmp, "metadata.db")
+
+    conn = sqlite3.connect(calibre_db_path)
+    cur = conn.cursor()
+    cur.executescript("""
+        CREATE TABLE books (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            series_index REAL DEFAULT 1.0
+        );
+        CREATE TABLE series (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL
+        );
+        CREATE TABLE books_series_link (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book INTEGER NOT NULL,
+            series INTEGER NOT NULL
+        );
+    """)
+
+    cur.execute("INSERT INTO series (id, name) VALUES (1, 'The Devil is a Part-Timer!');")
+    # Insert 23 volumes into Calibre (volumes 1 to 23)
+    for v in range(1, 24):
+        cur.execute("INSERT INTO books (id, title, series_index) VALUES (?, ?, ?);",
+                    (v, f"The Devil is a Part-Timer!, Vol. {v}", float(v)))
+        cur.execute("INSERT INTO books_series_link (book, series) VALUES (?, 1);", (v,))
+    conn.commit()
+    conn.close()
+
+    scanner = CalibreMangaScanner(calibre_tmp)
+    volumes_map = scanner.get_all_volumes_per_series()
+
+    # Verify volumes_map contains all 23 volumes under multiple lookup keys
+    assert "the devil is a part-timer!" in volumes_map
+    assert len(volumes_map["the devil is a part-timer!"]) == 23
+    assert 24.0 not in volumes_map["the devil is a part-timer!"]
+
+    # Initialize MangaTrax DB
+    tf = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    tf.close()
+    db = MangaDatabase(tf.name)
+    db.init_db()
+
+    # Sync Calibre library series and volumes_map to database
+    series_list = scanner.get_all_series()
+    db.sync_calibre_series(series_list, volumes_map=volumes_map)
+
+    # Insert 24-volume complete release (simulate previously saved release with empty or un-reconciled missing_volumes)
+    db.upsert_release({
+        "guid": "devil_part_timer_complete_24",
+        "title": "Hataraku Maou-sama! | The Devil is a Part-Timer! (2015-2026) (Digital) (1r0n, Ushi) (complete)",
+        "series_name": "Hataraku Maou sama! | The Devil is a Part Timer!",
+        "status": "REQUESTED",
+        "release_group": "1r0n, Ushi",
+        "is_complete": 1,
+        "volume_start": 1.0,
+        "volume_end": 24.0,
+        "volumes": [float(v) for v in range(1, 25)],
+        "missing_volumes": [float(v) for v in range(1, 25)]  # Initially all 24 were set missing
+    })
+
+    # Query grouped releases (web UI call)
+    groups = db.get_releases_grouped_by_series()
+    assert len(groups) == 1
+    g = groups[0]
+
+    # Verify all 24 volumes are in all_volumes, but ONLY Volume 24 is in missing_volumes
+    assert len(g["all_volumes"]) == 24
+    assert g["all_volumes"][0] == 1.0
+    assert g["all_volumes"][-1] == 24.0
+    assert g["missing_volumes"] == [24.0], f"Expected missing_volumes == [24.0], got {g['missing_volumes']}"
+
+    rel = g["releases"][0]
+    assert rel["missing_volumes"] == [24.0]
+    assert rel["status"] == "REQUESTED"
+
+    # Verify that Volumes 1 through 23 are recognized as owned
+    owned_in_group = [v for v in g["all_volumes"] if v not in g["missing_volumes"]]
+    assert len(owned_in_group) == 23
+    assert 24.0 not in owned_in_group
+
+    del db
+    gc.collect()
+    try:
+        os.unlink(tf.name)
+        for f in os.listdir(calibre_tmp):
+            os.unlink(os.path.join(calibre_tmp, f))
+        os.rmdir(calibre_tmp)
+    except Exception:
+        pass
+    print(" [PASSED] Reconciliation of 23 of 24 volumes against Calibre library verified.")
+
 if __name__ == "__main__":
     print("\n==================================================")
     print("Running MangaTrax Complete Series & Dual Title Suite")
@@ -324,6 +422,7 @@ if __name__ == "__main__":
     test_dual_titles_detection_during_backfill()
     test_dynamic_expansion_of_unexpanded_releases()
     test_fast_init_db_and_background_scheduler_expansion()
+    test_reconciliation_23_of_24_volumes()
     print("==================================================")
     print("ALL COMPLETE SERIES AND DUAL TITLE TESTS PASSED!")
     print("==================================================\n")

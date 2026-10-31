@@ -75,15 +75,18 @@ class MangaDatabase:
                     latest_index REAL DEFAULT 0.0,
                     is_monitored INTEGER DEFAULT 1,
                     website_url TEXT DEFAULT '',
+                    owned_volumes_json TEXT DEFAULT '[]',
                     last_sync TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
 
-            # Add description column if missing on upgrade
+            # Add description and owned_volumes_json columns if missing on upgrade
             cur.execute("PRAGMA table_info(series_tracking);")
             cols = [r["name"] for r in cur.fetchall()]
             if "description" not in cols:
                 cur.execute("ALTER TABLE series_tracking ADD COLUMN description TEXT DEFAULT '';")
+            if "owned_volumes_json" not in cols:
+                cur.execute("ALTER TABLE series_tracking ADD COLUMN owned_volumes_json TEXT DEFAULT '[]';")
 
             # Blacklisted manga series
             cur.execute("""
@@ -340,9 +343,10 @@ class MangaDatabase:
             return {row["key"]: row["value"] for row in cur.fetchall()}
 
     # --- Series Tracking ---
-    def sync_calibre_series(self, calibre_series_list: List[Dict[str, Any]]) -> int:
+    def sync_calibre_series(self, calibre_series_list: List[Dict[str, Any]], volumes_map: Optional[Dict[str, Set[float]]] = None) -> int:
         updated_count = 0
         from urllib.parse import quote_plus
+        from app.parser import normalize_text
         with self.get_connection() as conn:
             cur = conn.cursor()
             for s in calibre_series_list:
@@ -355,11 +359,25 @@ class MangaDatabase:
                 tags = s.get("tags", "")
                 default_web_url = f"https://www.mangaupdates.com/series.html?search={quote_plus(name)}"
 
+                owned_vols_set: Set[float] = set()
+                if volumes_map:
+                    for k in (str(ser_id), ser_id, name.lower(), normalize_text(name)):
+                        if k in volumes_map:
+                            owned_vols_set.update(volumes_map[k])
+                    parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", name) if p.strip()]
+                    if len(parts) > 1:
+                        for p in parts:
+                            for pk in (p.lower(), normalize_text(p)):
+                                if pk in volumes_map:
+                                    owned_vols_set.update(volumes_map[pk])
+
+                owned_json = json.dumps(sorted(list(owned_vols_set)))
+
                 cur.execute("""
                     INSERT INTO series_tracking (
                         calibre_series_id, name, authors, publisher, tags,
-                        book_count, latest_index, is_monitored, website_url, last_sync
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP)
+                        book_count, latest_index, is_monitored, website_url, owned_volumes_json, last_sync
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP)
                     ON CONFLICT(name) DO UPDATE SET
                         calibre_series_id = excluded.calibre_series_id,
                         authors = CASE WHEN excluded.authors != '' THEN excluded.authors ELSE series_tracking.authors END,
@@ -368,8 +386,9 @@ class MangaDatabase:
                         book_count = excluded.book_count,
                         latest_index = excluded.latest_index,
                         website_url = CASE WHEN series_tracking.website_url = '' OR series_tracking.website_url IS NULL THEN excluded.website_url ELSE series_tracking.website_url END,
+                        owned_volumes_json = CASE WHEN excluded.owned_volumes_json != '[]' THEN excluded.owned_volumes_json ELSE series_tracking.owned_volumes_json END,
                         last_sync = CURRENT_TIMESTAMP;
-                """, (ser_id, name, authors, publisher, tags, count, latest, default_web_url))
+                """, (ser_id, name, authors, publisher, tags, count, latest, default_web_url, owned_json))
                 updated_count += 1
             conn.commit()
         if updated_count > 0:
@@ -592,6 +611,30 @@ class MangaDatabase:
             cur.execute("UPDATE releases SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;", (status, release_id))
             conn.commit()
             self._invalidate_grouped_cache()
+
+    def update_release_volumes_and_status(
+        self,
+        release_id: int,
+        volumes: List[float],
+        missing_volumes: List[float],
+        status: Optional[str] = None
+    ):
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            if status:
+                cur.execute("""
+                    UPDATE releases
+                    SET volumes_json = ?, missing_vols_json = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?;
+                """, (json.dumps(volumes), json.dumps(missing_volumes), status, release_id))
+            else:
+                cur.execute("""
+                    UPDATE releases
+                    SET volumes_json = ?, missing_vols_json = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?;
+                """, (json.dumps(volumes), json.dumps(missing_volumes), release_id))
+            conn.commit()
+        self._invalidate_grouped_cache()
 
     def update_download_status(self, release_id: int, download_status: str, torrent_hash: Optional[str] = None):
         clean_hash = str(torrent_hash).strip() if (isinstance(torrent_hash, str) and torrent_hash.strip()) else None
@@ -1296,15 +1339,41 @@ class MangaDatabase:
                             rel["volume_end"] = float(v_count)
                             rel["volumes"] = [float(v) for v in range(1, v_count + 1)]
                             rel["is_bundle"] = True
-                            if not rel["missing_volumes"] and rel["status"] in ("REQUESTED", "DISCOVERY"):
-                                rel["missing_volumes"] = list(rel["volumes"])
+
+                            owned_vols_raw = calibre_match.get("owned_volumes_json") if calibre_match else None
+                            owned_vols = set(json.loads(owned_vols_raw)) if owned_vols_raw else set()
+                            if owned_vols:
+                                rel["missing_volumes"] = [v for v in rel["volumes"] if round(float(v), 2) not in owned_vols]
+                            else:
+                                if not rel["missing_volumes"] and rel["status"] in ("REQUESTED", "DISCOVERY"):
+                                    rel["missing_volumes"] = list(rel["volumes"])
+
+                            new_st = "IN_CALIBRE" if not rel["missing_volumes"] else ("REQUESTED" if calibre_match else rel["status"])
+                            rel["status"] = new_st
+
                             try:
                                 cur.execute("""
                                     UPDATE releases 
                                     SET is_bundle = 1, is_complete = 1, volume_start = 1.0, volume_end = ?, 
-                                        volumes_json = ?, missing_vols_json = ? 
+                                        volumes_json = ?, missing_vols_json = ?, status = ? 
                                     WHERE id = ?;
-                                """, (float(v_count), json.dumps(rel["volumes"]), json.dumps(rel["missing_volumes"]), rel["id"]))
+                                """, (float(v_count), json.dumps(rel["volumes"]), json.dumps(rel["missing_volumes"]), rel["status"], rel["id"]))
+                                conn.commit()
+                            except Exception:
+                                pass
+
+                # Reconcile rel["missing_volumes"] and status against Calibre owned volumes
+                if calibre_match and rel.get("volumes"):
+                    owned_vols_raw = calibre_match.get("owned_volumes_json")
+                    owned_vols = set(json.loads(owned_vols_raw)) if owned_vols_raw else set()
+                    if owned_vols:
+                        actual_missing = [v for v in rel["volumes"] if round(float(v), 2) not in owned_vols]
+                        if actual_missing != rel["missing_volumes"]:
+                            rel["missing_volumes"] = actual_missing
+                            new_rel_st = "IN_CALIBRE" if not actual_missing else ("REQUESTED" if calibre_match.get("is_monitored", 1) else "NEW")
+                            rel["status"] = new_rel_st
+                            try:
+                                cur.execute("UPDATE releases SET missing_vols_json = ?, status = ? WHERE id = ?;", (json.dumps(actual_missing), new_rel_st, rel["id"]))
                                 conn.commit()
                             except Exception:
                                 pass

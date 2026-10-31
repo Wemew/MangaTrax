@@ -64,10 +64,10 @@ class MangaScheduler:
 
         try:
             series_list = scanner.get_all_series()
-            synced_count = self.db.sync_calibre_series(series_list)
+            volumes_map = scanner.get_all_volumes_per_series()
+            synced_count = self.db.sync_calibre_series(series_list, volumes_map=volumes_map)
 
             # Build matcher
-            volumes_map = scanner.get_all_volumes_per_series()
             meta_cache = self.db.get_all_manga_metadata_cache()
             matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
 
@@ -89,6 +89,23 @@ class MangaScheduler:
                         notifier.notify_acquired(rel_row)
                 except Exception as e:
                     logger.debug(f"Webhook notification failed for acquired release: {e}")
+
+            # Reconcile all active releases against Calibre matcher to update missing_volumes and statuses
+            all_active = self.db.get_releases(limit=5000)
+            for r in all_active:
+                if r.get("status") in ("REQUESTED", "DISCOVERY", "IN_CALIBRE", "NEW"):
+                    res = matcher.check_release(r, auto_request_monitored=True)
+                    new_missing = res.get("missing_volumes", [])
+                    new_status = res.get("status")
+                    old_missing = r.get("missing_volumes", [])
+                    old_status = r.get("status")
+                    if new_missing != old_missing or new_status != old_status:
+                        self.db.update_release_volumes_and_status(
+                            r["id"],
+                            r.get("volumes", []),
+                            new_missing,
+                            new_status
+                        )
 
             # Auto-expand any unexpanded complete releases against freshly synced Calibre library
             try:
@@ -872,13 +889,20 @@ class MangaScheduler:
         unexpanded = []
         for r in rows:
             v_raw = r.get("volumes_json")
+            m_raw = r.get("missing_vols_json")
             v_list = []
+            m_list = []
             if v_raw:
                 try:
                     v_list = json.loads(v_raw)
                 except Exception:
                     v_list = []
-            if not v_list:
+            if m_raw:
+                try:
+                    m_list = json.loads(m_raw)
+                except Exception:
+                    m_list = []
+            if not v_list or (v_list and len(m_list) == len(v_list)):
                 unexpanded.append(r)
 
         if not unexpanded:
@@ -911,25 +935,37 @@ class MangaScheduler:
 
             tot = None
             resolved_meta = None
-            for cand in candidates:
-                try:
-                    m = self.anilist.resolve_manga_series(cand)
-                    if m and m.get("total_volumes"):
-                        tot = int(m["total_volumes"])
-                        resolved_meta = m
-                        break
-                except Exception:
-                    pass
 
-            if not tot and s_name:
+            # If volumes were already resolved, we only need to reconcile against Calibre
+            v_existing = []
+            if r.get("volumes_json"):
                 try:
-                    for cand in candidates:
-                        mu = self.mangaupdates.get_series_info(cand)
-                        if mu and mu.get("total_volumes"):
-                            tot = int(mu["total_volumes"])
-                            break
+                    v_existing = json.loads(r["volumes_json"])
                 except Exception:
-                    pass
+                    v_existing = []
+            if v_existing:
+                tot = len(v_existing)
+
+            if not tot:
+                for cand in candidates:
+                    try:
+                        m = self.anilist.resolve_manga_series(cand)
+                        if m and m.get("total_volumes"):
+                            tot = int(m["total_volumes"])
+                            resolved_meta = m
+                            break
+                    except Exception:
+                        pass
+
+                if not tot and s_name:
+                    try:
+                        for cand in candidates:
+                            mu = self.mangaupdates.get_series_info(cand)
+                            if mu and mu.get("total_volumes"):
+                                tot = int(mu["total_volumes"])
+                                break
+                    except Exception:
+                        pass
 
             if tot and tot > 0:
                 vols = [float(v) for v in range(1, tot + 1)]

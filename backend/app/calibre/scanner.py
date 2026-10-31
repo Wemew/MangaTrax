@@ -189,7 +189,7 @@ class CalibreMangaScanner:
             return {}
 
         query = """
-            SELECT s.name AS ser_name, b.title, b.series_index
+            SELECT s.id AS series_id, s.name AS ser_name, b.title, b.series_index
             FROM books b
             LEFT JOIN books_series_link bsl ON b.id = bsl.book
             LEFT JOIN series s ON bsl.series = s.id;
@@ -200,7 +200,10 @@ class CalibreMangaScanner:
             cur = conn.cursor()
             cur.execute(query)
             res: Dict[str, Set[float]] = {}
+            from app.parser import normalize_text
+            import re
             for row in cur.fetchall():
+                s_id = row["series_id"]
                 s_name = row["ser_name"] or ""
                 b_title = row["title"] or ""
                 idx = float(row["series_index"]) if row["series_index"] is not None else None
@@ -208,8 +211,21 @@ class CalibreMangaScanner:
                 extracted_series, vols = parse_calibre_volumes_and_series(b_title, s_name, idx)
                 target_series = s_name.strip() or (extracted_series or "").strip()
                 if target_series and vols:
-                    norm_key = target_series.lower()
-                    res.setdefault(norm_key, set()).update(vols)
+                    t_lower = target_series.lower()
+                    t_norm = normalize_text(target_series)
+                    res.setdefault(t_lower, set()).update(vols)
+                    if t_norm:
+                        res.setdefault(t_norm, set()).update(vols)
+                    if s_id is not None:
+                        res.setdefault(str(s_id), set()).update(vols)
+                        res.setdefault(s_id, set()).update(vols)
+                    parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", target_series) if p.strip()]
+                    if len(parts) > 1:
+                        for p in parts:
+                            res.setdefault(p.lower(), set()).update(vols)
+                            p_norm = normalize_text(p)
+                            if p_norm:
+                                res.setdefault(p_norm, set()).update(vols)
             return res
         except Exception as e:
             logger.error(f"Error reading volumes map: {e}")
