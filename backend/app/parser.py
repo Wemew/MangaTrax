@@ -472,35 +472,61 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
     return result
 
 def match_manga_series_in_calibre(extracted_series: str, calibre_series_list: list, threshold: float = 0.80) -> Optional[dict]:
-    """Matches an extracted series title against known Calibre series tracking."""
+    """
+    Matches an extracted series title against known Calibre series tracking.
+    Correctly prioritizes exact matches across candidate parts (handling dual titles
+    like 'Hataraku Maou-sama! | The Devil is a Part-Timer!') before fuzzy or substring match.
+    """
     if not extracted_series or not calibre_series_list:
         return None
 
     norm_extracted = normalize_text(extracted_series)
+    if not norm_extracted:
+        return None
 
-    # 1. Exact match
-    for c_ser in calibre_series_list:
-        s_name = c_ser.get("series_name") or c_ser.get("name", "")
-        if normalize_text(s_name) == norm_extracted:
-            return c_ser
+    # Extract candidate parts from delimiters (|, /, //, -, ;)
+    candidate_parts = [extracted_series]
+    parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", extracted_series) if p.strip()]
+    if len(parts) > 1:
+        for p in parts:
+            if p not in candidate_parts:
+                candidate_parts.append(p)
 
-    # 2. Substring containment match
-    for c_ser in calibre_series_list:
-        s_name = c_ser.get("series_name") or c_ser.get("name", "")
-        norm_c = normalize_text(s_name)
-        if len(norm_c) >= 4 and len(norm_extracted) >= 4:
-            if norm_c in norm_extracted or norm_extracted in norm_c:
+    # 1. Exact match across all candidate parts
+    for cand in candidate_parts:
+        norm_cand = normalize_text(cand)
+        if not norm_cand:
+            continue
+        for c_ser in calibre_series_list:
+            s_name = c_ser.get("series_name") or c_ser.get("name", "")
+            if normalize_text(s_name) == norm_cand:
+                return c_ser
+
+    # 2. Strict Substring containment match
+    # Requires high coverage (len_ratio >= 0.70 and len >= 6) to avoid random short words false-matching
+    for cand in candidate_parts:
+        norm_cand = normalize_text(cand)
+        if not norm_cand or len(norm_cand) < 6:
+            continue
+        for c_ser in calibre_series_list:
+            s_name = c_ser.get("series_name") or c_ser.get("name", "")
+            norm_c = normalize_text(s_name)
+            if not norm_c or len(norm_c) < 6:
+                continue
+            len_ratio = min(len(norm_c), len(norm_cand)) / max(len(norm_c), len(norm_cand))
+            if len_ratio >= 0.70 and (norm_c in norm_cand or norm_cand in norm_c):
                 return c_ser
 
     # 3. Fuzzy similarity
     best_match = None
     best_score = threshold
-    for c_ser in calibre_series_list:
-        s_name = c_ser.get("series_name") or c_ser.get("name", "")
-        score = string_similarity(extracted_series, s_name)
-        if score > best_score:
-            best_score = score
-            best_match = c_ser
+    for cand in candidate_parts:
+        for c_ser in calibre_series_list:
+            s_name = c_ser.get("series_name") or c_ser.get("name", "")
+            score = string_similarity(cand, s_name)
+            if score > best_score:
+                best_score = score
+                best_match = c_ser
 
     return best_match
 

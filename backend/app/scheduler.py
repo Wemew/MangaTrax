@@ -382,10 +382,12 @@ class MangaScheduler:
         meta = None
         if rel.series_name:
             meta = self.anilist.resolve_manga_series(rel.series_name)
-            english_title = (meta.get("canonical_title") or meta.get("english_title") or "").strip()
+            english_title = ""
+            if meta and meta.get("source") not in ("fallback", "cleaned"):
+                english_title = (meta.get("canonical_title") or meta.get("english_title") or "").strip()
             if english_title:
                 canonical_series = english_title
-            if not cover_url and meta.get("cover_url"):
+            if not cover_url and meta and meta.get("cover_url"):
                 cover_url = meta["cover_url"]
 
             romaji = (meta.get("romaji_title") or "").strip()
@@ -1002,6 +1004,9 @@ class MangaScheduler:
                 except Exception as e:
                     logger.error(f"Error updating expanded complete release {rel_id}: {e}")
 
+        if expanded_count > 0:
+            self.db._invalidate_grouped_cache()
+
         return expanded_count
 
     # --- Background Loop ---
@@ -1017,6 +1022,7 @@ class MangaScheduler:
         last_feed_check = 0
         last_tag_check = 0
         last_dl_check = 0
+        last_complete_check = time.time()
 
         while self.running:
             now = time.time()
@@ -1035,6 +1041,11 @@ class MangaScheduler:
                 if now - last_feed_check >= feed_int:
                     self.check_all_feeds()
                     last_feed_check = time.time()
+
+                # Check complete series volume expansion every 5 minutes
+                if now - last_complete_check >= 300:
+                    self.expand_unresolved_complete_releases()
+                    last_complete_check = time.time()
 
                 # Auto-tag staging every 5 minutes if enabled
                 if auto_tag_enabled and (now - last_tag_check >= 300):

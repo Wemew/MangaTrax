@@ -1,6 +1,9 @@
 import json
 import logging
 import re
+import time
+import threading
+import collections
 import urllib.request
 import urllib.error
 from typing import Dict, Any, Optional
@@ -8,6 +11,78 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger("mangatrax.metadata.anilist")
 
 ANILIST_GRAPHQL_ENDPOINT = "https://graphql.anilist.co"
+
+class AniListRateLimiter:
+    """
+    Thread-safe sliding-window rate limiter for AniList GraphQL API.
+    Enforces the official rate limit of 90 requests per 60-second window,
+    and dynamically respects X-RateLimit-Remaining and Retry-After HTTP headers.
+    """
+    def __init__(self, max_requests: int = 90, time_window: float = 60.0):
+        self.max_requests = max_requests
+        self.time_window = time_window
+        self.lock = threading.Lock()
+        self.timestamps = collections.deque()
+        self.retry_until: float = 0.0
+
+    def wait_if_needed(self):
+        with self.lock:
+            now = time.time()
+            # If under an explicit 429 Retry-After penalty, pause until it expires
+            if self.retry_until > now:
+                wait_time = self.retry_until - now
+                logger.warning(f"AniList rate limit cooldown active. Pausing for {wait_time:.1f}s...")
+                time.sleep(wait_time)
+                now = time.time()
+
+            # Evict timestamps older than the sliding window
+            while self.timestamps and (now - self.timestamps[0]) >= self.time_window:
+                self.timestamps.popleft()
+
+            # If at capacity, wait until the oldest request timestamp rolls out of the window
+            if len(self.timestamps) >= self.max_requests:
+                wait_time = self.time_window - (now - self.timestamps[0]) + 0.05
+                if wait_time > 0:
+                    logger.info(f"AniList sliding-window rate limit reached ({len(self.timestamps)}/{self.max_requests} req). Pausing for {wait_time:.2f}s...")
+                    time.sleep(wait_time)
+                    now = time.time()
+                    while self.timestamps and (now - self.timestamps[0]) >= self.time_window:
+                        self.timestamps.popleft()
+
+            self.timestamps.append(time.time())
+
+    def handle_response_headers(self, headers):
+        """Inspects AniList response headers to track remaining quota."""
+        if not headers:
+            return
+        try:
+            remaining = None
+            if hasattr(headers, "get"):
+                remaining = headers.get("X-RateLimit-Remaining") or headers.get("x-ratelimit-remaining")
+            if remaining is not None:
+                rem_val = int(remaining)
+                if rem_val <= 2:
+                    logger.warning(f"AniList quota nearly exhausted ({rem_val} requests remaining). Pacing requests...")
+                    with self.lock:
+                        time.sleep(1.0)
+        except Exception:
+            pass
+
+    def handle_rate_limit_error(self, headers=None):
+        """Handles HTTP 429 Too Many Requests by setting retry_until cooldown."""
+        wait_secs = 60.0
+        if headers and hasattr(headers, "get"):
+            retry_after = headers.get("Retry-After") or headers.get("retry-after")
+            if retry_after:
+                try:
+                    wait_secs = max(1.0, float(retry_after))
+                except ValueError:
+                    wait_secs = 60.0
+        logger.warning(f"AniList 429 Too Many Requests received. Setting rate-limit cooldown for {wait_secs}s.")
+        with self.lock:
+            self.retry_until = max(self.retry_until, time.time() + wait_secs)
+
+_RATE_LIMITER = AniListRateLimiter(max_requests=90, time_window=60.0)
 
 ANILIST_QUERY = """
 query ($search: String) {
@@ -120,15 +195,15 @@ class AniListMetadataService:
                 metadata = self._fetch_from_anilist(simplified)
 
         if not metadata:
-            # Fallback to cleaned term
+            # Fallback preserving raw_series_name and its delimiters
             metadata = {
-                "canonical_title": cleaned_term,
+                "canonical_title": raw_series_name,
                 "romaji_title": "",
                 "cover_url": "",
                 "total_volumes": None,
                 "status": "UNKNOWN",
                 "synopsis": "",
-                "source": "cleaned"
+                "source": "fallback"
             }
 
         # 4. Save to DB cache if authoritative metadata
@@ -156,8 +231,11 @@ class AniListMetadataService:
         if not raw_series_name:
             return ""
         info = self.resolve_manga_series(raw_series_name)
-        canonical = info.get("canonical_title")
-        return canonical if canonical else raw_series_name
+        if info and info.get("source") not in ("fallback", "cleaned"):
+            canonical = info.get("canonical_title")
+            if canonical:
+                return canonical
+        return raw_series_name
 
     def _fetch_from_anilist(self, search_term: str) -> Optional[Dict[str, Any]]:
         payload = {
@@ -165,67 +243,78 @@ class AniListMetadataService:
             "variables": {"search": search_term}
         }
         data_bytes = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            ANILIST_GRAPHQL_ENDPOINT,
-            data=data_bytes,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "MangaTrax/1.0 (+https://github.com/Wemew/MangaTrax)"
-            }
-        )
 
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                if resp.status != 200:
-                    return None
-                result = json.loads(resp.read().decode("utf-8"))
-                media = result.get("data", {}).get("Media")
-                if not media:
-                    return None
-
-                format_val = (media.get("format") or "").upper()
-                if format_val in ("NOVEL",):
-                    return None
-
-                titles = media.get("title", {})
-                english = (titles.get("english") or "").strip()
-                romaji = (titles.get("romaji") or "").strip()
-                synonyms = media.get("synonyms") or []
-
-                # Prefer English title over romaji
-                canonical = english
-                if not canonical and synonyms:
-                    for syn in synonyms:
-                        s_clean = syn.strip()
-                        if s_clean and s_clean.lower() != romaji.lower() and re.search(r"\b(?:the|a|an|of|in|to|is|for|my|no|war|voice|shape|world|demon|titan|hero)\b", s_clean, re.IGNORECASE):
-                            canonical = s_clean
-                            break
-                if not canonical:
-                    canonical = romaji or search_term
-
-                cover = media.get("coverImage", {}).get("extraLarge") or media.get("coverImage", {}).get("large") or ""
-                volumes = media.get("volumes")
-                status = media.get("status") or "UNKNOWN"
-                desc = media.get("description") or ""
-                clean_desc = re.sub(r"<[^>]+>", "", desc).strip()
-
-                return {
-                    "canonical_title": canonical,
-                    "english_title": canonical,
-                    "romaji_title": romaji,
-                    "cover_url": cover,
-                    "total_volumes": volumes,
-                    "status": status,
-                    "synopsis": clean_desc,
-                    "source": "anilist"
+        for attempt in range(2):
+            _RATE_LIMITER.wait_if_needed()
+            req = urllib.request.Request(
+                ANILIST_GRAPHQL_ENDPOINT,
+                data=data_bytes,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "MangaTrax/1.0 (+https://github.com/Wemew/MangaTrax)"
                 }
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                logger.debug(f"AniList returned 404 for '{search_term}'")
-            else:
-                logger.warning(f"AniList HTTP Error {e.code} for '{search_term}': {e.reason}")
-            return None
-        except Exception as e:
-            logger.debug(f"AniList lookup unavailable for '{search_term}': {e}")
-            return None
+            )
+
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    _RATE_LIMITER.handle_response_headers(resp.headers)
+                    if resp.status != 200:
+                        return None
+                    result = json.loads(resp.read().decode("utf-8"))
+                    media = result.get("data", {}).get("Media")
+                    if not media:
+                        return None
+
+                    format_val = (media.get("format") or "").upper()
+                    if format_val in ("NOVEL",):
+                        return None
+
+                    titles = media.get("title", {})
+                    english = (titles.get("english") or "").strip()
+                    romaji = (titles.get("romaji") or "").strip()
+                    synonyms = media.get("synonyms") or []
+
+                    # Prefer English title over romaji
+                    canonical = english
+                    if not canonical and synonyms:
+                        for syn in synonyms:
+                            s_clean = syn.strip()
+                            if s_clean and s_clean.lower() != romaji.lower() and re.search(r"\b(?:the|a|an|of|in|to|is|for|my|no|war|voice|shape|world|demon|titan|hero)\b", s_clean, re.IGNORECASE):
+                                canonical = s_clean
+                                break
+                    if not canonical:
+                        canonical = romaji or search_term
+
+                    cover = media.get("coverImage", {}).get("extraLarge") or media.get("coverImage", {}).get("large") or ""
+                    volumes = media.get("volumes")
+                    status = media.get("status") or "UNKNOWN"
+                    desc = media.get("description") or ""
+                    clean_desc = re.sub(r"<[^>]+>", "", desc).strip()
+
+                    return {
+                        "canonical_title": canonical,
+                        "english_title": canonical,
+                        "romaji_title": romaji,
+                        "cover_url": cover,
+                        "total_volumes": volumes,
+                        "status": status,
+                        "synopsis": clean_desc,
+                        "source": "anilist"
+                    }
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    _RATE_LIMITER.handle_rate_limit_error(e.headers)
+                    if attempt == 0:
+                        logger.info(f"Retrying AniList query for '{search_term}' after 429 rate limit cooldown...")
+                        continue
+                elif e.code == 404:
+                    logger.debug(f"AniList returned 404 for '{search_term}'")
+                else:
+                    logger.warning(f"AniList HTTP Error {e.code} for '{search_term}': {e.reason}")
+                return None
+            except Exception as e:
+                logger.debug(f"AniList lookup unavailable for '{search_term}': {e}")
+                return None
+
+        return None

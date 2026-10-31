@@ -1260,19 +1260,22 @@ class MangaDatabase:
                                 calibre_match = norm_tracked_map[cand_canon_norm]
                                 break
 
-                # Substring containment fallback against tracked series
-                if not calibre_match and len(s_norm) >= 4:
+                # Strict substring containment fallback against tracked series (requires >= 70% coverage)
+                if not calibre_match and len(s_norm) >= 6:
                     for t_norm, t_row in norm_tracked_map.items():
-                        if len(t_norm) >= 4:
-                            if t_norm in s_norm or s_norm in t_norm:
+                        if len(t_norm) >= 6:
+                            len_ratio = min(len(t_norm), len(s_norm)) / max(len(t_norm), len(s_norm))
+                            if len_ratio >= 0.70 and (t_norm in s_norm or s_norm in t_norm):
                                 calibre_match = t_row
                                 break
 
-                canonical_title = (
-                    meta_match.get("canonical_title")
-                    or (calibre_match.get("name") if calibre_match else None)
-                    or s_name
-                )
+                # Canonical title resolution: preserve original delimiters if metadata is fallback/cleaned
+                if meta_match and meta_match.get("source") not in ("fallback", "cleaned") and meta_match.get("canonical_title"):
+                    canonical_title = meta_match["canonical_title"]
+                elif calibre_match and calibre_match.get("name"):
+                    canonical_title = calibre_match["name"]
+                else:
+                    canonical_title = s_name
                 canonical_key = normalize_text(canonical_title) or "uncategorized"
                 romaji_title = meta_match.get("romaji_title") or (s_name if s_name.lower() != canonical_title.lower() else "")
                 if not romaji_title and candidate_parts:

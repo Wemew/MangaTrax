@@ -78,7 +78,7 @@ class MangaCalibreMatcher:
                 owned.update(v_set)
 
         # 4. If matched_series already carries owned_volumes_json from database
-        if not owned and matched_series.get("owned_volumes_json"):
+        if matched_series.get("owned_volumes_json"):
             try:
                 ov = json.loads(matched_series["owned_volumes_json"])
                 owned.update([float(v) for v in ov])

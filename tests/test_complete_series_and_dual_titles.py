@@ -410,6 +410,71 @@ def test_reconciliation_23_of_24_volumes():
         pass
     print(" [PASSED] Reconciliation of 23 of 24 volumes against Calibre library verified.")
 
+def test_anilist_rate_limiter():
+    import time
+    from app.metadata.anilist import AniListRateLimiter
+
+    # 1. Test sliding window rate limit
+    limiter = AniListRateLimiter(max_requests=3, time_window=0.4)
+    start_time = time.time()
+    for _ in range(4):
+        limiter.wait_if_needed()
+    elapsed = time.time() - start_time
+    assert elapsed >= 0.35, f"Limiter did not pause for rolling window capacity, elapsed: {elapsed:.3f}s"
+
+    # 2. Test 429 Retry-After handling
+    limiter_429 = AniListRateLimiter(max_requests=10, time_window=1.0)
+    limiter_429.handle_rate_limit_error({"Retry-After": "0.3"})
+    assert limiter_429.retry_until > time.time()
+    start_cooldown = time.time()
+    limiter_429.wait_if_needed()
+    cooldown_elapsed = time.time() - start_cooldown
+    assert cooldown_elapsed >= 0.25, f"Cooldown failed to pause execution, elapsed: {cooldown_elapsed:.3f}s"
+
+    # 3. Test remaining quota header inspection
+    limiter_pacing = AniListRateLimiter(max_requests=90, time_window=60.0)
+    start_pacing = time.time()
+    limiter_pacing.handle_response_headers({"X-RateLimit-Remaining": "1"})
+    pacing_elapsed = time.time() - start_pacing
+    assert pacing_elapsed >= 0.9, f"Pacing failed to throttle when remaining quota <= 2, elapsed: {pacing_elapsed:.3f}s"
+
+    print(" [PASSED] AniList thread-safe sliding-window rate limiter & 429 backoff verified.")
+
+def test_dual_title_delimiter_preservation():
+    from app.metadata.anilist import AniListMetadataService
+    from app.parser import extract_manga_bundle_and_volumes
+
+    # Verify parser extracts series name with delimiters intact
+    raw = "[nao] Class de 2 Banme ni Kawaii Onna no Ko to Tomodachi ni Natta / I Made Friends with the Second Prettiest Girl in My Class - Vol 3"
+    info = extract_manga_bundle_and_volumes(raw)
+    assert "/" in info["series_name"]
+    assert " / " in info["series_name"]
+
+    # Verify resolve_manga_series fallback preserves original delimiters without clobbering into concatenated string
+    service = AniListMetadataService()
+    fallback_res = service.resolve_manga_series(info["series_name"])
+    assert "/" in fallback_res["canonical_title"], f"Expected slash delimiter preserved, got: {fallback_res['canonical_title']}"
+    assert fallback_res["source"] == "fallback"
+
+    print(" [PASSED] Dual title delimiter preservation in parser & metadata fallback verified.")
+
+def test_exact_match_priority_over_substring():
+    from app.parser import match_manga_series_in_calibre
+
+    calibre_library = [
+        {"series_id": 1, "name": "Devil May Cry", "series_name": "Devil May Cry", "book_count": 69},
+        {"series_id": 2, "name": "The Devil Is a Part-Timer!", "series_name": "The Devil Is a Part-Timer!", "book_count": 23}
+    ]
+
+    query_title = "Hataraku Maou-sama! | The Devil is a Part-Timer!"
+    matched = match_manga_series_in_calibre(query_title, calibre_library)
+
+    assert matched is not None, "Expected match in Calibre library"
+    assert matched["name"] == "The Devil Is a Part-Timer!", f"Wrong series matched: {matched['name']}"
+    assert matched["book_count"] == 23, f"Expected 23 book count, got: {matched['book_count']}"
+
+    print(" [PASSED] Calibre matching exact candidate part priority over false substring verified.")
+
 if __name__ == "__main__":
     print("\n==================================================")
     print("Running MangaTrax Complete Series & Dual Title Suite")
@@ -423,6 +488,9 @@ if __name__ == "__main__":
     test_dynamic_expansion_of_unexpanded_releases()
     test_fast_init_db_and_background_scheduler_expansion()
     test_reconciliation_23_of_24_volumes()
+    test_anilist_rate_limiter()
+    test_dual_title_delimiter_preservation()
+    test_exact_match_priority_over_substring()
     print("==================================================")
     print("ALL COMPLETE SERIES AND DUAL TITLE TESTS PASSED!")
     print("==================================================\n")
