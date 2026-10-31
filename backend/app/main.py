@@ -108,17 +108,25 @@ async def series_view(request: Request):
     )
 
 @app.get("/releases", response_class=HTMLResponse)
-async def releases_view(request: Request, status: Optional[str] = None):
+async def releases_view(request: Request, status: Optional[str] = None, view: str = Query("series")):
     releases = db.get_releases(status=status, limit=500)
+    grouped_series = db.get_releases_grouped_by_series(status=status)
     return templates.TemplateResponse(
         request=request,
         name="releases.html",
         context={
             "active_page": "releases",
             "releases": releases,
-            "current_status": status
+            "grouped_series": grouped_series,
+            "current_status": status,
+            "current_view": view
         }
     )
+
+@app.get("/api/releases/grouped")
+async def api_releases_grouped(status: Optional[str] = None):
+    groups = db.get_releases_grouped_by_series(status=status)
+    return JSONResponse({"status": "success", "count": len(groups), "series_groups": groups})
 
 @app.get("/discovery", response_class=HTMLResponse)
 async def discovery_view(request: Request):

@@ -25,6 +25,17 @@ def test_manga_bundle_parsing():
     assert r1["volume_end"] == 5.0
     assert r1["volumes"] == [1.0, 2.0, 3.0, 4.0, 5.0]
 
+    # Full batch volume extraction V1-V7 -> [1, 2, 3, 4, 5, 6, 7]
+    r_v7 = extract_manga_bundle_and_volumes("[Group] Bleach (v01-v07) [Digital] [CBZ]")
+    assert r_v7["is_bundle"] is True
+    assert r_v7["series_name"] == "Bleach"
+    assert r_v7["volumes"] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+
+    # Vol. with dot and spaces
+    r_dot = extract_manga_bundle_and_volumes("Bleach Vol. 1-7")
+    assert r_dot["is_bundle"] is True
+    assert r_dot["volumes"] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+
     # Another bundle syntax
     r2 = extract_manga_bundle_and_volumes("Frieren - Beyond Journey's End v04-v06 (Digital) (1080p)")
     assert r2["is_bundle"] is True
@@ -32,11 +43,17 @@ def test_manga_bundle_parsing():
     assert r2["volume_end"] == 6.0
     assert r2["volumes"] == [4.0, 5.0, 6.0]
 
+    # Comma separated bundle
+    r_comma = extract_manga_bundle_and_volumes("Chainsaw Man Vol. 1, 2, 3")
+    assert r_comma["is_bundle"] is True
+    assert r_comma["volumes"] == [1.0, 2.0, 3.0]
+
     # Single Volume
     r3 = extract_manga_bundle_and_volumes("[Group] One Piece Vol. 105 [CBZ]")
     assert r3["is_bundle"] is False
     assert r3["series_name"] == "One Piece"
     assert r3["volume_start"] == 105.0
+    assert r3["volumes"] == [105.0]
 
     # Volume 1 Standalone
     r4 = extract_manga_bundle_and_volumes("Dandadan Vol 1")
@@ -273,6 +290,93 @@ def test_database_and_blacklist_workflow():
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+def test_series_grouping_and_metadata():
+    print("--> Testing Series Grouping and AniList Metadata Caching...")
+    temp_dir = tempfile.mkdtemp(prefix="mangatrax_test_grouping_")
+    db_file = os.path.join(temp_dir, "mangatrax_group_test.db")
+
+    try:
+        db = MangaDatabase(db_file)
+        from app.metadata.anilist import AniListMetadataService
+
+        # 1. Test Metadata Cache storage & retrieval
+        anilist = AniListMetadataService(db=db)
+        db.cache_manga_metadata("bleach", {
+            "canonical_title": "Bleach",
+            "romaji_title": "BLEACH",
+            "cover_url": "https://example.com/bleach.jpg",
+            "total_volumes": 74,
+            "status": "FINISHED",
+            "synopsis": "Ichigo Kurosaki is a high school student...",
+            "source": "anilist"
+        })
+
+        cached = db.get_cached_manga_metadata("bleach")
+        assert cached is not None
+        assert cached["canonical_title"] == "Bleach"
+        assert cached["total_volumes"] == 74
+
+        # 2. Add multiple releases of the same series with different names and bundle ranges
+        rel1 = {
+            "guid": "guid-bleach-batch-1",
+            "title": "[danke-Empire] Bleach v01-v07 [Digital] [1080p]",
+            "series_name": "Bleach",
+            "is_bundle": True,
+            "volume_start": 1.0,
+            "volume_end": 7.0,
+            "volumes": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            "missing_volumes": [4.0, 5.0, 6.0, 7.0],
+            "status": "REQUESTED"
+        }
+        rel2 = {
+            "guid": "guid-bleach-single-8",
+            "title": "Bleach Vol. 8",
+            "series_name": "Bleach",
+            "is_bundle": False,
+            "volume_start": 8.0,
+            "volume_end": 8.0,
+            "volumes": [8.0],
+            "missing_volumes": [8.0],
+            "status": "REQUESTED"
+        }
+        rel3 = {
+            "guid": "guid-csm-1",
+            "title": "Chainsaw Man Vol. 1",
+            "series_name": "Chainsaw Man",
+            "is_bundle": False,
+            "volume_start": 1.0,
+            "volume_end": 1.0,
+            "volumes": [1.0],
+            "missing_volumes": [],
+            "status": "IN_CALIBRE"
+        }
+
+        db.upsert_release(rel1)
+        db.upsert_release(rel2)
+        db.upsert_release(rel3)
+
+        # 3. Test get_releases_grouped_by_series
+        groups = db.get_releases_grouped_by_series()
+        assert len(groups) == 2
+
+        # Bleach group should have wanted releases and aggregated volumes 1..8
+        bleach_group = next(g for g in groups if g["series_name"] == "Bleach")
+        assert bleach_group["releases_count"] == 2
+        assert bleach_group["wanted_count"] == 2
+        assert bleach_group["all_volumes"] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        assert bleach_group["missing_volumes"] == [4.0, 5.0, 6.0, 7.0, 8.0]
+        assert bleach_group["total_volumes"] == 74
+        assert bleach_group["cover_url"] == "https://example.com/bleach.jpg"
+
+        # Chainsaw Man group
+        csm_group = next(g for g in groups if g["series_name"] == "Chainsaw Man")
+        assert csm_group["releases_count"] == 1
+        assert csm_group["all_volumes"] == [1.0]
+
+        print("    [PASSED] Series grouping and metadata cache properly aggregate all bundle volumes.")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
 if __name__ == "__main__":
     print("==================================================")
     print("Running MangaTrax Comprehensive Integration Suite")
@@ -281,6 +385,7 @@ if __name__ == "__main__":
     test_calibre_scanner_and_matcher()
     test_cbz_tagger_and_comicinfo()
     test_database_and_blacklist_workflow()
+    test_series_grouping_and_metadata()
     print("==================================================")
     print("ALL TESTS PASSED SUCCESSFULLY! (100% VERIFIED)")
     print("==================================================")

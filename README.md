@@ -10,7 +10,9 @@
 
 ## 🌟 Key Features
 
-- **Multi-Volume Bundle Parsing**: Intelligently parses complex release titles including volume ranges (`Chainsaw Man Vol. 01-05`, `v04-v06`, `Volumes 1-3`, standalone volumes, and digital releases).
+- **Organized Canonical Series View**: Aggregates messy RSS releases, scanlation group prefixes (`[danke-Empire]`, `[Group]`), and duplicate torrent versions into clean canonical series cards. Includes a view toggle to switch between **Group by Series** and **All Releases (Flat)** with real-time search.
+- **Authoritative Manga Database Integration (AniList)**: Automatically resolves raw releases to canonical titles, high-resolution official cover art, total volume counts, and synopsis data via AniList's public GraphQL API, with full local SQLite caching to operate cleanly without external rate-limiting.
+- **Full Volume Extraction from Batch Releases**: When a batch release specifies a volume range (`v1-v7`, `v01-v07`, `Vol. 1-7`, `(v01-v07)`, `[v01-v20]`, or comma/plus lists `Vol 1, 2, 3`), MangaTrax extracts **every individual volume** in the range (`1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0`) instead of only the endpoints, rendering distinct badges for every volume with color-coded owned vs missing indicators.
 - **Missing-Volume Range Matching**: When a bundle is detected, MangaTrax checks your Calibre library to determine if *any* volume inside the bundle is missing. If you already own volumes 1–3 and a bundle offers 1–5, MangaTrax identifies volumes 4 and 5 as wanted and requests the release.
 - **Zero-Lock Network Share Calibre Reader**: Reads Calibre's `metadata.db` over SMB/NFS using SQLite's `mode=ro&immutable=1` URI mode. Never locks the database, completely preventing write conflicts or corruption while host Calibre is open.
 - **qBittorrent Web API Integration**: Directly interfaces with qBittorrent or any downloader exposing the qBittorrent v2 Web API (including Flood, Torbox, and qBit emulators). Automatically tags torrents with category `manga` and pushes downloads to your staging folder.

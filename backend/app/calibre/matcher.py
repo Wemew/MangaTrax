@@ -6,6 +6,12 @@ class MangaCalibreMatcher:
         self.calibre_series = calibre_series
         self.volumes_map = volumes_map
 
+    def find_series(self, series_name: str) -> Optional[Dict[str, Any]]:
+        """Matches a raw or extracted series name to an existing Calibre series."""
+        if not series_name:
+            return None
+        return match_manga_series_in_calibre(series_name, self.calibre_series)
+
     def check_release(self, release: Dict[str, Any], auto_request_monitored: bool = True) -> Dict[str, Any]:
         """
         Evaluates a single manga volume or multi-volume bundle against Calibre.

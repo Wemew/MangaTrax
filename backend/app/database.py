@@ -144,6 +144,21 @@ class MangaDatabase:
                 );
             """)
 
+            # Manga metadata cache (AniList / Canonical Manga Database)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS manga_metadata_cache (
+                    search_term TEXT PRIMARY KEY,
+                    canonical_title TEXT NOT NULL,
+                    romaji_title TEXT DEFAULT '',
+                    cover_url TEXT DEFAULT '',
+                    total_volumes INTEGER,
+                    status TEXT DEFAULT 'UNKNOWN',
+                    synopsis TEXT DEFAULT '',
+                    source TEXT DEFAULT 'anilist',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
             # Default settings
             cur.execute("SELECT count(*) FROM app_settings;")
             if cur.fetchone()[0] == 0:
@@ -587,3 +602,176 @@ class MangaDatabase:
             conn.commit()
             self.log_activity("DEBUG_CLEAR", "Cleared discovered manga series", f"Removed {count} unreviewed discovery releases.")
             return count
+
+    # --- Manga Metadata Cache (AniList) ---
+    def get_cached_manga_metadata(self, search_term: str) -> Optional[Dict[str, Any]]:
+        clean_key = search_term.strip().lower()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM manga_metadata_cache WHERE lower(search_term) = lower(?);", (clean_key,))
+            row = cur.fetchone()
+            if row:
+                return {
+                    "canonical_title": row["canonical_title"],
+                    "romaji_title": row["romaji_title"],
+                    "cover_url": row["cover_url"],
+                    "total_volumes": row["total_volumes"],
+                    "status": row["status"],
+                    "synopsis": row["synopsis"],
+                    "source": row["source"]
+                }
+            return None
+
+    def cache_manga_metadata(self, search_term: str, data: Dict[str, Any]):
+        clean_key = search_term.strip().lower()
+        canonical = data.get("canonical_title") or search_term
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO manga_metadata_cache (
+                    search_term, canonical_title, romaji_title, cover_url,
+                    total_volumes, status, synopsis, source, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(search_term) DO UPDATE SET
+                    canonical_title = excluded.canonical_title,
+                    romaji_title = excluded.romaji_title,
+                    cover_url = CASE WHEN excluded.cover_url != '' THEN excluded.cover_url ELSE manga_metadata_cache.cover_url END,
+                    total_volumes = excluded.total_volumes,
+                    status = excluded.status,
+                    synopsis = excluded.synopsis,
+                    source = excluded.source;
+            """, (
+                clean_key,
+                canonical,
+                data.get("romaji_title", ""),
+                data.get("cover_url", ""),
+                data.get("total_volumes"),
+                data.get("status", "UNKNOWN"),
+                data.get("synopsis", ""),
+                data.get("source", "anilist")
+            ))
+            conn.commit()
+
+    # --- Group Releases by Series ---
+    def get_releases_grouped_by_series(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Groups releases under canonical series, aggregating all bundle volumes,
+        highlighting owned vs missing volumes against Calibre tracking.
+        """
+        from app.parser import normalize_text
+
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+
+            if status:
+                cur.execute("SELECT * FROM releases WHERE status = ? ORDER BY updated_at DESC;", (status,))
+            else:
+                cur.execute("""
+                    SELECT * FROM releases 
+                    ORDER BY 
+                        CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
+                        updated_at DESC;
+                """)
+            raw_releases = [dict(r) for r in cur.fetchall()]
+            for r in raw_releases:
+                r["volumes"] = json.loads(r["volumes_json"] or "[]")
+                r["missing_volumes"] = json.loads(r["missing_vols_json"] or "[]")
+
+            cur.execute("SELECT * FROM series_tracking;")
+            tracked_map = {row["name"].lower(): dict(row) for row in cur.fetchall()}
+
+            cur.execute("SELECT * FROM manga_metadata_cache;")
+            cache_map = {row["search_term"].lower(): dict(row) for row in cur.fetchall()}
+
+            groups_dict: Dict[str, Dict[str, Any]] = {}
+
+            for rel in raw_releases:
+                s_name = (rel.get("series_name") or "Uncategorized").strip()
+                s_key = normalize_text(s_name) or "uncategorized"
+
+                if s_key not in groups_dict:
+                    calibre_match = None
+                    for t_name_lower, t_row in tracked_map.items():
+                        if normalize_text(t_name_lower) == s_key:
+                            calibre_match = t_row
+                            break
+
+                    meta_match = cache_map.get(s_key) or {}
+
+                    canonical_title = (
+                        (calibre_match.get("name") if calibre_match else None)
+                        or meta_match.get("canonical_title")
+                        or s_name
+                    )
+
+                    cover = (
+                        meta_match.get("cover_url")
+                        or rel.get("cover_url")
+                        or (calibre_match.get("cover_url") if calibre_match else "")
+                        or ""
+                    )
+
+                    groups_dict[s_key] = {
+                        "series_key": s_key,
+                        "series_name": canonical_title,
+                        "raw_name": s_name,
+                        "cover_url": cover,
+                        "in_calibre": calibre_match is not None,
+                        "is_monitored": bool(calibre_match.get("is_monitored", 0)) if calibre_match else False,
+                        "calibre_series_id": calibre_match.get("id") if calibre_match else None,
+                        "calibre_book_count": calibre_match.get("book_count", 0) if calibre_match else 0,
+                        "calibre_latest_index": calibre_match.get("latest_index", 0.0) if calibre_match else 0.0,
+                        "total_volumes": meta_match.get("total_volumes"),
+                        "status": meta_match.get("status", "UNKNOWN"),
+                        "synopsis": meta_match.get("synopsis", "") or (calibre_match.get("description", "") if calibre_match else ""),
+                        "releases": [],
+                        "all_volumes_set": set(),
+                        "missing_volumes_set": set(),
+                        "has_wanted": False,
+                        "has_discovery": False,
+                        "has_in_calibre": False
+                    }
+
+                group = groups_dict[s_key]
+                group["releases"].append(rel)
+
+                for v in rel["volumes"]:
+                    group["all_volumes_set"].add(v)
+                for mv in rel["missing_volumes"]:
+                    group["missing_volumes_set"].add(mv)
+
+                if rel["status"] == "REQUESTED":
+                    group["has_wanted"] = True
+                elif rel["status"] == "DISCOVERY":
+                    group["has_discovery"] = True
+                elif rel["status"] == "IN_CALIBRE":
+                    group["has_in_calibre"] = True
+
+                if not group["cover_url"] and rel.get("cover_url"):
+                    group["cover_url"] = rel["cover_url"]
+
+            result_groups = []
+            for group in groups_dict.values():
+                group["all_volumes"] = sorted(list(group["all_volumes_set"]))
+                group["missing_volumes"] = sorted(list(group["missing_volumes_set"]))
+                group["releases_count"] = len(group["releases"])
+                group["wanted_count"] = sum(1 for r in group["releases"] if r["status"] == "REQUESTED")
+                # Remove temporary sets before passing to Jinja templates
+                del group["all_volumes_set"]
+                del group["missing_volumes_set"]
+                result_groups.append(group)
+
+            def sort_key(g):
+                priority = 4
+                if g["has_wanted"]:
+                    priority = 1
+                elif g["is_monitored"]:
+                    priority = 2
+                elif g["has_discovery"]:
+                    priority = 3
+                elif g["in_calibre"]:
+                    priority = 5
+                return (priority, g["series_name"].lower())
+
+            result_groups.sort(key=sort_key)
+            return result_groups

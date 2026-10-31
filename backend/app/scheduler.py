@@ -11,6 +11,7 @@ from app.calibre.matcher import MangaCalibreMatcher
 from app.downloader.qbit import QBitClient
 from app.tagger.cbz_tagger import auto_tag_staging_cbz_files
 from app.providers.registry import create_provider
+from app.metadata.anilist import AniListMetadataService
 
 logger = logging.getLogger("mangatrax.scheduler")
 
@@ -18,6 +19,7 @@ class MangaScheduler:
     def __init__(self, db: MangaDatabase, cover_cache: CoverCache):
         self.db = db
         self.cover_cache = cover_cache
+        self.anilist = AniListMetadataService(db=self.db)
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -119,23 +121,41 @@ class MangaScheduler:
 
                 for rel in releases:
                     total_found += 1
+
+                    # Canonical series metadata & cover resolution
+                    canonical_series = rel.series_name
+                    cover_url = rel.cover_url
+                    if rel.series_name:
+                        calibre_match = matcher.find_series(rel.series_name)
+                        if calibre_match:
+                            canonical_series = calibre_match["series_name"]
+                        else:
+                            meta = self.anilist.resolve_manga_series(rel.series_name)
+                            if meta.get("canonical_title"):
+                                canonical_series = meta["canonical_title"]
+                            if not cover_url and meta.get("cover_url"):
+                                cover_url = meta["cover_url"]
+
                     # SSRF safe sync cover caching
-                    if rel.cover_url:
-                        self.cover_cache.cache_sync(rel.cover_url)
+                    if cover_url:
+                        self.cover_cache.cache_sync(cover_url)
 
                     # Check blacklist
-                    if rel.series_name and self.db.is_series_blacklisted(rel.series_name):
+                    test_name = canonical_series or rel.series_name
+                    if test_name and self.db.is_series_blacklisted(test_name):
                         status = "BLACKLISTED"
                         missing_vols = []
                     else:
-                        match_result = matcher.check_release(rel.to_dict())
+                        match_payload = rel.to_dict()
+                        match_payload["series_name"] = canonical_series
+                        match_result = matcher.check_release(match_payload)
                         status = match_result["status"]
                         missing_vols = match_result.get("missing_volumes", [])
 
                     rel_dict = {
                         "guid": rel.guid,
                         "title": rel.title,
-                        "series_name": rel.series_name,
+                        "series_name": canonical_series,
                         "is_bundle": rel.is_bundle,
                         "volume_start": rel.volume_start,
                         "volume_end": rel.volume_end,
@@ -143,7 +163,7 @@ class MangaScheduler:
                         "missing_volumes": missing_vols,
                         "download_url": rel.download_url,
                         "link": rel.link,
-                        "cover_url": rel.cover_url,
+                        "cover_url": cover_url,
                         "source_feed_name": feed_name,
                         "status": status,
                         "download_status": "IDLE"
@@ -298,22 +318,40 @@ class MangaScheduler:
                         break
 
                     total_processed += 1
-                    if rel.cover_url:
-                        await asyncio.to_thread(self.cover_cache.cache_sync, rel.cover_url)
+
+                    # Canonical series metadata & cover resolution
+                    canonical_series = rel.series_name
+                    cover_url = rel.cover_url
+                    if rel.series_name:
+                        calibre_match = matcher.find_series(rel.series_name)
+                        if calibre_match:
+                            canonical_series = calibre_match["series_name"]
+                        else:
+                            meta = await asyncio.to_thread(self.anilist.resolve_manga_series, rel.series_name)
+                            if meta.get("canonical_title"):
+                                canonical_series = meta["canonical_title"]
+                            if not cover_url and meta.get("cover_url"):
+                                cover_url = meta["cover_url"]
+
+                    if cover_url:
+                        await asyncio.to_thread(self.cover_cache.cache_sync, cover_url)
 
                     # Blacklist check
-                    if rel.series_name and self.db.is_series_blacklisted(rel.series_name):
+                    test_name = canonical_series or rel.series_name
+                    if test_name and self.db.is_series_blacklisted(test_name):
                         status = "BLACKLISTED"
                         missing_vols = []
                     else:
-                        match_res = matcher.check_release(rel.to_dict())
+                        match_payload = rel.to_dict()
+                        match_payload["series_name"] = canonical_series
+                        match_res = matcher.check_release(match_payload)
                         status = match_res["status"]
                         missing_vols = match_res.get("missing_volumes", [])
 
                     rel_dict = {
                         "guid": rel.guid,
                         "title": rel.title,
-                        "series_name": rel.series_name,
+                        "series_name": canonical_series,
                         "is_bundle": rel.is_bundle,
                         "volume_start": rel.volume_start,
                         "volume_end": rel.volume_end,
@@ -321,7 +359,7 @@ class MangaScheduler:
                         "missing_volumes": missing_vols,
                         "download_url": rel.download_url,
                         "link": rel.link,
-                        "cover_url": rel.cover_url,
+                        "cover_url": cover_url,
                         "source_feed_name": feed_name,
                         "status": status,
                         "download_status": "IDLE"
