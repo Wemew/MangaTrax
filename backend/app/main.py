@@ -435,6 +435,36 @@ async def api_save_settings(payload: Dict[str, Any]):
     db.log_activity("SETTINGS_UPDATED", "Application settings updated")
     return JSONResponse({"status": "success"})
 
+# --- Polite Historical Backfill Endpoints ---
+
+@app.post("/api/backfill/start")
+async def api_backfill_start(payload: Optional[Dict[str, Any]] = None):
+    """Starts polite historical backfill across feeds."""
+    import asyncio
+    if scheduler.is_backfilling:
+        return JSONResponse({"status": "in_progress", "message": "Backfill already running"})
+
+    p = payload or {}
+    max_pages = int(p.get("max_pages", 15))
+    delay = float(p.get("delay", 2.0))
+
+    asyncio.create_task(scheduler.run_polite_backfill(
+        max_pages=max_pages,
+        delay_seconds=delay
+    ))
+    return JSONResponse({"status": "started", "message": "Polite backfill started in background"})
+
+@app.post("/api/backfill/stop")
+async def api_backfill_stop():
+    """Signals the running backfiller to stop gracefully."""
+    scheduler.stop_backfill()
+    return JSONResponse({"status": "stopping", "message": "Backfill stopping"})
+
+@app.get("/api/backfill/status")
+async def api_backfill_status():
+    """Returns current backfill progress and state."""
+    return JSONResponse(scheduler.get_backfill_status())
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8080))

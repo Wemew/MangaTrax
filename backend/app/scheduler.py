@@ -21,6 +21,8 @@ class MangaScheduler:
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self.is_backfilling = False
+        self.stop_backfill_requested = False
 
     def get_qbit_client(self) -> QBitClient:
         settings = self.db.get_all_settings()
@@ -213,6 +215,128 @@ class MangaScheduler:
             err = f"Error during staging auto-tagging: {e}"
             logger.error(err)
             return {"success": False, "message": err, "tagged_count": 0, "tagged_files": []}
+
+    # --- Historical Backfill Tasks ---
+    def stop_backfill(self):
+        """Signals the running backfiller to gracefully stop."""
+        self.stop_backfill_requested = True
+        self.db.set_setting("backfill_status", "stopping")
+        self.db.set_setting("backfill_progress", "Stop requested, finishing current item...")
+
+    def get_backfill_status(self) -> Dict[str, Any]:
+        return {
+            "running": self.is_backfilling,
+            "status": self.db.get_setting("backfill_status", "idle"),
+            "progress": self.db.get_setting("backfill_progress", "Idle")
+        }
+
+    async def run_polite_backfill(self, max_pages: int = 15, delay_seconds: float = 2.0):
+        """
+        Runs a polite historical backfill across feeds:
+        Fetches older pages with polite rate-limiting delays to populate discovery
+        and catch older missing volumes/bundles without causing tracker load.
+        """
+        import asyncio
+        if self.is_backfilling:
+            return {"status": "in_progress", "message": "Backfill already running"}
+
+        self.is_backfilling = True
+        self.stop_backfill_requested = False
+        self.db.set_setting("backfill_status", "running")
+        self.db.set_setting("backfill_progress", "Starting polite manga feed backfill...")
+
+        try:
+            feeds = self.db.get_all_feeds()
+            total_discovered = 0
+            total_processed = 0
+
+            calibre_path = self.db.get_setting("calibre_path", "/calibre")
+            scanner = CalibreMangaScanner(calibre_path)
+            series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
+            volumes_map = scanner.get_all_volumes_per_series() if scanner.is_available() else {}
+            matcher = MangaCalibreMatcher(series_list, volumes_map)
+
+            for feed in feeds:
+                if self.stop_backfill_requested:
+                    break
+
+                if not feed.get("enabled"):
+                    continue
+
+                feed_name = feed["name"]
+                feed_config = json.loads(feed.get("config_json") or "{}") if isinstance(feed.get("config_json"), str) else (feed.get("config_json") or {})
+                feed_config["max_pages"] = max_pages
+                feed_dict = dict(feed)
+                feed_dict["config_json"] = json.dumps(feed_config)
+
+                self.db.set_setting("backfill_progress", f"Scanning {feed_name} (up to {max_pages} pages)...")
+
+                provider = create_provider(feed_dict)
+                if not provider:
+                    continue
+
+                releases = await asyncio.to_thread(provider.fetch_releases)
+
+                for rel in releases:
+                    if self.stop_backfill_requested:
+                        break
+
+                    total_processed += 1
+                    if rel.cover_url:
+                        await asyncio.to_thread(self.cover_cache.cache_sync, rel.cover_url)
+
+                    # Blacklist check
+                    if rel.series_name and self.db.is_series_blacklisted(rel.series_name):
+                        status = "BLACKLISTED"
+                        missing_vols = []
+                    else:
+                        match_res = matcher.check_release(rel.to_dict())
+                        status = match_res["status"]
+                        missing_vols = match_res.get("missing_volumes", [])
+
+                    rel_dict = {
+                        "guid": rel.guid,
+                        "title": rel.title,
+                        "series_name": rel.series_name,
+                        "is_bundle": rel.is_bundle,
+                        "volume_start": rel.volume_start,
+                        "volume_end": rel.volume_end,
+                        "volumes": rel.volumes,
+                        "missing_volumes": missing_vols,
+                        "download_url": rel.download_url,
+                        "link": rel.link,
+                        "cover_url": rel.cover_url,
+                        "source_feed_name": feed_name,
+                        "status": status,
+                        "download_status": "IDLE"
+                    }
+
+                    is_new, _ = self.db.upsert_release(rel_dict)
+                    if is_new and status == "DISCOVERY":
+                        total_discovered += 1
+
+                    if delay_seconds > 0:
+                        await asyncio.sleep(min(delay_seconds, 0.1))
+
+                # Polite delay between feeds
+                if delay_seconds > 0 and not self.stop_backfill_requested:
+                    await asyncio.sleep(delay_seconds)
+
+            summary = f"Backfill complete: processed {total_processed} releases, found {total_discovered} new discoveries."
+            self.db.set_setting("backfill_status", "idle")
+            self.db.set_setting("backfill_progress", summary)
+            self.db.log_activity("BACKFILL_COMPLETED", summary)
+            return {"status": "success", "processed": total_processed, "discovered": total_discovered}
+
+        except Exception as e:
+            err = f"Backfill error: {e}"
+            logger.error(err)
+            self.db.set_setting("backfill_status", "error")
+            self.db.set_setting("backfill_progress", err)
+            self.db.log_activity("BACKFILL_ERROR", err)
+            return {"status": "error", "message": err}
+        finally:
+            self.is_backfilling = False
 
     # --- Background Loop ---
     def _worker_loop(self):

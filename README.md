@@ -106,6 +106,41 @@ docker compose up -d --build
 
 Access the dashboard at `http://your-server-ip:8082`.
 
+### 3. TrueNAS SCALE Setup (`docker-compose.truenas.yml`)
+
+For TrueNAS SCALE users, MangaTrax includes a hardened `docker-compose.truenas.yml` configured for the `apps` user (`user: "568:568"`):
+
+```yaml
+services:
+  mangatrax:
+    build:
+      context: https://github.com/Wemew/MangaTrax.git#main
+      dockerfile: Dockerfile
+    image: mangatrax:latest
+    container_name: mangatrax
+    restart: unless-stopped
+    user: "568:568"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "8082:8080"
+    environment:
+      - PORT=8080
+      - CALIBRE_DIR=/calibre
+      - STAGING_DIR=/staging
+      - DATA_DIR=/app/data
+      - QBIT_URL=http://qbittorrent:8080
+      - QBIT_USER=admin
+      - QBIT_PASS=adminadmin
+      - TZ=Etc/UTC
+    volumes:
+      - /mnt/tank/media/calibre:/calibre:ro
+      - /mnt/tank/media/manga/staging:/staging
+      - /mnt/tank/apps/mangatrax/data:/app/data
+```
+
 ---
 
 ## 🛠️ Configuration Settings

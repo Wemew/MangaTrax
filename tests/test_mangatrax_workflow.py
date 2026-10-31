@@ -224,6 +224,25 @@ def test_database_and_blacklist_workflow():
         db.remove_from_blacklist(bl[0]["id"])
         assert db.is_series_blacklisted("Chainsaw Man") is False
 
+        # Discovery & link preservation test
+        disc_rel = {
+            "guid": "guid-dandadan-1",
+            "title": "Dandadan Vol 1",
+            "series_name": "Dandadan",
+            "is_bundle": False,
+            "volume_start": 1.0,
+            "link": "https://mangaupdates.com/series/dandadan",
+            "status": "DISCOVERY"
+        }
+        _, d_id = db.upsert_release(disc_rel)
+        db.update_release_details(d_id, cover_url="https://example.com/cover.jpg")
+        db.track_discovered_series("Dandadan", release_id=d_id)
+
+        all_tracked = db.get_all_series()
+        dandadan = next(s for s in all_tracked if s["name"] == "Dandadan")
+        assert dandadan["website_url"] == "https://mangaupdates.com/series/dandadan"
+        assert dandadan["is_monitored"] == 1
+
         print("    [PASSED] Database, request queue, and blacklist lifecycle verified.")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

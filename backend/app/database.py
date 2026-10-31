@@ -404,6 +404,18 @@ class MangaDatabase:
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
             return rows
 
+    def update_release_details(self, release_id: int, description: Optional[str] = None, link: Optional[str] = None, cover_url: Optional[str] = None):
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE releases 
+                SET link = COALESCE(?, link),
+                    cover_url = COALESCE(?, cover_url),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?;
+            """, (link, cover_url, release_id))
+            conn.commit()
+
     def track_discovered_series(self, series_name: str, release_id: Optional[int] = None) -> bool:
         clean = series_name.strip()
         if not clean:
@@ -412,10 +424,20 @@ class MangaDatabase:
         with self.get_connection() as conn:
             cur = conn.cursor()
             default_link = f"https://www.mangaupdates.com/series.html?search={quote_plus(clean)}"
+
+            # If release has a valid link, prioritize it
+            if release_id:
+                cur.execute("SELECT link FROM releases WHERE id = ?;", (release_id,))
+                row = cur.fetchone()
+                if row and row["link"] and not row["link"].startswith("magnet:"):
+                    default_link = row["link"]
+
             cur.execute("""
                 INSERT INTO series_tracking (name, book_count, latest_index, is_monitored, website_url, last_sync)
                 VALUES (?, 0, 0.0, 1, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(name) DO UPDATE SET is_monitored = 1;
+                ON CONFLICT(name) DO UPDATE SET 
+                    is_monitored = 1,
+                    website_url = CASE WHEN series_tracking.website_url = '' OR series_tracking.website_url IS NULL OR series_tracking.website_url LIKE '%search=%' THEN excluded.website_url ELSE series_tracking.website_url END;
             """, (clean, default_link))
             if release_id:
                 cur.execute("UPDATE releases SET status = 'REQUESTED', updated_at = CURRENT_TIMESTAMP WHERE id = ?;", (release_id,))

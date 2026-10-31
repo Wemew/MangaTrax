@@ -17,11 +17,37 @@
             </p>
         </div>
         <div class="flex items-center gap-2">
+            <button onclick="toggleBackfill()" id="btn-backfill" class="text-xs px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium flex items-center gap-2 transition-all shadow-sm">
+                <i data-lucide="history" class="w-4 h-4 text-brand-400" id="icon-backfill"></i>
+                <span id="text-backfill">Polite Backfill</span>
+            </button>
             <button onclick="triggerFeedCheck()" class="text-xs px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium flex items-center gap-2 transition-all shadow-sm">
                 <i data-lucide="radio" class="w-4 h-4 text-brand-400" id="icon-feed-check"></i>
                 Check Feeds Now
             </button>
         </div>
+    </div>
+
+    <!-- Active Backfill Progress Banner -->
+    <div id="backfill-progress-banner" class="hidden bg-brand-500/10 border border-brand-500/30 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+            <div class="w-8 h-8 rounded-lg bg-brand-500/20 text-brand-400 flex items-center justify-center animate-spin">
+                <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+            </div>
+            <div>
+                <p class="text-xs font-bold text-white flex items-center gap-2">
+                    <span>Polite Historical Feed Backfill in Progress</span>
+                    <span class="text-[10px] px-2 py-0.5 rounded-full bg-brand-500/20 text-brand-300">Rate Limited &bull; 2s Delay</span>
+                </p>
+                <p class="text-[11px] text-slate-400 mt-0.5" id="backfill-status-text">
+                    Initializing...
+                </p>
+            </div>
+        </div>
+        <button onclick="stopBackfill()" class="text-xs px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 font-semibold flex items-center gap-1.5 transition-all">
+            <i data-lucide="square" class="w-3.5 h-3.5"></i>
+            <span>Stop Backfill</span>
+        </button>
     </div>
 
     <!-- Tab Navigation -->
@@ -329,5 +355,68 @@
             showToast(`Error: ${err}`, 'error');
         }
     }
+
+    let backfillPollTimer = null;
+
+    async function toggleBackfill() {
+        try {
+            const res = await fetch('/api/backfill/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ max_pages: 15, delay: 2.0 })
+            });
+            const data = await res.json();
+            if (data.status === 'started' || data.status === 'in_progress') {
+                showToast('Polite backfill started...', 'info');
+                pollBackfill();
+            } else {
+                showToast(data.message || 'Backfill failed to start', 'error');
+            }
+        } catch (err) {
+            showToast('Error: ' + err, 'error');
+        }
+    }
+
+    async function stopBackfill() {
+        try {
+            await fetch('/api/backfill/stop', { method: 'POST' });
+            showToast('Stopping backfill...', 'info');
+        } catch (err) {
+            showToast('Error: ' + err, 'error');
+        }
+    }
+
+    async function pollBackfill() {
+        if (backfillPollTimer) clearInterval(backfillPollTimer);
+        const banner = document.getElementById('backfill-progress-banner');
+        const statusText = document.getElementById('backfill-status-text');
+
+        backfillPollTimer = setInterval(async () => {
+            try {
+                const res = await fetch('/api/backfill/status');
+                const data = await res.json();
+                if (data.running) {
+                    banner.classList.remove('hidden');
+                    statusText.innerText = data.progress || 'Processing...';
+                } else {
+                    banner.classList.add('hidden');
+                    clearInterval(backfillPollTimer);
+                    backfillPollTimer = null;
+                    if (data.status === 'idle') {
+                        showToast('Backfill completed successfully!', 'success');
+                        setTimeout(() => location.reload(), 1200);
+                    }
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }, 2000);
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+        fetch('/api/backfill/status').then(r => r.json()).then(data => {
+            if (data && data.running) pollBackfill();
+        }).catch(() => {});
+    });
 </script>
 {% endblock %}
