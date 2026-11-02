@@ -1,6 +1,6 @@
 import re
 import unicodedata
-from typing import Optional, List, Dict, Any, Tuple, Iterable, Set, Union
+from typing import Optional, List, Dict, Any, Tuple, Iterable, Set
 from difflib import SequenceMatcher
 
 def normalize_text(text: str) -> str:
@@ -12,6 +12,44 @@ def normalize_text(text: str) -> str:
     replaced = re.sub(r"[-–—:_/\\]+", " ", lowered)
     cleaned = re.sub(r"[^\w\s]", "", replaced)
     return " ".join(cleaned.split())
+
+# ---------------------------------------------------------------------------
+# Canonical dual/alternate-title delimiter (SINGLE source of truth).
+# ---------------------------------------------------------------------------
+# Series titles such as "Hataraku Maou-sama! | The Devil is a Part-Timer!" or
+# "Sousou no Frieren / Frieren: Beyond Journey's End" carry several alternate
+# spellings separated by "|", "/", en/em dashes, " - ", "//" or ";".  Modules
+# that need candidate spellings must call split_series_candidate_parts() rather
+# than re-declaring this character class: the pattern used to be copy-pasted in
+# the database, scheduler, Calibre scanner/matcher, parser and metadata clients.
+#
+# ``{extra}`` is appended to the delimiter character class, and ``{alt}`` adds
+# the optional "//" and ";" separators that some (but not every) caller wants.
+_CANDIDATE_DELIMITER_TEMPLATE = r"\s*[|/–—{extra}]\s*|\s+-\s+{alt}"
+_CANDIDATE_ALT_SEPARATORS = r"|//|;"
+
+
+def split_series_candidate_parts(
+    text: str,
+    extra_delimiters: str = "",
+    alt_separators: bool = True,
+) -> List[str]:
+    """Split a series title into its candidate alternate-title parts.
+
+    Returns the non-empty, whitespace-stripped parts.  A title without any
+    delimiter yields a single-element list (the whole input); an empty/None
+    input yields ``[]``.
+
+    The exact delimiter set is defined once above and must not be duplicated
+    elsewhere in the codebase.
+    """
+    if not text:
+        return []
+    pattern = _CANDIDATE_DELIMITER_TEMPLATE.format(
+        extra=re.escape(extra_delimiters) if extra_delimiters else "",
+        alt=_CANDIDATE_ALT_SEPARATORS if alt_separators else "",
+    )
+    return [part.strip() for part in re.split(pattern, text) if part.strip()]
 
 def string_similarity(a: str, b: str) -> float:
     norm_a = normalize_text(a)
@@ -493,7 +531,7 @@ def match_manga_series_in_calibre(extracted_series: str, calibre_series_list: li
 
     # Extract candidate parts from delimiters (|, /, //, -, ;)
     candidate_parts = [extracted_series]
-    parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", extracted_series) if p.strip()]
+    parts = split_series_candidate_parts(extracted_series)
     if len(parts) > 1:
         for p in parts:
             if p not in candidate_parts:

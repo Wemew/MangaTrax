@@ -8,7 +8,7 @@ Embedded-interpreter compatibility
 ----------------------------------
 The application itself ships with Pydantic v2 (``backend/requirements.txt``).
 The repository's test suites, however, execute inside Calibre's embedded
-Python interpreter (``calibre-debug.exe -e``) where *pydantic, fastapi, httpx
+Python interpreter (``calibre-debug.exe -e``) where *pydantic, fastapi
 and jinja2 are not installed* - the E2E harness already shims FastAPI for the
 same reason.  To keep ``app.main`` importable in that interpreter, this module
 falls back to a small, deliberately limited validation layer when Pydantic is
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 import typing
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from app import security
 

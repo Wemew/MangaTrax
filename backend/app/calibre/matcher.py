@@ -1,7 +1,6 @@
 import json
-import re
 from typing import List, Dict, Any, Optional, Set
-from app.parser import normalize_text, clean_manga_title, match_manga_series_in_calibre
+from app.parser import normalize_text, match_manga_series_in_calibre, split_series_candidate_parts
 
 class MangaCalibreMatcher:
     def __init__(self, calibre_series: List[Dict[str, Any]], volumes_map: Dict[str, Set[float]], metadata_cache: Optional[Dict[str, Dict[str, Any]]] = None):
@@ -57,7 +56,7 @@ class MangaCalibreMatcher:
         s_name = matched_series.get("series_name") or matched_series.get("name") or ""
         if s_name:
             keys_to_try.extend([s_name.lower(), normalize_text(s_name)])
-            parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", s_name) if p.strip()]
+            parts = split_series_candidate_parts(s_name)
             if len(parts) > 1:
                 for p in parts:
                     keys_to_try.extend([p.lower(), normalize_text(p)])
@@ -67,7 +66,7 @@ class MangaCalibreMatcher:
             for alt in alt_names:
                 if alt:
                     keys_to_try.extend([alt.lower(), normalize_text(alt)])
-                    alt_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", alt) if p.strip()]
+                    alt_parts = split_series_candidate_parts(alt)
                     if len(alt_parts) > 1:
                         for ap in alt_parts:
                             keys_to_try.extend([ap.lower(), normalize_text(ap)])

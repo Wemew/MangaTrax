@@ -142,9 +142,147 @@ def test_outbound_boundaries_are_guarded():
     print("    [PASSED] cover fetch, webhook dispatch and feed fetches are SSRF-guarded.")
 
 
-# ---------------------------------------------------------------------------
-# 2. Stored XSS: website_url validation + safe_url filter
-# ---------------------------------------------------------------------------
+def test_cover_redirect_hop_ssrf_validation():
+    """Every redirect hop of a cover download must be SSRF-validated before it is fetched.
+
+    The cover cache used to rely on ``httpx`` with ``follow_redirects=False`` and a
+    manual redirect loop; the dependency was removed in M4 in favour of
+    ``urllib.request`` (handled manually, also without auto-following).  This test
+    pins the security-critical behaviour of that loop so the stdlib transport can
+    never silently start following redirects or drop a hop check.
+    """
+    print("--> Testing cover download redirect-hop SSRF validation (stdlib transport)...")
+    import asyncio
+    import urllib.error
+
+    from app import covers
+    from app.covers import CoverCache
+
+    tmpdir = tempfile.mkdtemp(prefix="mangatrax_cover_redirect_")
+    try:
+        cache = CoverCache(tmpdir)
+        png_body = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+        class _FakeImageResponse:
+            status = 200
+
+            def __init__(self, body, content_length=None, send_length=True):
+                self._body = body
+                self._pos = 0
+                self.headers = {}
+                if send_length:
+                    self.headers["Content-Length"] = str(len(body) if content_length is None else content_length)
+
+            def read(self, size=-1):
+                if size is None or size < 0:
+                    chunk, self._pos = self._body[self._pos:], len(self._body)
+                    return chunk
+                chunk = self._body[self._pos:self._pos + size]
+                self._pos += len(chunk)
+                return chunk
+
+            def close(self):
+                pass
+
+            def getcode(self):
+                return self.status
+
+        def _redirect(url, location, code=302):
+            return urllib.error.HTTPError(url, code, "Found", {"Location": location}, None)
+
+        # 1. A redirect to an internal/metadata address is never fetched.
+        fetched = []
+        timeouts = []
+
+        def _unsafe_hop(req, timeout):
+            fetched.append(req.full_url)
+            timeouts.append(timeout)
+            raise _redirect(req.full_url, "http://169.254.169.254/latest/meta-data/")
+
+        with _patch_dns(["93.184.216.34"]), patch.object(covers, "_urlopen", side_effect=_unsafe_hop):
+            assert cache.cache_sync("https://cdn.example.com/start.jpg") is None
+        assert fetched == ["https://cdn.example.com/start.jpg"], fetched
+        assert os.listdir(cache.covers_dir) == [], os.listdir(cache.covers_dir)
+
+        # 2. A legitimate redirect chain is followed hop by hop and cached.
+        fetched.clear()
+        timeouts.clear()
+
+        def _safe_chain(req, timeout):
+            fetched.append(req.full_url)
+            timeouts.append(timeout)
+            if req.full_url == "https://cdn.example.com/start.jpg":
+                raise _redirect(req.full_url, "/final.png", code=301)
+            if req.full_url == "https://cdn.example.com/final.png":
+                return _FakeImageResponse(png_body)
+            raise AssertionError(f"unexpected hop fetched: {req.full_url}")
+
+        with _patch_dns(["93.184.216.34"]), patch.object(covers, "_urlopen", side_effect=_safe_chain):
+            cached_path = cache.cache_sync("https://cdn.example.com/start.jpg")
+        assert cached_path and os.path.isfile(cached_path), cached_path
+        assert fetched == [
+            "https://cdn.example.com/start.jpg",
+            "https://cdn.example.com/final.png",
+        ], fetched
+        # Explicit timeout on every hop (the httpx timeout this replaced).
+        assert timeouts == [covers.DOWNLOAD_TIMEOUT_SECONDS] * 2, timeouts
+
+        # 3. The async API delegates to the same validated download routine.
+        import shutil
+        shutil.rmtree(cache.covers_dir)
+        os.makedirs(cache.covers_dir)
+
+        def _ok_hop(req, timeout):
+            fetched.append(req.full_url)
+            return _FakeImageResponse(png_body)
+
+        with _patch_dns(["93.184.216.34"]), patch.object(covers, "_urlopen", side_effect=_ok_hop):
+            async_path = asyncio.run(cache.get_or_download("https://cdn.example.com/async.png"))
+        assert async_path and os.path.isfile(async_path), async_path
+
+        # 4. Redirect loops are capped (MAX_REDIRECTS hops, then give up).
+        loop_fetches = []
+
+        def _loop_hop(req, timeout):
+            loop_fetches.append(req.full_url)
+            raise _redirect(req.full_url, req.full_url)
+
+        with _patch_dns(["93.184.216.34"]), patch.object(covers, "_urlopen", side_effect=_loop_hop):
+            assert cache.cache_sync("https://cdn.example.com/loop.jpg") is None
+        assert len(loop_fetches) == covers.MAX_REDIRECTS + 1, loop_fetches
+
+        # 5. Streamed size cap still aborts the download (no Content-Length header, so
+        #    the cap must be enforced while reading the body) and cleans the temp file.
+        def _huge_hop(req, timeout):
+            return _FakeImageResponse(png_body + b"\x00" * 4096, send_length=False)
+
+        with _patch_dns(["93.184.216.34"]), \
+                patch.object(covers, "MAX_COVER_BYTES", 1024), \
+                patch.object(covers, "_urlopen", side_effect=_huge_hop):
+            assert cache.cache_sync("https://cdn.example.com/huge.jpg") is None
+        assert os.listdir(cache.covers_dir) == [], os.listdir(cache.covers_dir)
+
+        # 6. Oversized Content-Length is rejected before streaming.
+        def _oversized_hop(req, timeout):
+            return _FakeImageResponse(png_body, content_length=10 * 1024 * 1024)
+
+        with _patch_dns(["93.184.216.34"]), patch.object(covers, "_urlopen", side_effect=_oversized_hop):
+            assert cache.cache_sync("https://cdn.example.com/oversized.jpg") is None
+
+        # 7. Non-image payloads are still rejected by magic-byte validation.
+        def _html_hop(req, timeout):
+            return _FakeImageResponse(b"<html>not an image</html>")
+
+        with _patch_dns(["93.184.216.34"]), patch.object(covers, "_urlopen", side_effect=_html_hop):
+            assert cache.cache_sync("https://cdn.example.com/page.html") is None
+        assert os.listdir(cache.covers_dir) == [], os.listdir(cache.covers_dir)
+
+        print("    [PASSED] cover redirect hops are SSRF-validated, capped and size-limited.")
+    finally:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def test_stored_xss_defenses():
     print("--> Testing stored-XSS defenses (href schemes + safe_url filter)...")
     safe = [

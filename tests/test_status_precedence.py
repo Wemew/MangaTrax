@@ -530,6 +530,49 @@ def test_unblacklist_lifts_veto_to_recomputable_status():
         env.close()
 
 
+def test_feed_poll_summary_counts_reflect_stored_status():
+    """check_all_feeds() must report what actually happened, not what the matcher computed.
+
+    Regression (previously deferred): a release stored as IGNORED/BLACKLISTED was
+    still counted in the poll's ``requested`` figure because the summary used the
+    matcher-computed REQUESTED.  No download can fire for a vetoed release, so the
+    count has to reflect the status the precedence model actually persisted.
+    """
+    print("--> Testing feed-poll summary counts reflect the stored (post-precedence) status...")
+    env = _Env("mangatrax_prec_counts_", {"Dandadan": [1.0]})
+    try:
+        # Vol. 02 is missing from Calibre -> the matcher computes REQUESTED.
+        env.set_releases([_release("guid-cnt", "[Group] Dandadan Vol. 02 [Digital]",
+                                   "Dandadan", volumes=[2.0], start=2.0, end=2.0)])
+        first = env.poll()
+        rel_id = _only_release_id(env)
+        _check(first["requested"] == 1, f"expected the genuinely requested release to count, got {first}")
+        _check(first["sent_to_downloader"] == 1, f"expected an auto-download, got {first}")
+
+        for veto in ("IGNORED", "BLACKLISTED"):
+            # Explicit user action (POST /ignore, POST /blacklist) sets the veto.
+            env.db.update_release_status(rel_id, veto)
+            res = env.poll()
+            _check(_status(env, rel_id) == veto,
+                   f"{veto} was clobbered by the feed poll: {_status(env, rel_id)}")
+            _check(res["requested"] == 0,
+                   f"a stored {veto} release must not be reported as requested, got {res}")
+            _check(res["sent_to_downloader"] == 0,
+                   f"a stored {veto} release must never trigger a download, got {res}")
+            _check(res["releases_found"] == 1,
+                   f"the release is still found and should be counted as such, got {res}")
+
+        # A release the user explicitly re-requests is counted again.
+        env.db.update_release_status(rel_id, "REQUESTED")
+        res_req = env.poll()
+        _check(_status(env, rel_id) == "REQUESTED")
+        _check(res_req["requested"] == 1,
+               f"a genuinely REQUESTED release must be counted, got {res_req}")
+        print("    [PASSED] poll summary counts match the persisted status for IGNORED/BLACKLISTED.")
+    finally:
+        env.close()
+
+
 # ===========================================================================
 # Runner
 # ===========================================================================
@@ -549,6 +592,7 @@ if __name__ == "__main__":
         test_acceptance_7_blank_incoming_never_clears,
         test_expand_unresolved_complete_releases_preserves_sticky,
         test_unblacklist_lifts_veto_to_recomputable_status,
+        test_feed_poll_summary_counts_reflect_stored_status,
     ]
     failed = 0
     for test in tests:

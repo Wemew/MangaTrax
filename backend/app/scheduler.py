@@ -4,7 +4,6 @@ import threading
 import re
 import json
 from typing import Optional, Dict, Any, List, Set
-from datetime import datetime
 
 from app.database import (
     MangaDatabase,
@@ -28,6 +27,7 @@ from app.parser import (
     normalize_text,
     clean_manga_title,
     match_manga_series_in_calibre,
+    split_series_candidate_parts,
 )
 from app.notifier.webhook import NotificationService
 
@@ -123,7 +123,7 @@ class MangaScheduler:
         if not raw:
             return variants
         _add(raw)
-        parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", raw) if p.strip()]
+        parts = split_series_candidate_parts(raw)
         if len(parts) > 1:
             for part in parts:
                 _add(part)
@@ -140,7 +140,7 @@ class MangaScheduler:
         scanner = CalibreMangaScanner(calibre_path)
         if scanner.is_available():
             series_list = scanner.get_all_series()
-            volumes_map = scanner.get_all_volumes_per_series()
+            volumes_map = scanner.get_series_volumes_map()
         else:
             # Calibre not mounted here: the DB still knows the library names from the
             # last successful sync (plus user-typed tracked series).
@@ -445,7 +445,7 @@ class MangaScheduler:
 
             try:
                 series_list = scanner.get_all_series()
-                volumes_map = scanner.get_all_volumes_per_series()
+                volumes_map = scanner.get_series_volumes_map()
                 synced_count = self.db.sync_calibre_series(series_list, volumes_map=volumes_map)
 
                 # Build matcher
@@ -528,7 +528,7 @@ class MangaScheduler:
         calibre_path = self.db.get_setting("calibre_path", "/calibre")
         scanner = CalibreMangaScanner(calibre_path)
         series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
-        volumes_map = scanner.get_all_volumes_per_series() if scanner.is_available() else {}
+        volumes_map = scanner.get_series_volumes_map() if scanner.is_available() else {}
         meta_cache = self.db.get_all_manga_metadata_cache()
         matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
 
@@ -654,8 +654,14 @@ class MangaScheduler:
                         and prev_dl_status == "IDLE"
                     )
 
+                    # What the database ACTUALLY holds after the precedence model ran.
+                    # The matcher may compute REQUESTED while a stored user veto
+                    # (IGNORED/BLACKLISTED) or IN_CALIBRE wins; no download can fire
+                    # in that case, so the poll summary must not claim it as requested.
+                    effective_status = resolve_status(prev_status, status)
+
                     # Auto-download trigger for REQUESTED releases
-                    if status == "REQUESTED":
+                    if effective_status == "REQUESTED":
                         feed_requested += 1
                         total_requested += 1
 
@@ -900,7 +906,7 @@ class MangaScheduler:
         candidates = []
 
         # 1. Delimiters in the provided series name (| , / , // , - , — , ;)
-        parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", clean_name) if p.strip()]
+        parts = split_series_candidate_parts(clean_name)
         if len(parts) > 1:
             candidates.extend(parts)
 
@@ -930,7 +936,7 @@ class MangaScheduler:
                     for field in [row["series_name"], row["title"]]:
                         if not field:
                             continue
-                        sub_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", field) if p.strip()]
+                        sub_parts = split_series_candidate_parts(field)
                         if len(sub_parts) > 1:
                             candidates.extend(sub_parts)
         except Exception as e:
@@ -1003,7 +1009,7 @@ class MangaScheduler:
         calibre_path = self.db.get_setting("calibre_path", "/calibre")
         scanner = CalibreMangaScanner(calibre_path)
         series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
-        volumes_map = scanner.get_all_volumes_per_series() if scanner.is_available() else {}
+        volumes_map = scanner.get_series_volumes_map() if scanner.is_available() else {}
         meta_cache = self.db.get_all_manga_metadata_cache()
         matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
 
@@ -1153,7 +1159,7 @@ class MangaScheduler:
             calibre_path = self.db.get_setting("calibre_path", "/calibre")
             scanner = CalibreMangaScanner(calibre_path)
             series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
-            volumes_map = scanner.get_all_volumes_per_series() if scanner.is_available() else {}
+            volumes_map = scanner.get_series_volumes_map() if scanner.is_available() else {}
             meta_cache = self.db.get_all_manga_metadata_cache()
             matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
 
@@ -1329,7 +1335,7 @@ class MangaScheduler:
             calibre_path = self.db.get_setting("calibre_path", "/calibre")
             scanner = CalibreMangaScanner(calibre_path)
             series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
-            volumes_map = scanner.get_all_volumes_per_series() if scanner.is_available() else {}
+            volumes_map = scanner.get_series_volumes_map() if scanner.is_available() else {}
             meta_cache = self.db.get_all_manga_metadata_cache()
             matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
 
@@ -1435,6 +1441,14 @@ class MangaScheduler:
             self.expand_unresolved_complete_releases()
         except Exception as e:
             logger.debug(f"Initial complete releases expansion error: {e}")
+        # Persist the volume-state reconciliation the grouped releases view computes
+        # in memory (GETs are read-only, so maintenance owns the writes).
+        try:
+            reconciled = self.db.reconcile_release_volume_state()
+            if reconciled:
+                logger.info(f"Reconciled volume state for {reconciled} release(s) on startup.")
+        except Exception as e:
+            logger.debug(f"Initial release volume reconciliation error: {e}")
 
         last_feed_check = 0
         last_tag_check = 0
@@ -1461,6 +1475,10 @@ class MangaScheduler:
                 # Check complete series volume expansion every 5 minutes
                 if now - last_complete_check >= 300:
                     self.expand_unresolved_complete_releases()
+                    try:
+                        self.db.reconcile_release_volume_state()
+                    except Exception as e:
+                        logger.debug(f"Release volume reconciliation error: {e}")
                     last_complete_check = time.time()
 
                 # Auto-tag staging every 5 minutes if enabled

@@ -245,7 +245,8 @@ def test_dynamic_expansion_of_unexpanded_releases():
         "volumes": []
     })
 
-    # Query grouped releases
+    # Query grouped releases.  This is a READ path: it expands in memory but must not
+    # write to the database any more (M4 read/write split).
     groups = db.get_releases_grouped_by_series()
     assert len(groups) == 1
     g = groups[0]
@@ -255,11 +256,21 @@ def test_dynamic_expansion_of_unexpanded_releases():
     assert g["all_volumes"][0] == 1.0
     assert g["all_volumes"][-1] == 24.0
 
-    # Ensure it was persisted to DB
-    persisted = db.get_release_by_id(g["releases"][0]["id"])
+    # GET is side-effect free: the stored row is still unexpanded.
+    release_id = g["releases"][0]["id"]
+    assert db.get_release_by_id(release_id)["volumes"] == [], \
+        "get_releases_grouped_by_series() must not persist volume expansion during a GET"
+
+    # The explicit maintenance/reconcile entry point persists the same computed state.
+    reconciled = db.reconcile_release_volume_state()
+    assert reconciled >= 1, f"expected at least one reconciled release, got {reconciled}"
+    persisted = db.get_release_by_id(release_id)
     assert len(persisted["volumes"]) == 24
     assert persisted["volume_start"] == 1.0
     assert persisted["volume_end"] == 24.0
+
+    # ...and is idempotent: running it again writes nothing.
+    assert db.reconcile_release_volume_state() == 0
 
     del db
     gc.collect()
@@ -267,7 +278,7 @@ def test_dynamic_expansion_of_unexpanded_releases():
         os.unlink(tf.name)
     except Exception:
         pass
-    print(" [PASSED] Dynamic expansion and DB persistence of legacy unexpanded complete releases verified.")
+    print(" [PASSED] Read-only GET expansion + explicit reconcile persistence/idempotency verified.")
 
 def test_fast_init_db_and_background_scheduler_expansion():
     import time
@@ -403,7 +414,7 @@ def test_reconciliation_23_of_24_volumes():
     conn.close()
 
     scanner = CalibreMangaScanner(calibre_tmp)
-    volumes_map = scanner.get_all_volumes_per_series()
+    volumes_map = scanner.get_series_volumes_map()
 
     # Verify volumes_map contains all 23 volumes under multiple lookup keys
     assert "the devil is a part-timer!" in volumes_map
@@ -534,6 +545,73 @@ def test_exact_match_priority_over_substring():
 
     print(" [PASSED] Calibre matching exact candidate part priority over false substring verified.")
 
+def test_series_candidate_splitter_is_canonical():
+    """Characterization test for the single canonical dual-title helper.
+
+    The delimiter character class used to be copy-pasted across the parser,
+    database, scheduler, Calibre scanner/matcher and metadata clients.  This test
+    pins the exact observable splitting behaviour of the one helper and proves no
+    module carries a private copy of the regex any more.
+    """
+    from app import parser as parser_module
+
+    split = parser_module.split_series_candidate_parts
+
+    cases = [
+        # Dual titles with pipe / slash / "//" / semicolon
+        ("Chainsaw Man | チェンソーマン", ["Chainsaw Man", "チェンソーマン"]),
+        ("Sousou no Frieren / Frieren: Beyond Journey's End",
+         ["Sousou no Frieren", "Frieren: Beyond Journey's End"]),
+        ("Hataraku Maou-sama! | The Devil is a Part-Timer!",
+         ["Hataraku Maou-sama!", "The Devil is a Part-Timer!"]),
+        ("One Piece // Two Piece; Three Piece", ["One Piece", "Two Piece", "Three Piece"]),
+        # A spaced hyphen is a real subtitle delimiter...
+        ("Frieren - Beyond Journey's End", ["Frieren", "Beyond Journey's End"]),
+        # ...and en/em dashes work with or without surrounding spaces.
+        ("One Piece – Romance Dawn", ["One Piece", "Romance Dawn"]),
+        ("One Piece — Romance Dawn", ["One Piece", "Romance Dawn"]),
+        # Titles that must NOT be split (numbers, unspaced hyphens, colons).
+        ("Mob Psycho 100", ["Mob Psycho 100"]),
+        ("20th Century Boys", ["20th Century Boys"]),
+        ("Kaguya-sama: Love is War", ["Kaguya-sama: Love is War"]),
+        ("Aharen-san wa Hakarenai", ["Aharen-san wa Hakarenai"]),
+        ("Frieren: Beyond Journey's End", ["Frieren: Beyond Journey's End"]),
+        ("", []),
+        (None, []),
+        ("   ", []),
+    ]
+    for text, expected in cases:
+        assert split(text) == expected, f"split({text!r}) == {split(text)!r}, expected {expected!r}"
+
+    # Colon is opt-in (metadata cache lookups split "Romaji: Subtitle"; the default
+    # keeps it so display titles are not truncated).
+    assert split("Frieren: Beyond Journey's End", extra_delimiters=":") == ["Frieren", "Beyond Journey's End"]
+    # ";" is opt-out for the call sites that historically did not split it.  Note
+    # that "//" always splits because "/" is itself a delimiter character; the
+    # explicit "//" branch of the pattern is a readability alias for that.
+    assert split("A; B", alt_separators=False) == ["A; B"]
+    assert split("A // B; C", alt_separators=False) == ["A", "B; C"]
+    assert split("A | B", alt_separators=False) == ["A", "B"]
+    assert split("A: B | C", extra_delimiters=":", alt_separators=False) == ["A", "B", "C"]
+
+    # ONE definition: no backend module may carry its own copy of the delimiter class.
+    backend_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend")
+    offenders = []
+    for dirpath, _dirnames, filenames in os.walk(backend_dir):
+        for filename in filenames:
+            if not filename.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, filename)
+            with open(path, encoding="utf-8") as handle:
+                if "[|/–—]" in handle.read():
+                    offenders.append(os.path.relpath(path, backend_dir))
+    assert offenders == [], f"duplicate dual-title delimiter regex still present in: {offenders}"
+    with open(parser_module.__file__, encoding="utf-8") as handle:
+        parser_source = handle.read()
+    assert "_CANDIDATE_DELIMITER_TEMPLATE" in parser_source
+
+    print(" [PASSED] canonical series-candidate delimiter helper and characterization corpus verified.")
+
 if __name__ == "__main__":
     print("\n==================================================")
     print("Running MangaTrax Complete Series & Dual Title Suite")
@@ -549,6 +627,7 @@ if __name__ == "__main__":
     test_reconciliation_23_of_24_volumes()
     test_anilist_rate_limiter()
     test_dual_title_delimiter_preservation()
+    test_series_candidate_splitter_is_canonical()
     test_exact_match_priority_over_substring()
     print("==================================================")
     print("ALL COMPLETE SERIES AND DUAL TITLE TESTS PASSED!")

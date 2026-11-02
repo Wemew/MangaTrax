@@ -59,7 +59,7 @@ class TestTier3CrossFeature(unittest.TestCase):
             parsed = extract_manga_bundle_and_volumes(raw_title)
             parsed["title"] = raw_title
             scanner = CalibreMangaScanner(ctx.calibre_dir)
-            matcher = MangaCalibreMatcher(scanner.get_all_series(), scanner.get_all_volumes_per_series())
+            matcher = MangaCalibreMatcher(scanner.get_all_series(), scanner.get_series_volumes_map())
             match_res = matcher.check_release(parsed)
 
             self.assertEqual(match_res["status"], "REQUESTED")
@@ -114,7 +114,7 @@ class TestTier3CrossFeature(unittest.TestCase):
             parsed = extract_manga_bundle_and_volumes(raw_title)
             parsed["title"] = raw_title
             scanner = CalibreMangaScanner(ctx.calibre_dir)
-            matcher = MangaCalibreMatcher(scanner.get_all_series(), scanner.get_all_volumes_per_series())
+            matcher = MangaCalibreMatcher(scanner.get_all_series(), scanner.get_series_volumes_map())
             match1 = matcher.check_release(parsed)
             self.assertEqual(match1["status"], "REQUESTED")
 
@@ -258,7 +258,7 @@ class TestTier3CrossFeature(unittest.TestCase):
             scanner = CalibreMangaScanner(ctx.calibre_dir)
             matcher = MangaCalibreMatcher(
                 scanner.get_all_series(),
-                scanner.get_all_volumes_per_series(),
+                scanner.get_series_volumes_map(),
                 ctx.db.get_all_manga_metadata_cache()
             )
 
@@ -279,7 +279,7 @@ class TestTier3CrossFeature(unittest.TestCase):
             ctx.scheduler.sync_calibre_library()
 
             scanner = CalibreMangaScanner(ctx.calibre_dir)
-            matcher = MangaCalibreMatcher(scanner.get_all_series(), scanner.get_all_volumes_per_series())
+            matcher = MangaCalibreMatcher(scanner.get_all_series(), scanner.get_series_volumes_map())
 
             # Batch release Vol 1-4
             batch_rel = extract_manga_bundle_and_volumes("Bleach Vol. 01-04 [Digital]")

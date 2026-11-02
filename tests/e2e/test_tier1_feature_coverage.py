@@ -424,7 +424,7 @@ class TestTier1FeatureCoverage(unittest.TestCase):
             ])
             scanner = CalibreMangaScanner(ctx.calibre_dir)
             series_list = scanner.get_all_series()
-            volumes_map = scanner.get_all_volumes_per_series()
+            volumes_map = scanner.get_series_volumes_map()
             matcher = MangaCalibreMatcher(series_list, volumes_map)
 
             # Ingest Vol 1-3 release: missing is [3.0]
@@ -444,7 +444,7 @@ class TestTier1FeatureCoverage(unittest.TestCase):
                 {"name": "Frieren: Beyond Journey's End", "author": "Kanehito Yamada", "volumes": [1.0]}
             ])
             scanner = CalibreMangaScanner(ctx.calibre_dir)
-            matcher = MangaCalibreMatcher(scanner.get_all_series(), scanner.get_all_volumes_per_series())
+            matcher = MangaCalibreMatcher(scanner.get_all_series(), scanner.get_series_volumes_map())
 
             # Release with dual title delimiter
             check = matcher.check_release({

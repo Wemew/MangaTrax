@@ -8,7 +8,7 @@ Comprehensive regression test suite for Milestone 1 defect remediations:
 - Feature 10: Unbounded Parser Loop Guard & Algorithmic DoS Defense (parser.py:64, 395)
 - Feature 11: Calibre Sync Startup Deduplication & Non-Blocking Concurrency (scheduler.py, main.py)
 - Feature 12: Polite Crawl Delay Respecting Start Page Offset (nyaa.py:252)
-- Feature 13: HTML Scraper Robustness & Urllib Fallback (html_scraper.py:5-8, 47-60)
+- Feature 13: HTML Scraper Robustness & Network-Failure Containment (html_scraper.py:39-52)
 """
 
 import os
@@ -36,7 +36,6 @@ from app.scheduler import MangaScheduler
 from app.parser import extract_manga_bundle_and_volumes, MAX_BUNDLE_SPAN
 from app.providers.base import ReleaseItem
 from app.providers.nyaa import NyaaMangaProvider
-import app.providers.html_scraper as hs_module
 from app.providers.html_scraper import HtmlScraperProvider
 from tests.mock_calibre_manga import create_mock_calibre_manga_db
 
@@ -380,11 +379,9 @@ def test_feature_9_cache_invalidation_operations():
         db.get_releases_grouped_by_series()
         _check(len(db._grouped_cache) > 0)
 
-        # Test legacy key repair invalidation (normalize_series_titles_to_english is
-        # now a deprecated alias of the guarded P3a re-key repair).
-        mock_anilist = MagicMock()
-        mock_anilist.resolve_manga_series.return_value = {}
-        db.normalize_series_titles_to_english(mock_anilist)
+        # Test legacy key repair invalidation (the guarded P3a re-key repair is the
+        # only maintenance entry point; the old normalise-to-English wrapper is gone).
+        db.repair_rekeyed_series_names()
         _check(db._grouped_cache == {}, "legacy key repair failed to invalidate _grouped_cache")
 
         print("    [PASSED] Feature 9: Grouped cache invalidations across all 4 operations verified.")
@@ -582,27 +579,24 @@ def test_feature_13_html_scraper_robustness():
         def __exit__(self, *args):
             pass
 
-    # Test 1: Execute when httpx is None (simulating Calibre Python runtime)
-    orig_httpx = hs_module.httpx
-    try:
-        hs_module.httpx = None
-        provider = HtmlScraperProvider(name="Test Scraper", url="https://manga-scrapes.internal/releases")
-        with patch("urllib.request.urlopen", return_value=DummyResponse()):
-            releases = provider.fetch_releases()
-            _check(len(releases) == 1)
-            _check(releases[0].series_name == "Berserk")
-            _check(releases[0].volume_start == 41.0)
-    finally:
-        hs_module.httpx = orig_httpx
+    # Test 1: The scraper now has ONE transport path (stdlib urllib.request); the
+    # former optional httpx branch was removed with the dependency, so fetch_releases
+    # must parse a real page through that path.
+    provider = HtmlScraperProvider(name="Test Scraper", url="https://manga-scrapes.internal/releases")
+    with patch("urllib.request.urlopen", return_value=DummyResponse()):
+        releases = provider.fetch_releases()
+        _check(len(releases) == 1)
+        _check(releases[0].series_name == "Berserk")
+        _check(releases[0].volume_start == 41.0)
 
-    # Test 2: Network failure resilience (both httpx and urllib fail)
+    # Test 2: Network failure resilience (urllib transport fails)
     provider_fail = HtmlScraperProvider(name="Failing Scraper", url="https://unreachable.invalid/releases")
     with patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
         # Must NOT raise exception; must return empty list safely
         res_fail = provider_fail.fetch_releases()
         _check(res_fail == [])
 
-    print("    [PASSED] Feature 13: HTML scraper is resilient to missing httpx and network failures.")
+    print("    [PASSED] Feature 13: HTML scraper is resilient to network failures.")
 
 
 # ===========================================================================

@@ -3,7 +3,6 @@ import sys
 import unittest
 import json
 import zipfile
-import re
 import xml.etree.ElementTree as ET
 from unittest.mock import MagicMock, patch
 
@@ -27,7 +26,7 @@ from e2e.harness import (
     QBitClient,
     main_app
 )
-from app.parser import is_chapter_only, is_light_novel
+from app.parser import is_chapter_only, is_light_novel, split_series_candidate_parts
 
 
 class TestTier4RealWorldScenarios(unittest.TestCase):
@@ -112,7 +111,7 @@ class TestTier4RealWorldScenarios(unittest.TestCase):
             # Step 6: Batch 1 (Vol 1-7) has only Vol 7 missing; selective download filter applied
             matcher = MangaCalibreMatcher(
                 CalibreMangaScanner(ctx.calibre_dir).get_all_series(),
-                CalibreMangaScanner(ctx.calibre_dir).get_all_volumes_per_series()
+                CalibreMangaScanner(ctx.calibre_dir).get_series_volumes_map()
             )
             check_b1 = matcher.check_release(p_b1)
             self.assertEqual(check_b1["missing_volumes"], [7.0])
@@ -212,7 +211,7 @@ class TestTier4RealWorldScenarios(unittest.TestCase):
             scanner = CalibreMangaScanner(ctx.calibre_dir)
             matcher = MangaCalibreMatcher(
                 scanner.get_all_series(),
-                scanner.get_all_volumes_per_series(),
+                scanner.get_series_volumes_map(),
                 ctx.db.get_all_manga_metadata_cache()
             )
 
@@ -230,7 +229,7 @@ class TestTier4RealWorldScenarios(unittest.TestCase):
                 # Resolve canonical title from metadata cache across candidate parts
                 alt_names = []
                 if parsed.get("series_name"):
-                    dual_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+", parsed["series_name"]) if p.strip()]
+                    dual_parts = split_series_candidate_parts(parsed["series_name"], alt_separators=False)
                     if len(dual_parts) > 1:
                         alt_names.extend(dual_parts)
 

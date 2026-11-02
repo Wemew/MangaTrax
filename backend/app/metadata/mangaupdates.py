@@ -6,6 +6,8 @@ import urllib.request
 import urllib.error
 from typing import Dict, Any, Optional
 
+from app.parser import split_series_candidate_parts
+
 logger = logging.getLogger("mangatrax.metadata.mangaupdates")
 
 MANGAUPDATES_SEARCH_API = "https://api.mangaupdates.com/v1/series/search"
@@ -110,7 +112,7 @@ class MangaUpdatesService:
 
         # If not found or missing total_volumes, try candidate parts from delimiters
         if not info or not info.get("total_volumes"):
-            raw_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;|:", clean_name) if p.strip()]
+            raw_parts = split_series_candidate_parts(clean_name, extra_delimiters=":")
             if len(raw_parts) > 1:
                 for p in raw_parts:
                     if len(p) >= 3 and p.lower() != clean_name.lower():

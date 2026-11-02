@@ -8,6 +8,8 @@ import urllib.request
 import urllib.error
 from typing import Dict, Any, Optional
 
+from app.parser import split_series_candidate_parts
+
 logger = logging.getLogger("mangatrax.metadata.anilist")
 
 ANILIST_GRAPHQL_ENDPOINT = "https://graphql.anilist.co"
@@ -161,7 +163,7 @@ class AniListMetadataService:
                 if cached and cached.get("source") not in ("fallback", "cleaned") and cached.get("total_volumes"):
                     return cached
                 # Check candidate parts from delimiters in cache
-                raw_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;|:", raw_series_name) if p.strip()]
+                raw_parts = split_series_candidate_parts(raw_series_name, extra_delimiters=":")
                 if len(raw_parts) > 1:
                     for p in raw_parts:
                         p_clean = clean_query_term(p)
@@ -177,7 +179,7 @@ class AniListMetadataService:
 
         # 3. If AniList didn't match or returned no volume count with full string, try candidate parts from delimiters
         if not metadata or not metadata.get("total_volumes"):
-            raw_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;|:", raw_series_name) if p.strip()]
+            raw_parts = split_series_candidate_parts(raw_series_name, extra_delimiters=":")
             if len(raw_parts) > 1:
                 for p in raw_parts:
                     p_clean = clean_query_term(p)

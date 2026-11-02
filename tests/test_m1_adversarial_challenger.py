@@ -5,7 +5,7 @@ Adversarial stress-testing and empirical verification suite for Milestone 1 defe
 - Database status state machine stress testing (manual IGNORED persistence, valid/invalid transitions, concurrency)
 - get_release_by_id (>1000 ID, missing_volumes deserialization, null fallbacks)
 - Scheduler transition detection and auto-download deduplication
-- Nyaa crawl delay start offsets and HTML scraper urllib fallback resilience
+- Nyaa crawl delay start offsets and HTML scraper stdlib-transport resilience
 """
 
 import os
@@ -37,7 +37,6 @@ from app.database import MangaDatabase
 from app.covers import CoverCache
 from app.scheduler import MangaScheduler
 from app.providers.nyaa import NyaaMangaProvider
-import app.providers.html_scraper as hs_module
 from app.providers.html_scraper import HtmlScraperProvider
 from app.providers.base import ReleaseItem
 
@@ -702,48 +701,43 @@ def test_nyaa_crawl_delay_and_html_scraper_fallback():
     d3 = simulate_delays(10, 1)
     _check(d3 == [], f"Expected no delays for single page crawl, got {d3}")
 
-    # B. HTML Scraper Fallback when httpx is None
-    orig_httpx = hs_module.httpx
-    try:
-        hs_module.httpx = None
-        scraper = HtmlScraperProvider(
-            name="Challenger Scraper",
-            url="https://mock-manga.invalid",
-            config={
-                "item_selector": ".release-item",
-                "title_selector": ".title",
-                "link_selector": "a.download",
-                "max_pages": 1,
-            }
-        )
+    # B. HTML Scraper stdlib transport (the optional httpx branch was removed with
+    # the dependency; urllib.request is now the only path).
+    scraper = HtmlScraperProvider(
+        name="Challenger Scraper",
+        url="https://mock-manga.invalid",
+        config={
+            "item_selector": ".release-item",
+            "title_selector": ".title",
+            "link_selector": "a.download",
+            "max_pages": 1,
+        }
+    )
 
-        mock_html = """
-        <html>
-            <body>
-                <div class="release-item">
-                    <span class="title">Berserk Vol. 41</span>
-                    <a class="download" href="/dl/berserk41.torrent">Download</a>
-                </div>
-            </body>
-        </html>
-        """.encode("utf-8")
+    mock_html = """
+    <html>
+        <body>
+            <div class="release-item">
+                <span class="title">Berserk Vol. 41</span>
+                <a class="download" href="/dl/berserk41.torrent">Download</a>
+            </div>
+        </body>
+    </html>
+    """.encode("utf-8")
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = mock_html
-        mock_resp.__enter__.return_value = mock_resp
-        mock_resp.__exit__.return_value = None
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = mock_html
+    mock_resp.__enter__.return_value = mock_resp
+    mock_resp.__exit__.return_value = None
 
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            page_content = scraper._fetch_page_html("https://mock-manga.invalid/page/1", {})
-            _check("Berserk Vol. 41" in page_content)
-            releases = scraper.fetch_releases()
-            _check(len(releases) == 1)
-            _check(releases[0].title == "Berserk Vol. 41")
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        page_content = scraper._fetch_page_html("https://mock-manga.invalid/page/1", {})
+        _check("Berserk Vol. 41" in page_content)
+        releases = scraper.fetch_releases()
+        _check(len(releases) == 1)
+        _check(releases[0].title == "Berserk Vol. 41")
 
-    finally:
-        hs_module.httpx = orig_httpx
-
-    print("    [PASSED] Nyaa crawl delay & HTML scraper urllib fallback 100% verified.")
+    print("    [PASSED] Nyaa crawl delay & HTML scraper urllib transport 100% verified.")
 
 
 # ===========================================================================

@@ -89,7 +89,7 @@ def test_calibre_scanner_and_matcher():
         assert "Action" in csm["tags"]
         assert csm["latest_index"] == 3.0
 
-        volumes_map = scanner.get_all_volumes_per_series()
+        volumes_map = scanner.get_series_volumes_map()
         assert volumes_map["chainsaw man"] == {1.0, 2.0, 3.0}
         assert len(volumes_map["one piece"]) == 104
 
@@ -780,9 +780,9 @@ def test_romaji_to_english_titles_conversion():
         assert 4.0 in res["missing_volumes"]
 
         # 3. Naming contract (P3a): AniList titles are DISPLAY ONLY and must never
-        #    rewrite the stable matching key. The old `normalize_series_titles_to_english`
-        #    behaviour (rename releases.series_name to AniList English) is gone; the
-        #    function is now a deprecated alias of the guarded legacy re-key repair.
+        #    rewrite the stable matching key. The old normalise-to-English behaviour
+        #    (rename releases.series_name to AniList English) is gone; the only
+        #    remaining maintenance entry point is the guarded legacy re-key repair.
         rel_db = {
             "guid": "guid-test-snk-vol1",
             "title": "[Group] Shingeki no Kyojin Vol. 01",
@@ -802,9 +802,9 @@ def test_romaji_to_english_titles_conversion():
         assert disc_releases[0]["display_series_name"] == "Attack on Titan"
         assert disc_releases[0]["romaji_name"] == "Shingeki no Kyojin"
 
-        # The deprecated alias no longer renames matching keys. There is no tracked
-        # series here, so the guarded legacy repair has nothing to re-key.
-        updated = db.normalize_series_titles_to_english(anilist)
+        # The guarded legacy repair never renames matching keys. There is no tracked
+        # series here, so it has nothing to re-key.
+        updated = db.repair_rekeyed_series_names(actor="test")
         assert updated == 0
 
         all_rel = db.get_releases()

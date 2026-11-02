@@ -3,7 +3,6 @@ import re
 import sqlite3
 import json
 import time
-from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, Set
 
 import logging
@@ -540,7 +539,7 @@ class MangaDatabase:
     def sync_calibre_series(self, calibre_series_list: List[Dict[str, Any]], volumes_map: Optional[Dict[str, Set[float]]] = None) -> int:
         updated_count = 0
         from urllib.parse import quote_plus
-        from app.parser import normalize_text
+        from app.parser import normalize_text, split_series_candidate_parts
         with self.get_connection() as conn:
             cur = conn.cursor()
             for s in calibre_series_list:
@@ -558,7 +557,7 @@ class MangaDatabase:
                     for k in (str(ser_id), ser_id, name.lower(), normalize_text(name)):
                         if k in volumes_map:
                             owned_vols_set.update(volumes_map[k])
-                    parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", name) if p.strip()]
+                    parts = split_series_candidate_parts(name)
                     if len(parts) > 1:
                         for p in parts:
                             for pk in (p.lower(), normalize_text(p)):
@@ -1477,13 +1476,10 @@ class MangaDatabase:
         stable = (stable_key or "").strip()
         if not stable:
             return ""
+        from app.parser import split_series_candidate_parts
         meta = self.get_cached_manga_metadata(stable)
         if not is_authoritative_metadata(meta):
-            parts = [
-                part.strip()
-                for part in re.split(r"\s*[|/–—:]\s*|\s+-\s+", stable)
-                if part.strip()
-            ]
+            parts = split_series_candidate_parts(stable, extra_delimiters=":", alt_separators=False)
             for part in parts:
                 if part == stable:
                     continue
@@ -1700,16 +1696,6 @@ class MangaDatabase:
             logger.debug("Series key repair: no legacy re-keyed releases found.")
         return repaired
 
-    def normalize_series_titles_to_english(self, anilist_service=None) -> int:
-        """DEPRECATED: the old behaviour renamed matching keys to English (the P3a bug).
-
-        Kept as a thin compatibility wrapper: it now performs the guarded legacy
-        key repair instead, so any caller of the maintenance action can no longer
-        rewrite matching keys with AniList titles.  ``anilist_service`` is
-        accepted and ignored for backwards compatibility.
-        """
-        return self.repair_rekeyed_series_names()
-
     # --- Group Releases by Series ---
     def get_releases_grouped_by_series(
         self,
@@ -1724,18 +1710,58 @@ class MangaDatabase:
         highlighting owned vs missing volumes against Calibre tracking.
         If prioritized_only is True, filters to series having releases from prioritized groups.
         Supports fast pagination with limit & offset and instant keyword search.
+
+        READ-ONLY: this is a GET path and performs no persistence.  Complete-series
+        volume expansion / missing-volume reconciliation is still computed in memory
+        for the response, but the resulting UPDATEs are applied only by the explicit
+        maintenance entry point :meth:`reconcile_release_volume_state`.
         """
-        from app.parser import normalize_text
+        groups, _persisted = self._build_grouped_releases(
+            status=status,
+            prioritized_only=prioritized_only,
+            limit=limit,
+            offset=offset,
+            search=search,
+            persist=False,
+        )
+        return groups
+
+    def reconcile_release_volume_state(self) -> int:
+        """Persist the volume expansion / reconciliation that a read computes in memory.
+
+        ``get_releases_grouped_by_series()`` decorates releases on the fly (expanding a
+        complete-series compilation from cached metadata, then reconciling missing
+        volumes against Calibre ownership) without touching the database.  This
+        maintenance path runs the exact same computation with persistence enabled and
+        returns the number of release rows written, so the database converges to what
+        the UI already shows.  It is idempotent: a second run writes nothing.
+        """
+        _groups, persisted = self._build_grouped_releases(persist=True)
+        if persisted:
+            self._invalidate_grouped_cache()
+        return persisted
+
+    def _build_grouped_releases(
+        self,
+        status: Optional[str] = None,
+        prioritized_only: bool = False,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        search: Optional[str] = None,
+        persist: bool = False
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        from app.parser import normalize_text, split_series_candidate_parts
 
         cache_key = f"{status}_{prioritized_only}"
         now = time.time()
-        if not search and cache_key in self._grouped_cache:
+        if not persist and not search and cache_key in self._grouped_cache:
             cached_time, cached_data = self._grouped_cache[cache_key]
             if now - cached_time < 5.0:
                 if limit is not None:
-                    return cached_data[offset : offset + limit]
-                return cached_data
+                    return cached_data[offset : offset + limit], 0
+                return cached_data, 0
 
+        persisted = 0
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("SELECT lower(name) FROM prioritized_groups;")
@@ -1859,7 +1885,7 @@ class MangaDatabase:
 
                 # Extract candidate parts from delimiters (|, /, //, -, —) and parentheses
                 candidate_parts = []
-                parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", s_name) if p.strip()]
+                parts = split_series_candidate_parts(s_name)
                 if len(parts) > 1:
                     candidate_parts.extend(parts)
 
@@ -2033,16 +2059,19 @@ class MangaDatabase:
                             # Automated expansion side-effect: never downgrade a sticky status.
                             rel["status"] = resolve_status(rel["status"], candidate_st)
 
-                            try:
-                                cur.execute("""
-                                    UPDATE releases 
-                                    SET is_bundle = 1, is_complete = 1, volume_start = 1.0, volume_end = ?, 
-                                        volumes_json = ?, missing_vols_json = ?, status = ? 
-                                    WHERE id = ?;
-                                """, (float(v_count), json.dumps(rel["volumes"]), json.dumps(rel["missing_volumes"]), rel["status"], rel["id"]))
-                                conn.commit()
-                            except Exception:
-                                pass
+                            # A GET must not write: only the explicit maintenance path persists.
+                            if persist:
+                                try:
+                                    cur.execute("""
+                                        UPDATE releases 
+                                        SET is_bundle = 1, is_complete = 1, volume_start = 1.0, volume_end = ?, 
+                                            volumes_json = ?, missing_vols_json = ?, status = ? 
+                                        WHERE id = ?;
+                                    """, (float(v_count), json.dumps(rel["volumes"]), json.dumps(rel["missing_volumes"]), rel["status"], rel["id"]))
+                                    conn.commit()
+                                    persisted += 1
+                                except Exception:
+                                    pass
 
                 # Reconcile rel["missing_volumes"] and status against Calibre owned volumes
                 if calibre_match and rel.get("volumes"):
@@ -2056,11 +2085,14 @@ class MangaDatabase:
                             # Automated reconcile side-effect: never downgrade a sticky status.
                             new_rel_st = resolve_status(rel["status"], candidate_rel_st)
                             rel["status"] = new_rel_st
-                            try:
-                                cur.execute("UPDATE releases SET missing_vols_json = ?, status = ? WHERE id = ?;", (json.dumps(actual_missing), new_rel_st, rel["id"]))
-                                conn.commit()
-                            except Exception:
-                                pass
+                            # A GET must not write: only the explicit maintenance path persists.
+                            if persist:
+                                try:
+                                    cur.execute("UPDATE releases SET missing_vols_json = ?, status = ? WHERE id = ?;", (json.dumps(actual_missing), new_rel_st, rel["id"]))
+                                    conn.commit()
+                                    persisted += 1
+                                except Exception:
+                                    pass
 
                 # Deduplicate releases in group: same guid or (download_url, volume set, group)
                 sig = rel.get("guid") or (rel.get("download_url") or rel.get("link") or rel.get("title"), tuple(sorted(rel.get("volumes", []))), (rel.get("release_group") or "").lower())
@@ -2126,7 +2158,7 @@ class MangaDatabase:
 
             result_groups.sort(key=sort_key)
 
-            if not search:
+            if not persist and not search:
                 self._grouped_cache[cache_key] = (now, list(result_groups))
 
             if search and search.strip():
@@ -2140,12 +2172,12 @@ class MangaDatabase:
                     or clean_s in (g.get("synopsis") or "").lower()
                 ]
                 if limit is not None:
-                    return filtered[offset : offset + limit]
-                return filtered
+                    return filtered[offset : offset + limit], persisted
+                return filtered, persisted
 
             if limit is not None:
-                return result_groups[offset : offset + limit]
-            return result_groups
+                return result_groups[offset : offset + limit], persisted
+            return result_groups, persisted
 
     def count_releases_grouped_by_series(
         self,

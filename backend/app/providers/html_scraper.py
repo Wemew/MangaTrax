@@ -1,13 +1,8 @@
-import re
 import logging
 import urllib.request
 import urllib.error
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
-try:
-    import httpx
-except ImportError:
-    httpx = None
 from bs4 import BeautifulSoup
 from app import security
 from app.providers.base import BaseFeedProvider, ReleaseItem
@@ -37,26 +32,11 @@ class HtmlScraperProvider(BaseFeedProvider):
         self.next_selector = self.config.get("next_selector") or "a.next, a.next-page, a[rel='next']"
         self.max_pages = int(self.config.get("max_pages", 2))
 
-    def _fetch_page_html(
-        self,
-        url: str,
-        headers: Dict[str, str],
-        client: Optional[Any] = None
-    ) -> Optional[str]:
+    def _fetch_page_html(self, url: str, headers: Dict[str, str]) -> Optional[str]:
         """
-        Safely fetches HTML content using an active httpx client if available,
-        falling back to standard library urllib.request on failure or if httpx is missing.
+        Safely fetches HTML content with standard library ``urllib.request``.
         Guarantees that network errors never raise unhandled exceptions.
         """
-        if client is not None:
-            try:
-                resp = client.get(url)
-                resp.raise_for_status()
-                return resp.text
-            except Exception as e:
-                logger.warning(f"httpx fetch error for {url}: {e}. Retrying with urllib fallback.")
-
-        # Fallback to standard library urllib.request
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=15.0) as resp:
@@ -85,124 +65,109 @@ class HtmlScraperProvider(BaseFeedProvider):
         current_url = self.url
         page_num = 1
 
-        client = None
-        if httpx is not None:
-            try:
-                client = httpx.Client(headers=headers, timeout=15.0, follow_redirects=True)
-            except Exception as e:
-                logger.warning(f"Failed to initialize httpx.Client for '{self.name}': {e}. Falling back to urllib.")
-                client = None
+        while current_url and page_num <= self.max_pages:
+            html_text = self._fetch_page_html(current_url, headers)
+            if not html_text:
+                logger.warning(f"Could not retrieve HTML for page {page_num} ({current_url}). Stopping crawl.")
+                break
 
-        try:
-            while current_url and page_num <= self.max_pages:
-                html_text = self._fetch_page_html(current_url, headers, client=client)
-                if not html_text:
-                    logger.warning(f"Could not retrieve HTML for page {page_num} ({current_url}). Stopping crawl.")
-                    break
+            soup = BeautifulSoup(html_text, "html.parser")
+            items = soup.select(self.item_selector)
+            if not items:
+                break
 
-                soup = BeautifulSoup(html_text, "html.parser")
-                items = soup.select(self.item_selector)
-                if not items:
-                    break
+            for el in items:
+                title_el = el.select_one(self.title_selector)
+                if not title_el:
+                    continue
 
-                for el in items:
-                    title_el = el.select_one(self.title_selector)
-                    if not title_el:
-                        continue
+                raw_title = title_el.get_text(strip=True)
+                if not raw_title:
+                    continue
 
-                    raw_title = title_el.get_text(strip=True)
-                    if not raw_title:
-                        continue
+                # Discard pure chapter updates
+                if is_chapter_only(raw_title):
+                    logger.debug(f"Discarding chapter-only release from HTML scraper '{self.name}': {raw_title}")
+                    continue
 
-                    # Discard pure chapter updates
-                    if is_chapter_only(raw_title):
-                        logger.debug(f"Discarding chapter-only release from HTML scraper '{self.name}': {raw_title}")
-                        continue
+                # Discard light novels and non-manga literature
+                if is_light_novel(raw_title):
+                    logger.debug(f"Discarding light novel release from HTML scraper '{self.name}': {raw_title}")
+                    continue
 
-                    # Discard light novels and non-manga literature
-                    if is_light_novel(raw_title):
-                        logger.debug(f"Discarding light novel release from HTML scraper '{self.name}': {raw_title}")
-                        continue
+                # Details Link
+                link = ""
+                if self.link_selector:
+                    link_el = el.select_one(self.link_selector)
+                    if link_el:
+                        link = link_el.get("href", "")
+                if not link and title_el.name == "a":
+                    link = title_el.get("href", "")
+                elif not link:
+                    a_tag = el.select_one("a")
+                    if a_tag:
+                        link = a_tag.get("href", "")
 
-                    # Details Link
-                    link = ""
-                    if self.link_selector:
-                        link_el = el.select_one(self.link_selector)
-                        if link_el:
-                            link = link_el.get("href", "")
-                    if not link and title_el.name == "a":
-                        link = title_el.get("href", "")
-                    elif not link:
-                        a_tag = el.select_one("a")
-                        if a_tag:
-                            link = a_tag.get("href", "")
+                if link and link.startswith("/"):
+                    parsed_base = urlparse(self.url)
+                    link = f"{parsed_base.scheme}://{parsed_base.netloc}{link}"
 
-                    if link and link.startswith("/"):
-                        parsed_base = urlparse(self.url)
-                        link = f"{parsed_base.scheme}://{parsed_base.netloc}{link}"
+                if not link or link in seen_links:
+                    continue
+                seen_links.add(link)
 
-                    if not link or link in seen_links:
-                        continue
-                    seen_links.add(link)
+                # Download / Magnet URL
+                download_url = None
+                if self.download_selector:
+                    dl_el = el.select_one(self.download_selector)
+                    if dl_el:
+                        download_url = dl_el.get("href", "")
 
-                    # Download / Magnet URL
-                    download_url = None
-                    if self.download_selector:
-                        dl_el = el.select_one(self.download_selector)
-                        if dl_el:
-                            download_url = dl_el.get("href", "")
+                if not download_url:
+                    download_url = link
 
-                    if not download_url:
-                        download_url = link
-
-                    # Cover image
-                    cover_url = None
-                    if self.image_selector:
-                        img_el = el.select_one(self.image_selector)
-                        if img_el:
-                            cover_url = img_el.get("src") or img_el.get("data-src")
-                            if cover_url and cover_url.startswith("/"):
-                                parsed_base = urlparse(self.url)
-                                cover_url = f"{parsed_base.scheme}://{parsed_base.netloc}{cover_url}"
-
-                    parsed = extract_manga_bundle_and_volumes(raw_title)
-
-                    results.append(ReleaseItem(
-                        title=raw_title,
-                        link=link,
-                        download_url=download_url,
-                        series_name=parsed["series_name"],
-                        release_group=parsed.get("release_group"),
-                        is_bundle=parsed["is_bundle"],
-                        volume_start=parsed["volume_start"],
-                        volume_end=parsed["volume_end"],
-                        volumes=parsed["volumes"],
-                        cover_url=cover_url,
-                        source_feed_name=self.name,
-                        raw_data={"confidence": parsed["confidence"]}
-                    ))
-
-                # Pagination
-                if page_num < self.max_pages and self.next_selector:
-                    next_el = soup.select_one(self.next_selector)
-                    if next_el and next_el.get("href"):
-                        next_url = next_el["href"]
-                        if next_url.startswith("/"):
+                # Cover image
+                cover_url = None
+                if self.image_selector:
+                    img_el = el.select_one(self.image_selector)
+                    if img_el:
+                        cover_url = img_el.get("src") or img_el.get("data-src")
+                        if cover_url and cover_url.startswith("/"):
                             parsed_base = urlparse(self.url)
-                            next_url = f"{parsed_base.scheme}://{parsed_base.netloc}{next_url}"
-                        if next_url == current_url:
-                            break
-                        current_url = next_url
-                        page_num += 1
-                    else:
+                            cover_url = f"{parsed_base.scheme}://{parsed_base.netloc}{cover_url}"
+
+                parsed = extract_manga_bundle_and_volumes(raw_title)
+
+                results.append(ReleaseItem(
+                    title=raw_title,
+                    link=link,
+                    download_url=download_url,
+                    series_name=parsed["series_name"],
+                    release_group=parsed.get("release_group"),
+                    is_bundle=parsed["is_bundle"],
+                    volume_start=parsed["volume_start"],
+                    volume_end=parsed["volume_end"],
+                    volumes=parsed["volumes"],
+                    cover_url=cover_url,
+                    source_feed_name=self.name,
+                    raw_data={"confidence": parsed["confidence"]}
+                ))
+
+            # Pagination
+            if page_num < self.max_pages and self.next_selector:
+                next_el = soup.select_one(self.next_selector)
+                if next_el and next_el.get("href"):
+                    next_url = next_el["href"]
+                    if next_url.startswith("/"):
+                        parsed_base = urlparse(self.url)
+                        next_url = f"{parsed_base.scheme}://{parsed_base.netloc}{next_url}"
+                    if next_url == current_url:
                         break
+                    current_url = next_url
+                    page_num += 1
                 else:
                     break
-        finally:
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
+            else:
+                break
 
         return results

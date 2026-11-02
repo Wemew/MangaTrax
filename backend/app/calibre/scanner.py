@@ -1,8 +1,8 @@
 import os
 import sqlite3
 import logging
-from typing import List, Dict, Any, Optional, Set
-from app.parser import parse_calibre_volumes_and_series
+from typing import List, Dict, Any, Set
+from app.parser import parse_calibre_volumes_and_series, split_series_candidate_parts
 
 logger = logging.getLogger("mangatrax.calibre")
 
@@ -201,7 +201,6 @@ class CalibreMangaScanner:
             cur.execute(query)
             res: Dict[str, Set[float]] = {}
             from app.parser import normalize_text
-            import re
             for row in cur.fetchall():
                 s_id = row["series_id"]
                 s_name = row["ser_name"] or ""
@@ -219,7 +218,7 @@ class CalibreMangaScanner:
                     if s_id is not None:
                         res.setdefault(str(s_id), set()).update(vols)
                         res.setdefault(s_id, set()).update(vols)
-                    parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", target_series) if p.strip()]
+                    parts = split_series_candidate_parts(target_series)
                     if len(parts) > 1:
                         for p in parts:
                             res.setdefault(p.lower(), set()).update(vols)
@@ -233,7 +232,3 @@ class CalibreMangaScanner:
         finally:
             if conn:
                 conn.close()
-
-    def get_all_volumes_per_series(self) -> Dict[str, Set[float]]:
-        """Alias for get_series_volumes_map."""
-        return self.get_series_volumes_map()

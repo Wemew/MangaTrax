@@ -1,14 +1,11 @@
+import asyncio
 import os
 import hashlib
 import logging
-import socket
-import ipaddress
+import urllib.error
+import urllib.request
 from typing import Optional
-from urllib.parse import urlparse, urljoin
-try:
-    import httpx
-except ImportError:
-    httpx = None
+from urllib.parse import urljoin
 
 from app import security
 
@@ -23,6 +20,27 @@ HEADERS = {
 MAX_COVER_BYTES = 5 * 1024 * 1024  # 5 MB maximum image size
 DOWNLOAD_TIMEOUT_SECONDS = 7.0
 MAX_REDIRECTS = 3
+REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+STREAM_CHUNK_SIZE = 8192
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Stops urllib from transparently following redirects.
+
+    Each hop must be re-validated against the SSRF guard before it is fetched, so
+    redirects are surfaced to :meth:`CoverCache._download_to_cache` via
+    ``urllib.error.HTTPError`` and followed manually there.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _urlopen(req: urllib.request.Request, timeout: float):
+    """Open ``req`` without auto-following redirects (patched in tests)."""
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+    return opener.open(req, timeout=timeout)
+
 
 def is_safe_public_url(url: str) -> bool:
     """
@@ -68,6 +86,13 @@ def detect_valid_image(data: bytes) -> Optional[str]:
 
     return None
 
+def _remove_quietly(path: str) -> None:
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
 class CoverCache:
     def __init__(self, data_dir: str):
         self.covers_dir = os.path.join(data_dir, "covers")
@@ -80,12 +105,6 @@ class CoverCache:
 
     def get_path(self, url: str) -> str:
         return os.path.join(self.covers_dir, self.get_filename(url))
-
-    def is_cached(self, url: str) -> bool:
-        if not url:
-            return False
-        path = self.get_path(url)
-        return os.path.isfile(path) and os.path.getsize(path) > 0
 
     def clear_cache(self) -> int:
         """Removes all cached cover images from disk. Returns count of files removed."""
@@ -104,92 +123,32 @@ class CoverCache:
     async def get_or_download(self, url: str) -> Optional[str]:
         """
         Safely fetches and caches a cover image.
-        Validates initial URL and all subsequent redirect hops against SSRF,
-        and validates magic bytes before writing to disk.
+
+        The blocking socket I/O runs in a worker thread so the event loop is never
+        stalled; the download itself is the same routine used by
+        :meth:`cache_sync` (per-hop SSRF validation, explicit timeout, streamed
+        size cap and magic-byte validation).
         """
-        if not url or httpx is None:
+        if not url:
             return None
-
-        filepath = self.get_path(url)
-        if os.path.isfile(filepath) and os.path.getsize(filepath) > 0:
-            return filepath
-
-        temp_path = f"{filepath}.tmp"
-        current_url = url
-
-        try:
-            async with httpx.AsyncClient(headers=HEADERS, timeout=DOWNLOAD_TIMEOUT_SECONDS, follow_redirects=False) as client:
-                for redirect_idx in range(MAX_REDIRECTS + 1):
-                    if not is_safe_public_url(current_url):
-                        logger.warning(f"Blocked unsafe/internal cover URL or redirect target: {current_url}")
-                        return None
-
-                    async with client.stream("GET", current_url) as resp:
-                        # Handle redirects manually to validate every hop against SSRF
-                        if resp.status_code in (301, 302, 303, 307, 308):
-                            loc = resp.headers.get("location")
-                            if not loc:
-                                return None
-                            current_url = urljoin(current_url, loc)
-                            continue
-
-                        if resp.status_code != 200:
-                            logger.warning(f"Failed to fetch image from {current_url}: HTTP {resp.status_code}")
-                            return None
-
-                        content_length = resp.headers.get("content-length")
-                        if content_length and int(content_length) > MAX_COVER_BYTES:
-                            logger.warning(f"Image too large ({content_length} bytes) for {current_url}")
-                            return None
-
-                        header_chunk = b""
-                        downloaded_bytes = 0
-
-                        with open(temp_path, "wb") as f:
-                            async for chunk in resp.aiter_bytes(chunk_size=8192):
-                                downloaded_bytes += len(chunk)
-                                if downloaded_bytes > MAX_COVER_BYTES:
-                                    logger.warning(f"Image exceeded max byte limit during stream: {current_url}")
-                                    f.close()
-                                    if os.path.exists(temp_path):
-                                        os.remove(temp_path)
-                                    return None
-
-                                if len(header_chunk) < 32:
-                                    header_chunk += chunk
-
-                                f.write(chunk)
-
-                        # Validate magic bytes
-                        image_type = detect_valid_image(header_chunk)
-                        if not image_type:
-                            logger.warning(f"Rejecting non-image format downloaded from {current_url}")
-                            if os.path.exists(temp_path):
-                                os.remove(temp_path)
-                            return None
-
-                        # Atomic move into final cache location
-                        if os.path.exists(filepath):
-                            os.remove(filepath)
-                        os.rename(temp_path, filepath)
-                        return filepath
-
-                return None
-
-        except Exception as e:
-            logger.debug(f"Cover download error for {url}: {e}")
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
-            return None
+        return await asyncio.to_thread(self._download_to_cache, url)
 
     def cache_sync(self, url: str) -> Optional[str]:
         """Synchronous version for background tasks with multi-hop SSRF and magic byte checks."""
-        if not url or httpx is None:
+        if not url:
             return None
+        return self._download_to_cache(url)
 
+    def _download_to_cache(self, url: str) -> Optional[str]:
+        """Download ``url`` into the cache, validating every redirect hop.
+
+        Preserves the pre-M3 behaviour exactly: the initial URL *and* every
+        redirect target are SSRF-validated before they are fetched, the total
+        number of hops is capped at ``MAX_REDIRECTS``, the socket timeout is
+        explicit, the body is streamed and capped at ``MAX_COVER_BYTES`` (both
+        from ``Content-Length`` and while reading), and only real raster image
+        magic bytes are written to the cache.
+        """
         filepath = self.get_path(url)
         if os.path.isfile(filepath) and os.path.getsize(filepath) > 0:
             return filepath
@@ -198,61 +157,89 @@ class CoverCache:
         current_url = url
 
         try:
-            with httpx.Client(headers=HEADERS, timeout=DOWNLOAD_TIMEOUT_SECONDS, follow_redirects=False) as client:
-                for redirect_idx in range(MAX_REDIRECTS + 1):
-                    if not is_safe_public_url(current_url):
+            for _redirect_idx in range(MAX_REDIRECTS + 1):
+                if not is_safe_public_url(current_url):
+                    logger.warning(f"Blocked unsafe/internal cover URL or redirect target: {current_url}")
+                    return None
+
+                req = urllib.request.Request(current_url, headers=HEADERS)
+                try:
+                    resp = _urlopen(req, DOWNLOAD_TIMEOUT_SECONDS)
+                except urllib.error.HTTPError as exc:
+                    code = exc.code
+                    location = exc.headers.get("Location") if exc.headers else None
+                    try:
+                        exc.close()
+                    except Exception:
+                        pass
+                    if code in REDIRECT_STATUSES and location:
+                        current_url = urljoin(current_url, location)
+                        continue
+                    logger.warning(f"Failed to fetch image from {current_url}: HTTP {code}")
+                    return None
+
+                try:
+                    status = getattr(resp, "status", None)
+                    if status is None:
+                        status = resp.getcode()
+                    if status in REDIRECT_STATUSES:
+                        # Defensive: a custom handler may surface a redirect response.
+                        location = resp.headers.get("Location") if resp.headers else None
+                        if not location:
+                            return None
+                        current_url = urljoin(current_url, location)
+                        continue
+
+                    if status != 200:
+                        logger.warning(f"Failed to fetch image from {current_url}: HTTP {status}")
                         return None
 
-                    with client.stream("GET", current_url) as resp:
-                        if resp.status_code in (301, 302, 303, 307, 308):
-                            loc = resp.headers.get("location")
-                            if not loc:
+                    content_length = resp.headers.get("Content-Length") or resp.headers.get("content-length")
+                    if content_length and int(content_length) > MAX_COVER_BYTES:
+                        logger.warning(f"Image too large ({content_length} bytes) for {current_url}")
+                        return None
+
+                    header_chunk = b""
+                    downloaded_bytes = 0
+
+                    with open(temp_path, "wb") as f:
+                        while True:
+                            chunk = resp.read(STREAM_CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            downloaded_bytes += len(chunk)
+                            if downloaded_bytes > MAX_COVER_BYTES:
+                                logger.warning(f"Image exceeded max byte limit during stream: {current_url}")
+                                f.close()
+                                _remove_quietly(temp_path)
                                 return None
-                            current_url = urljoin(current_url, loc)
-                            continue
 
-                        if resp.status_code != 200:
-                            return None
+                            if len(header_chunk) < 32:
+                                header_chunk += chunk
 
-                        content_length = resp.headers.get("content-length")
-                        if content_length and int(content_length) > MAX_COVER_BYTES:
-                            return None
+                            f.write(chunk)
 
-                        header_chunk = b""
-                        downloaded_bytes = 0
+                    # Validate magic bytes
+                    image_type = detect_valid_image(header_chunk)
+                    if not image_type:
+                        logger.warning(f"Rejecting non-image format downloaded from {current_url}")
+                        _remove_quietly(temp_path)
+                        return None
 
-                        with open(temp_path, "wb") as f:
-                            for chunk in resp.iter_bytes(chunk_size=8192):
-                                downloaded_bytes += len(chunk)
-                                if downloaded_bytes > MAX_COVER_BYTES:
-                                    f.close()
-                                    if os.path.exists(temp_path):
-                                        os.remove(temp_path)
-                                    return None
+                    # Atomic move into final cache location
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                    os.rename(temp_path, filepath)
+                    return filepath
+                finally:
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
 
-                                if len(header_chunk) < 32:
-                                    header_chunk += chunk
-
-                                f.write(chunk)
-
-                        image_type = detect_valid_image(header_chunk)
-                        if not image_type:
-                            if os.path.exists(temp_path):
-                                os.remove(temp_path)
-                            return None
-
-                        if os.path.exists(filepath):
-                            os.remove(filepath)
-                        os.rename(temp_path, filepath)
-                        return filepath
-
-                return None
+            return None
 
         except Exception as e:
-            logger.debug(f"Sync cover cache error: {e}")
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
+            logger.debug(f"Cover download error for {url}: {e}")
+            _remove_quietly(temp_path)
             return None

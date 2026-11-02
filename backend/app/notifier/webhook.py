@@ -4,11 +4,6 @@ import urllib.request
 import urllib.error
 from typing import Dict, Any, Optional
 
-try:
-    import httpx
-except ImportError:
-    httpx = None
-
 from app import security
 
 logger = logging.getLogger("mangatrax.notifier")
@@ -26,24 +21,19 @@ def _post_json(url: str, json_data: dict, timeout: float = 10.0) -> SimpleHttpRe
     # (POST /api/settings/test-webhook) are additionally validated structurally
     # by the Pydantic schema before reaching this function.
     security.validate_outbound_url(url)
-    if httpx:
-        with httpx.Client(timeout=timeout) as client:
-            resp = client.post(url, json=json_data)
-            return SimpleHttpResponse(resp.status_code, resp.text)
-    else:
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(json_data).encode("utf-8"),
-            headers={"Content-Type": "application/json", "User-Agent": "MangaTrax/1.0"}
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                status = resp.status if hasattr(resp, "status") else resp.getcode()
-                text = resp.read().decode("utf-8", errors="ignore")
-                return SimpleHttpResponse(status, text)
-        except urllib.error.HTTPError as e:
-            text = e.read().decode("utf-8", errors="ignore")
-            return SimpleHttpResponse(e.code, text)
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(json_data).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "MangaTrax/1.0"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.status if hasattr(resp, "status") else resp.getcode()
+            text = resp.read().decode("utf-8", errors="ignore")
+            return SimpleHttpResponse(status, text)
+    except urllib.error.HTTPError as e:
+        text = e.read().decode("utf-8", errors="ignore")
+        return SimpleHttpResponse(e.code, text)
 
 class NotificationService:
     def __init__(self, discord_webhook: Optional[str] = None, generic_webhook: Optional[str] = None):
