@@ -38,8 +38,10 @@ RUN mkdir -p /calibre /staging /app/data && \
 
 EXPOSE 8080
 
+# Probe /health, not /: with MANGATRAX_AUTH_MODE=basic|oidc the root returns 401/302 and the
+# container would be marked unhealthy. /health is unauthenticated and exempt from auth.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8080/ || exit 1
+    CMD curl -f http://localhost:8080/health || exit 1
 
 ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

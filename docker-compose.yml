@@ -24,6 +24,30 @@ services:
       - TZ=Europe/Copenhagen  # Set your local timezone (e.g. Europe/Copenhagen, America/New_York)
       # Note: BitTorrent downloader (qBittorrent, Flood, Torbox, etc.)
       # is configured 100% in-app via the MangaTrax Web UI (Settings & Downloads tab).
+
+      # ---- Authentication -------------------------------------------------
+      # Modes: none | basic | oidc.  Default `none` keeps prior behaviour.
+      # TLS is expected to terminate upstream (Traefik/NetBird). The app derives
+      # redirect_uri and the cookie Secure flag ONLY from MANGATRAX_PUBLIC_URL,
+      # never from request headers, so spoofed Host headers cannot redirect a login.
+      - MANGATRAX_AUTH_MODE=none
+
+      # -- oidc (PocketID) -- REQUIRED when MANGATRAX_AUTH_MODE=oidc
+      # - MANGATRAX_PUBLIC_URL=https://mangatrax.example.com
+      # - MANGATRAX_SESSION_SECRET=CHANGE_ME   # python -c "import secrets;print(secrets.token_urlsafe(48))"
+      # - MANGATRAX_OIDC_ISSUER=https://pocketid.example.com
+      # - MANGATRAX_OIDC_CLIENT_ID=your-client-id
+      # - MANGATRAX_OIDC_CLIENT_SECRET=your-client-secret
+
+      # -- basic -- also acts as break-glass during a PocketID outage when mode=oidc
+      # - MANGATRAX_BASIC_USER=admin
+      # - MANGATRAX_BASIC_PASS=CHANGE_ME
+
+      # -- optional hardening --
+      # - MANGATRAX_SESSION_MAX_AGE=604800    # 7 days
+      # - MANGATRAX_CSRF_PROTECT=1            # Origin/Referer check on unsafe methods
+      # - MANGATRAX_DEBUG_ACTIONS=0           # /api/debug/action is 403 unless set to 1
+      # - MANGATRAX_PATH_ROOTS=/calibre:/staging   # restrict settings paths to these roots
     volumes:
       # 1. Mount your Calibre library network share (read-only for zero-lock safety)
       - /path/to/calibre/library:/calibre:ro
