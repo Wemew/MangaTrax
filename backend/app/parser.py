@@ -201,6 +201,17 @@ _TRAILING_BARE_NUMBER_RE = re.compile(
 _TRAILING_CHAPTER_RANGE_RE = re.compile(
     r"^(?P<series>.+?)[\s\-–—:|]+(?P<start>\d{1,4}(?:\.\d+)?)\s*[-–—~]\s*(?P<end>\d{1,4}(?:\.\d+)?)$"
 )
+# A title ending in a CHAIN of "+"-joined bare chapter ranges without an "as v<X>"
+# mapping: "Not Quite Love 001-005 + 006-009" -> series "Not Quite Love", chapter
+# ranges [[1,5],[6,9]].  Every range and the "+" separators are chapter data.
+_TRAILING_CHAPTER_RANGE_CHAIN_RE = re.compile(
+    r"^(?P<series>.+?)[\s\-–—:|]+"
+    r"(?P<ranges>\d{1,4}(?:\.\d+)?\s*[-–—~]\s*\d{1,4}(?:\.\d+)?"
+    r"(?:\s*\+\s*\d{1,4}(?:\.\d+)?\s*[-–—~]\s*\d{1,4}(?:\.\d+)?)+)$"
+)
+_RANGE_PAIR_RE = re.compile(
+    r"(\d{1,4}(?:\.\d+)?)\s*[-–—~]\s*(\d{1,4}(?:\.\d+)?)"
+)
 # Composite "+ tail" segments (after a parsed volume range):
 #   explicit volume continuation: "+ v10-12", "+ Vol 10", ", v11"
 _VOLUME_TAIL_SEGMENT_RE = re.compile(
@@ -286,6 +297,10 @@ def _looks_like_chapter_title(raw_title: str) -> bool:
     cleaned = clean_manga_title(raw_title)
     if _VOLUME_KEYWORD_RE.search(cleaned):
         return False
+    # A chain of "+"-joined bare chapter ranges is a chapter batch, never a volume
+    # bundle: "Series 001-005 + 006-009" (and unpadded "Series 1-5 + 6-9").
+    if _TRAILING_CHAPTER_RANGE_CHAIN_RE.match(cleaned):
+        return True
     # A bare numeric range that passes the bundle guards is a volume bundle, and a
     # volume bundle is never a chapter (spec §5 Pattern 1b).
     if _parse_bare_volume_range(cleaned):
@@ -551,8 +566,35 @@ def _apply_chapter_series_strip(result: Dict[str, Any]) -> Dict[str, Any]:
     cleaned = (result.get("series_name") or "").strip()
     if not cleaned:
         return result
-    # A trailing chapter RANGE ("Series 001-009") keeps the whole range as chapter
-    # data and strips it as one unit, so the series key is not mangled into
+    # A trailing CHAIN of "+"-joined bare chapter ranges ("Series 001-005 + 006-009"):
+    # every range is chapter data and the whole chain (plus separators) is stripped
+    # from the series key, so batches group under the real series.  The "as v<X>"
+    # mapping path is handled before this helper and is untouched.
+    chain_match = _TRAILING_CHAPTER_RANGE_CHAIN_RE.match(cleaned)
+    if chain_match:
+        stripped = chain_match.group("series").strip(" -–—:,|.")
+        if not stripped:
+            return result
+        ranges = []
+        for pair in _RANGE_PAIR_RE.finditer(chain_match.group("ranges")):
+            try:
+                start = float(pair.group(1))
+                end = float(pair.group(2))
+            except (TypeError, ValueError):
+                continue
+            ranges.append([min(start, end), max(start, end)])
+        if not ranges:
+            return result
+        result["numbered_series_name"] = cleaned
+        result["series_name"] = stripped
+        result["chapter_ranges"] = ranges
+        result["chapter_start"] = min(r[0] for r in ranges)
+        result["chapter_end"] = max(r[1] for r in ranges)
+        # A chain is a range of chapters, not one chapter number.
+        result["chapter_number"] = None
+        return result
+    # A single trailing chapter RANGE ("Series 001-009") keeps the whole range as
+    # chapter data and strips it as one unit, so the series key is not mangled into
     # "Series 001".
     range_match = _TRAILING_CHAPTER_RANGE_RE.match(cleaned)
     if range_match:
@@ -838,6 +880,11 @@ def is_chapter_only(raw_title: str) -> bool:
 
     # 2. Explicit chapter symbols: #01, #100
     if re.search(r"#\s*\d+", title):
+        return True
+
+    # 2a. A CHAIN of "+"-joined bare chapter ranges is a chapter batch, never a
+    # volume bundle ("Series 001-005 + 006-009", also unpadded "Series 1-5 + 6-9").
+    if _TRAILING_CHAPTER_RANGE_CHAIN_RE.match(clean_manga_title(raw_title)):
         return True
 
     # 2b. D3 / spec §5 Pattern 1b: a bare numeric RANGE that passes the bundle

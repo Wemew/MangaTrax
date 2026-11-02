@@ -859,6 +859,55 @@ def test_group_position_prefer_last():
     print("    [PASSED] last valid bracket is the group; K-MANGA recorded as publisher.")
 
 
+# ===========================================================================
+# 18. Bare "+"-joined chapter ranges without an "as v<X>" mapping
+# ===========================================================================
+def test_bare_plus_chapter_range_chains():
+    print("--> Testing bare '+'-joined chapter range chains...")
+    expected = {
+        "Not Quite Love 001-009": [[1.0, 9.0]],
+        "Not Quite Love 001-005": [[1.0, 5.0]],
+        "Not Quite Love 001-005 + 006-009": [[1.0, 5.0], [6.0, 9.0]],
+        "Not Quite Love 001-005 + 006-009 + 010-012": [[1.0, 5.0], [6.0, 9.0], [10.0, 12.0]],
+        # Unpadded chains are the same chapter-batch idiom.
+        "Not Quite Love 1-5 + 6-9": [[1.0, 5.0], [6.0, 9.0]],
+    }
+    for title, ranges in expected.items():
+        parsed = _parsed(title)
+        assert parsed["series_name"] == "Not Quite Love", (title, parsed["series_name"])
+        assert parsed["volumes"] == [], (title, parsed["volumes"])
+        assert parsed["is_chapter"] is True, (title, parsed["is_chapter"])
+        assert parsed["is_bundle"] is False, (title, parsed["is_bundle"])
+        assert parsed["chapter_ranges"] == ranges, (title, parsed["chapter_ranges"])
+        assert parsed["chapter_start"] == ranges[0][0], (title, parsed["chapter_start"])
+        assert parsed["chapter_end"] == ranges[-1][1], (title, parsed["chapter_end"])
+        # The pre-strip title is preserved for the scheduler's numbered-title guard.
+        assert parsed["numbered_series_name"] == title, parsed["numbered_series_name"]
+
+    # Metadata after the chain is handled like any other trailing block.
+    with_meta = _parsed("Not Quite Love 001-005 + 006-009 (Digital) (Oak)")
+    assert with_meta["series_name"] == "Not Quite Love", with_meta["series_name"]
+    assert with_meta["chapter_ranges"] == [[1.0, 5.0], [6.0, 9.0]], with_meta["chapter_ranges"]
+    assert with_meta["release_group"] == "Oak", with_meta["release_group"]
+
+    # Controls: the "as v<X>" mapping path stays exactly as it was...
+    mapped = _parsed("Not Quite Love 001-005 as v01 + 006-009 (Digital-Compilation) (Oak)")
+    assert mapped["series_name"] == "Not Quite Love", mapped["series_name"]
+    assert mapped["volumes"] == [1.0], mapped["volumes"]
+    assert mapped["is_bundle"] is False, mapped
+    assert mapped["is_chapter"] is False, mapped
+    assert mapped["chapter_ranges"] == [[1.0, 5.0], [6.0, 9.0]], mapped["chapter_ranges"]
+    assert mapped["release_group"] == "Oak", mapped["release_group"]
+    mapped_range = _parsed("Not Quite Love 001-005 as v01-02 + 006-009 (Digital-Compilation) (Oak)")
+    assert mapped_range["volumes"] == [1.0, 2.0], mapped_range["volumes"]
+    assert mapped_range["is_bundle"] is True, mapped_range
+    # ...and a bare single range is unchanged.
+    single = _parsed("Not Quite Love 001-009")
+    assert single["series_name"] == "Not Quite Love", single["series_name"]
+    assert single["chapter_ranges"] == [[1.0, 9.0]], single["chapter_ranges"]
+    print("    [PASSED] every '+'-joined range captured; series key clean; as-v path intact.")
+
+
 def main():
     print("=" * 78)
     print("Running D3 suite: ported NovelTrax parsers + chapter/volume conformance")
@@ -881,6 +930,7 @@ def main():
         test_revision_markers_and_publisher,
         test_publisher_and_revision_persistence,
         test_group_position_prefer_last,
+        test_bare_plus_chapter_range_chains,
     ]
     failures = 0
     for test in tests:
