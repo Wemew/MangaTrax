@@ -631,6 +631,12 @@ class SettingsUpdateRequest(BaseModel):
     # Previously env-var only (MANGATRAX_DISCARD_UNMARKED_CHAPTERS); exposing it
     # here makes the documented behaviour toggleable from POST /api/settings.
     discard_unmarked_chapters: Optional[str] = Field(default=None, max_length=20)
+    # Media typing: hide non-manga types from the tracked views (default true;
+    # "unknown" always stays visible).
+    filter_non_manga: Optional[str] = Field(default=None, max_length=20)
+    # Infer the full volume set of a collected batch (year-range title with no
+    # volume markers) from authoritative metadata (default true).
+    infer_collected_releases: Optional[str] = Field(default=None, max_length=20)
 
     @field_validator("calibre_path")
     @classmethod

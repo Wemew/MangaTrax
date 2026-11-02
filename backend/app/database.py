@@ -331,6 +331,7 @@ class MangaDatabase:
                     media_type TEXT DEFAULT 'unknown',
                     revision INTEGER,
                     publisher TEXT DEFAULT '',
+                    inferred_volumes INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
@@ -358,6 +359,10 @@ class MangaDatabase:
                 cur.execute("ALTER TABLE releases ADD COLUMN revision INTEGER;")
             if "publisher" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN publisher TEXT DEFAULT '';")
+            # Full volume set inferred from metadata for a collected batch (no explicit
+            # volume markers in the title): marks the release as an inferred full set.
+            if "inferred_volumes" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN inferred_volumes INTEGER DEFAULT 0;")
 
             # Backfill is_complete for existing releases matching complete indicators (local SQL/regex only, NO network calls)
             try:
@@ -524,6 +529,9 @@ class MangaDatabase:
                     # ("Chainsaw Man 180" as opposed to "Chainsaw Man Vol. 180").
                     # Default on; operators can turn it off without a code change.
                     "discard_unmarked_chapters": os.getenv("MANGATRAX_DISCARD_UNMARKED_CHAPTERS", "true"),
+                    # Infer the full volume set of a collected batch (year-range title,
+                    # no volume markers) from authoritative metadata.  Default on.
+                    "infer_collected_releases": os.getenv("MANGATRAX_INFER_COLLECTED_RELEASES", "true"),
                     "calibre_sync_interval_minutes": "15",
                     "feed_check_interval_minutes": "60",
                     "backfill_max_pages": "15",
@@ -546,6 +554,10 @@ class MangaDatabase:
             cur.execute(
                 "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",
                 ("filter_non_manga", os.getenv("MANGATRAX_FILTER_NON_MANGA", "true")),
+            )
+            cur.execute(
+                "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",
+                ("infer_collected_releases", os.getenv("MANGATRAX_INFER_COLLECTED_RELEASES", "true")),
             )
             # One-shot marker for the D1 re-typing pass ('' = not applied yet).
             cur.execute(
@@ -911,6 +923,8 @@ class MangaDatabase:
         except (TypeError, ValueError):
             revision = None
         publisher = (rel.get("publisher") or "").strip()
+        # Inferred full volume set (collected batch resolved from metadata).
+        inferred_val = 1 if rel.get("inferred_volumes") else 0
 
         with self.get_connection() as conn:
             cur = conn.cursor()
@@ -942,6 +956,7 @@ class MangaDatabase:
                         cover_url = ?,
                         revision = CASE WHEN COALESCE(?, 0) > COALESCE(revision, 0) THEN ? ELSE revision END,
                         publisher = CASE WHEN ? != '' THEN ? ELSE publisher END,
+                        inferred_volumes = CASE WHEN ? = 1 THEN 1 ELSE inferred_volumes END,
                         status = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?;
@@ -968,6 +983,7 @@ class MangaDatabase:
                     revision,
                     publisher,
                     publisher,
+                    inferred_val,
                     resolved_status,
                     rel_id
                 ))
@@ -980,8 +996,8 @@ class MangaDatabase:
                         guid, title, series_name, release_group, description, mangaupdates_url,
                         is_bundle, is_complete, volume_start, volume_end, volumes_json, missing_vols_json,
                         download_url, link, cover_url, source_feed_name, status, download_status, torrent_hash,
-                        revision, publisher
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        revision, publisher, inferred_volumes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     guid,
                     rel["title"],
@@ -1004,6 +1020,7 @@ class MangaDatabase:
                     rel.get("torrent_hash"),
                     revision,
                     publisher,
+                    inferred_val,
                 ))
                 rel_id = cur.lastrowid
                 conn.commit()
@@ -1118,6 +1135,7 @@ class MangaDatabase:
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
                 r["missing_volumes"] = json.loads(r["missing_vols_json"] or "[]")
                 r["is_rerelease"] = bool(r.get("revision"))
+                r["is_inferred"] = bool(r.get("inferred_volumes"))
                 r_group = (r.get("release_group") or "").strip().lower()
                 r["is_prioritized"] = r_group in p_groups if r_group else False
 
@@ -1292,6 +1310,7 @@ class MangaDatabase:
             from app.parser import is_complete_series_release
             for r in rows:
                 r["is_complete"] = bool(r.get("is_complete", 0) or is_complete_series_release(r.get("title", "")))
+                r["is_inferred"] = bool(r.get("inferred_volumes"))
                 r["is_prioritized"] = bool(r.get("release_group") and r["release_group"].lower() in p_groups)
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
                 # Fallback to cache if description, mangaupdates_url, or canonical English title wasn't directly populated on release
@@ -2064,6 +2083,7 @@ class MangaDatabase:
             from app.parser import is_complete_series_release
             for r in raw_releases:
                 r["is_complete"] = bool(r.get("is_complete", 0) or is_complete_series_release(r.get("title", "")))
+                r["is_inferred"] = bool(r.get("inferred_volumes"))
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
                 r["missing_volumes"] = json.loads(r["missing_vols_json"] or "[]")
                 r_group = (r.get("release_group") or "").strip().lower()

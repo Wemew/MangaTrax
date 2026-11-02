@@ -101,6 +101,7 @@ class MangaUpdatesService:
                         "cover_url": cached.get("cover_url", ""),
                         "genres": [],
                         "total_volumes": cached.get("total_volumes"),
+                        "status": cached.get("status") or "UNKNOWN",
                         "year": None,
                         "source": "cache"
                     }
@@ -149,7 +150,7 @@ class MangaUpdatesService:
                     "romaji_title": info.get("url") or "",
                     "cover_url": info.get("cover_url") or "",
                     "total_volumes": info.get("total_volumes"),
-                    "status": "UNKNOWN",
+                    "status": info.get("status") or "UNKNOWN",
                     "synopsis": info.get("description", ""),
                     "source": "mangaupdates"
                 })
@@ -195,6 +196,7 @@ class MangaUpdatesService:
 
                 series_id = record.get("series_id")
                 total_volumes = None
+                mu_status = "UNKNOWN"
                 if series_id:
                     try:
                         s_req = urllib.request.Request(
@@ -210,6 +212,12 @@ class MangaUpdatesService:
                                 m_vol = re.search(r'(\d+)\s*Volumes?', st, re.IGNORECASE)
                                 if m_vol:
                                     total_volumes = int(m_vol.group(1))
+                                    # "NN Volumes" means the run is published out.
+                                    mu_status = "FINISHED"
+                                elif re.search(r"complete|finished", st, re.IGNORECASE):
+                                    mu_status = "FINISHED"
+                                elif re.search(r"ongoing|releasing", st, re.IGNORECASE):
+                                    mu_status = "RELEASING"
                     except Exception:
                         pass
 
@@ -220,6 +228,7 @@ class MangaUpdatesService:
                     "cover_url": image_url,
                     "genres": genres,
                     "total_volumes": total_volumes,
+                    "status": mu_status,
                     "year": year,
                     "source": "mangaupdates"
                 }

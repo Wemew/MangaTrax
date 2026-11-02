@@ -217,6 +217,42 @@ _BARE_TAIL_RANGE_RE = re.compile(
 _VOLUME_KEYWORD_RE = re.compile(
     r"(?i)\b(?:volumes?|vols?|books?|parts?|pts?)\.?\s*\d|\bv\.?\s*\d"
 )
+# Parenthesised year range "(2024-2026)" -- the convention for a collected digital
+# batch of a series (the batch is usually the full volume set).
+_YEAR_RANGE_PAREN_RE = re.compile(
+    r"\(\s*(?:19|20)\d{2}\s*[-–—~]\s*(?:19|20)\d{2}\s*\)"
+)
+
+
+def is_collected_release_candidate(raw_title: str) -> bool:
+    """True for a "collected release" batch of a series, e.g.
+    ``Blue Lock - Episode Nagi (2024-2026) (Digital) (Stick)``.
+
+    Detection rule: a parenthesised YEAR RANGE is present (the convention for a
+    full digital batch) and the title carries NO volume marker and NO chapter
+    marker.  The word "complete" is not required.  Explicit volume markers always
+    win, so a ``Vol 1-3`` release is never a candidate.
+
+    Detection only -- the volume count is resolved later from authoritative
+    metadata (the scheduler gates on a finished status and a known count).  A
+    candidate that cannot be resolved is kept volume-less and visible.
+    """
+    if not raw_title:
+        return False
+    if not _YEAR_RANGE_PAREN_RE.search(raw_title):
+        return False
+    if _VOLUME_KEYWORD_RE.search(raw_title):
+        return False
+    if _EXPLICIT_CHAPTER_NUMBER_RE.search(raw_title):
+        return False
+    if is_chapter_only(raw_title) or _looks_like_chapter_title(raw_title):
+        return False
+    cleaned = clean_manga_title(raw_title)
+    if _VOLUME_KEYWORD_RE.search(cleaned):
+        return False
+    if _parse_bare_volume_range(cleaned):
+        return False
+    return True
 
 
 def _looks_like_chapter_title(raw_title: str) -> bool:
@@ -969,6 +1005,9 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
         # "(f)" / "(f2)" re-release/fix markers: metadata only, never pollution.
         "revision": revision,
         "is_rerelease": revision is not None,
+        # Collected batch candidate: parenthesised year range + no volume/chapter
+        # markers.  The scheduler infers the count from authoritative metadata only.
+        "is_collected_release": is_collected_release_candidate(raw_title),
         "is_light_novel": is_light_novel(raw_title),
         "is_bundle": is_comp,
         "is_complete": is_comp,

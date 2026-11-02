@@ -138,6 +138,22 @@
                         <p class="text-[11px] text-slate-400">Skip "Series 180"-style chapter releases that carry no volume marker, when the title without the number names a tracked series. Default: on.</p>
                     </div>
                 </div>
+
+                <div class="flex items-start gap-2.5">
+                    <input type="checkbox" id="setting-filter-non-manga" {% if settings.filter_non_manga != 'false' %}checked{% endif %} class="mt-0.5 rounded border-slate-700 bg-slate-900 text-brand-500 focus:ring-0">
+                    <div>
+                        <label for="setting-filter-non-manga" class="text-xs font-semibold text-white">Hide Non-Manga Types</label>
+                        <p class="text-[11px] text-slate-400">Hide light-novel/chapter-only/audiobook releases from the manga views (they are kept in the database; inconclusive "unknown" rows stay visible). Default: on.</p>
+                    </div>
+                </div>
+
+                <div class="flex items-start gap-2.5">
+                    <input type="checkbox" id="setting-infer-collected-releases" {% if settings.infer_collected_releases != 'false' %}checked{% endif %} class="mt-0.5 rounded border-slate-700 bg-slate-900 text-brand-500 focus:ring-0">
+                    <div>
+                        <label for="setting-infer-collected-releases" class="text-xs font-semibold text-white">Infer Collected-Batch Volumes</label>
+                        <p class="text-[11px] text-slate-400">For year-range batches with no volume markers (e.g. "Blue Lock - Episode Nagi (2024-2026)"), infer the full volume set from AniList/MangaUpdates metadata when the series is finished. Never guesses, never fetches torrents. Default: on.</p>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -462,6 +478,8 @@ async function saveSettings(e) {
         auto_download: document.getElementById('setting-auto-download').checked ? 'true' : 'false',
         auto_tag: document.getElementById('setting-auto-tag').checked ? 'true' : 'false',
         discard_unmarked_chapters: document.getElementById('setting-discard-unmarked-chapters').checked ? 'true' : 'false',
+        filter_non_manga: document.getElementById('setting-filter-non-manga').checked ? 'true' : 'false',
+        infer_collected_releases: document.getElementById('setting-infer-collected-releases').checked ? 'true' : 'false',
         calibre_sync_interval_minutes: document.getElementById('setting-calibre-interval').value,
         feed_check_interval_minutes: document.getElementById('setting-feed-interval').value,
         backfill_max_pages: document.getElementById('setting-backfill-pages').value,

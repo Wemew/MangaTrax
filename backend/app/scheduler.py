@@ -24,7 +24,9 @@ from app.parser import (
     is_chapter_only,
     is_light_novel,
     is_complete_series_release,
+    is_collected_release_candidate,
     normalize_text,
+    string_similarity,
     extract_manga_bundle_and_volumes,
     match_manga_series_in_calibre,
     split_series_candidate_parts,
@@ -272,6 +274,145 @@ class MangaScheduler:
             reason,
         )
         return True
+
+    # --- Collected-batch volume inference (metadata only, never a payload) -----
+    #
+    # A "collected release" (year-range title such as
+    # "Blue Lock - Episode Nagi (2024-2026) (Digital) (Stick)", no volume marker)
+    # is a full digital batch whose volume count is not in the title.  The count may
+    # be resolved from AUTHORITATIVE metadata (AniList, then the MangaUpdates
+    # fallback, both cache-aware) -- never by fetching a torrent or any payload --
+    # and only when the series is finished and the count is known.  Otherwise the
+    # release is kept volume-less and visible (inconclusive means kept) and retried
+    # on the next poll.  Explicit volume markers always win.
+    INFERENCE_FINISHED_STATUSES = ("FINISHED", "PUBLISHED")
+    INFERENCE_MAX_VOLUMES = 300
+    INFERENCE_MIN_NAME_SIMILARITY = 0.85
+
+    def _infer_collected_releases_enabled(self) -> bool:
+        """Whether collected-batch volume inference is enabled (default: true)."""
+        value = str(self.db.get_setting("infer_collected_releases", "true")).strip().lower()
+        return value not in ("false", "0", "no", "off")
+
+    def _metadata_name_matches(self, candidate_name: str, series_key: str) -> bool:
+        """True when metadata belongs to *series_key* (franchise-parent guard).
+
+        Only exact normalized equality or a very high similarity counts: the
+        franchise parent ("Blue Lock") must never satisfy the identity test for its
+        spin-off ("Blue Lock - Episode Nagi"), even if the parent's metadata were to
+        carry a volume count.
+        """
+        norm_candidate = normalize_text(candidate_name or "")
+        norm_key = normalize_text(series_key or "")
+        if not norm_candidate or not norm_key:
+            return False
+        if norm_candidate == norm_key:
+            return True
+        return string_similarity(norm_candidate, norm_key) >= self.INFERENCE_MIN_NAME_SIMILARITY
+
+    def _infer_collected_release_volumes(self, rel, series_key: str, meta, alt_names):
+        """Resolve a collected batch's full volume count from authoritative metadata.
+
+        Returns ``(count, info)`` with ``info = {"source", "status", "canonical"}``,
+        or ``(None, {})`` when no authoritative source reports a finished volume
+        count for THIS series.  Metadata only -- never fetches a torrent/payload.
+        """
+        candidates = []
+
+        def _consider(candidate, source_label: str):
+            if not isinstance(candidate, dict):
+                return
+            source = str(candidate.get("source") or "").strip().lower()
+            if source in ("", "fallback", "cleaned"):
+                return
+            total = candidate.get("total_volumes")
+            try:
+                count = int(total) if total not in (None, "") else 0
+            except (TypeError, ValueError):
+                count = 0
+            if count <= 0 or count > self.INFERENCE_MAX_VOLUMES:
+                return
+            names = [
+                candidate.get("canonical_title"),
+                candidate.get("romaji_title"),
+                candidate.get("english_title"),
+                candidate.get("title"),
+            ]
+            if not any(
+                isinstance(name, str) and self._metadata_name_matches(name, series_key)
+                for name in names
+            ):
+                return
+            candidates.append((count, {
+                "source": source or source_label,
+                "status": str(candidate.get("status") or "").upper(),
+                "canonical": str(
+                    candidate.get("canonical_title") or candidate.get("title") or ""
+                ).strip(),
+            }))
+
+        _consider(meta, "anilist")
+        for alt in (alt_names or []):
+            if not alt:
+                continue
+            try:
+                _consider(self.anilist.resolve_manga_series(alt), "anilist")
+            except Exception as exc:  # pragma: no cover - metadata must never break ingestion
+                logger.debug("Inference metadata lookup failed for alias '%s': %s", alt, exc)
+        # MangaUpdates fallback (only when AniList has no finished count).
+        if not any(
+            info["status"] in self.INFERENCE_FINISHED_STATUSES for _count, info in candidates
+        ):
+            fallback_name = series_key or getattr(rel, "series_name", "") or ""
+            try:
+                _consider(self.mangaupdates.get_series_info(fallback_name), "mangaupdates")
+            except Exception as exc:  # pragma: no cover - metadata must never break ingestion
+                logger.debug("Inference MangaUpdates lookup failed for '%s': %s", fallback_name, exc)
+
+        for count, info in candidates:
+            if info["status"] in self.INFERENCE_FINISHED_STATUSES:
+                return count, info
+        return None, {}
+
+    def _apply_collected_release_inference(self, rel, series_key: str, meta, alt_names) -> int:
+        """Expand a collected batch when authoritative metadata knows its full set.
+
+        Applies the inference contract and returns the inferred volume count (0 when
+        nothing was inferred):
+        * only for year-range titles with no volume/chapter markers;
+        * never when the release already carries volumes or an explicit complete marker
+          (explicit markers always win);
+        * only when `total_volumes` is known AND the status is FINISHED/PUBLISHED;
+        * otherwise the release stays volume-less and visible, and is retried later.
+        """
+        if getattr(rel, "volumes", None):
+            return 0
+        title = getattr(rel, "title", "") or ""
+        if getattr(rel, "is_complete", False) or is_complete_series_release(title):
+            return 0
+        if not self._infer_collected_releases_enabled():
+            return 0
+        if not is_collected_release_candidate(title):
+            return 0
+        count, info = self._infer_collected_release_volumes(rel, series_key, meta, alt_names)
+        if not count:
+            logger.info(
+                "Collected release '%s' kept volume-less: no authoritative finished "
+                "volume count yet (retried on the next poll).", title,
+            )
+            return 0
+        rel.volume_start = 1.0
+        rel.volume_end = float(count)
+        rel.volumes = [float(v) for v in range(1, count + 1)]
+        rel.is_bundle = True
+        rel.inferred_volumes = True
+        self._log_activity(
+            "COLLECTED_RELEASE_INFERRED",
+            f"Inferred full volume set for '{series_key}': {count} volumes",
+            f"Source: {info['source']}; status: {info['status']}; "
+            f"canonical: '{info['canonical']}'; release: '{title}'",
+        )
+        return count
 
     def resolve_series_identity(
         self,
@@ -601,6 +742,12 @@ class MangaScheduler:
                     cover_url = rel.cover_url or meta.get("cover_url") or ""
                     alt_names = identity["alt_names"]
 
+                    # Collected batch (year-range title, no volume markers): infer the
+                    # full volume set from authoritative metadata only (never a
+                    # torrent/payload) BEFORE matching, so the missing-volume
+                    # reconciliation below requests only what is actually missing.
+                    self._apply_collected_release_inference(rel, series_key, meta, alt_names)
+
                     # SSRF safe sync cover caching
                     if cover_url:
                         self.cover_cache.cache_sync(cover_url)
@@ -636,8 +783,9 @@ class MangaScheduler:
                         "title": rel.title,
                         "series_name": series_key,
                         "release_group": rel_group,
-"revision": getattr(rel, "revision", None),
-"publisher": getattr(rel, "publisher", "") or "",
+                        "revision": getattr(rel, "revision", None),
+                        "inferred_volumes": 1 if getattr(rel, "inferred_volumes", False) else 0,
+                        "publisher": getattr(rel, "publisher", "") or "",
                         "is_bundle": rel.is_bundle,
                         "volume_start": rel.volume_start,
                         "volume_end": rel.volume_end,
@@ -840,6 +988,11 @@ class MangaScheduler:
         cover_url = rel.cover_url or meta.get("cover_url") or ""
         alt_names = identity["alt_names"]
 
+        # Collected batch (year-range title, no volume markers): infer the full set
+        # from authoritative metadata only.  Explicit volume markers and complete
+        # markers always win and are handled below, untouched.
+        self._apply_collected_release_inference(rel, series_key, meta, alt_names)
+
         # If release is marked (complete) and has no volume labels, fetch total volume count from external sources
         if is_comp and not rel.volumes:
             total_vols = meta.get("total_volumes") if meta else None
@@ -904,8 +1057,9 @@ class MangaScheduler:
             "title": rel.title,
             "series_name": series_key,
             "release_group": rel_group,
-"revision": getattr(rel, "revision", None),
-"publisher": getattr(rel, "publisher", "") or "",
+            "revision": getattr(rel, "revision", None),
+            "inferred_volumes": 1 if getattr(rel, "inferred_volumes", False) else 0,
+            "publisher": getattr(rel, "publisher", "") or "",
             "is_bundle": rel.is_bundle,
             "is_complete": 1 if is_comp else 0,
             "volume_start": rel.volume_start,
