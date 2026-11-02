@@ -1,77 +1,122 @@
-# MangaTrax E2E Test Suite Readiness Report
+# MangaTrax Test Suite Readiness Report
 
-## Executive Summary
+## ⚠️ Correction notice (2026-11-02) — earlier "100% verified" claims were void
 
-- **Status**: **READY (100% Pass Rate)**
-- **Total Test Cases**: **77 Automated Tests**
-- **Test Tiers**: 4 Tiers (Feature Coverage, Boundary & Corner, Cross-Feature Combinations, Real-World Scenarios)
-- **Execution Runtime**: Calibre 64-bit Python 3.14.8 (`calibre-debug.exe -e`)
-- **Execution Time**: **~7.2 seconds** for entire 77-test suite
-- **Failures / Errors**: **0** (All 77 passed)
-- **External Dependencies**: **Zero** (Isolated in-memory shims and ephemeral SQLite WAL instances)
+Every script-style suite under `tests/` used to be executed directly with
+`calibre-debug.exe -e <file>`. That interpreter runs Python with **`optimize=2`**
+(`sys.flags.optimize == 2`, `__debug__ is False`), so CPython strips every bare
+`assert` statement at compile time. The suites' `"ALL TESTS PASSED (100% VERIFIED)"`
+banners and their exit code 0 were therefore **not evidence of anything** — no
+assertion ever ran. Earlier figures of that kind in this file and in prior session
+reports are **void**.
+
+The script-style suites are now run **only** through the assert-aware runner
+`tests/run_tests.py`, which recompiles each suite with `optimize=0` and executes it
+with live assertions (see `TEST_INFRA.md` §3.3). The 77-test E2E suite
+(`tests/e2e/run_all_e2e.py`) is unittest-based (`self.assert*` method calls), so it
+genuinely executed its assertions all along; its 77/77 result stands.
+
+## Executive Summary (current, honest)
+
+| | |
+|---|---|
+| **Sanctioned entry points** | `tests/run_tests.py` (script suites) **and** `tests/e2e/run_all_e2e.py` (E2E) — nothing else |
+| **Script-style suites** | 7 suites, 481 `assert` statements compiled live (`optimize=0`), 495 assertion executions, **7 passed / 0 failed** |
+| **E2E suite** | **77 / 77** tests pass (unittest, genuinely executed) |
+| **Runtime** | Calibre 64-bit Python 3.14.8 (`calibre-debug.exe -e`) |
+| **Hermetic** | No live metadata HTTP: AniList (`_fetch_from_anilist`) / MangaUpdates (`_fetch_from_api`) calls are stubbed in every test that would reach them. Verified green with outbound HTTP blocked (dead proxy). |
+| **Failure detection** | Proven: an injected `assert False` in a scratch copy is reported as `FAIL` with file:line, statement and message, exit code 1 — while the same file run directly under `calibre-debug -e` still exits 0 (assert stripped). |
 
 ---
 
 ## 1. How to Run the Tests
 
-The test suite runs via Calibre's embedded Python interpreter.
+Both entry points run inside Calibre's embedded Python interpreter.
 
-### Run Full Suite (All 4 Tiers)
+### 1.1 Script-style suites — MUST go through the assert-aware runner
+
 ```powershell
-& "C:\Program Files\Calibre2\calibre-debug.exe" -e "tests\e2e\run_all_e2e.py"
+# All script-style suites (tests/test_*.py)
+& "C:\Program Files\Calibre2\calibre-debug.exe" -e "tests\run_tests.py"
+
+# A single suite
+& "C:\Program Files\Calibre2\calibre-debug.exe" -e "tests\run_tests.py" tests\test_mangatrax_workflow.py
+
+# List the discovered suites without running them
+& "C:\Program Files\Calibre2\calibre-debug.exe" -e "tests\run_tests.py" --list
 ```
 
-### Run Specific Tiers
+Do **not** run a script-style suite directly (`calibre-debug -e tests\test_*.py`):
+under that interpreter the bare `assert` statements are compiled away and the suite
+can print "ALL PASSED" and exit 0 without checking anything. `tests/run_tests.py`
+prints the interpreter's `sys.flags.optimize`/`__debug__` values on every invocation
+so the environment is never ambiguous.
+
+### 1.2 E2E suite (unittest-based, safe to run directly)
+
 ```powershell
-# Tier 1: Feature Coverage (41 tests)
+# All 4 tiers (77 tests)
+& "C:\Program Files\Calibre2\calibre-debug.exe" -e "tests\e2e\run_all_e2e.py"
+
+# Single tier
 & "C:\Program Files\Calibre2\calibre-debug.exe" -e "tests\e2e\test_tier1_feature_coverage.py"
-
-# Tier 2: Boundary & Corner Cases (25 tests)
 & "C:\Program Files\Calibre2\calibre-debug.exe" -e "tests\e2e\test_tier2_boundary_corner.py"
-
-# Tier 3: Cross-Feature Combinations (7 tests)
 & "C:\Program Files\Calibre2\calibre-debug.exe" -e "tests\e2e\test_tier3_cross_feature.py"
-
-# Tier 4: Real-World Scenarios (4 tests)
 & "C:\Program Files\Calibre2\calibre-debug.exe" -e "tests\e2e\test_tier4_real_world.py"
 ```
 
 ---
 
-## 2. Test Execution Results
+## 2. Test Execution Results (2026-11-02, branch `audit/m1-m5`)
+
+### 2.1 Script-style suites via `tests/run_tests.py` (assertions live)
 
 ```text
 ==============================================================================
-           MangaTrax Comprehensive E2E Opaque-Box Test Suite
-               Executing Tiers 1 through 4 via Calibre Python
+MangaTrax assert-aware test runner
 ==============================================================================
-Timestamp: 2026-11-01 01:17:09 UTC
-Python Runtime: 3.14.8 (main, Oct  3 2026, 20:00:05) [MSC v.1950 64 bit (AMD64)]
+  interpreter      : Python 3.14.8
+  sys.flags.optimize: 2  (calibre-debug -e)
+  __debug__        : False
+  native asserts   : DISABLED -> every suite below is recompiled with optimize=0
+  suites           : 7
+  executed-assert counting: sys.monitoring tool id 4
 ==============================================================================
 
---> Running Tier 1: Feature Coverage (Endpoints, Tracking, Feeds, Calibre, Tagging, qBit, Discovery, Blacklist)...
-Ran 41 tests in 3.471s - OK
+[1/7] PASS  tests\test_complete_series_and_dual_titles.py  (2.90s)  assert statements live: 64, executions: 73
+[2/7] PASS  tests\test_m1_adversarial_challenger.py        (1.12s)  assert statements live: 0, executions: 0
+[3/7] PASS  tests\test_m1_defect_fixes.py                  (7.63s)  assert statements live: 0, executions: 0
+[4/7] PASS  tests\test_mangatrax_workflow.py               (1.09s)  assert statements live: 306, executions: 310
+[5/7] PASS  tests\test_performance_and_lazy_loading.py     (0.29s)  assert statements live: 58, executions: 59
+[6/7] PASS  tests\test_releases_ignore_and_backfill_resume.py (0.44s) assert statements live: 53, executions: 53
+[7/7] PASS  tests\test_status_precedence.py                (1.33s)  assert statements live: 0, executions: 0
 
---> Running Tier 2: Boundary & Corner Cases (Empty Inputs, Extreme Vols, Unicode, Malformed XML, Intervals)...
-Ran 25 tests in 0.857s - OK
+  suites run      : 7
+  suites passed   : 7
+  suites failed   : 0
+  assert statements compiled live (optimize=0): 481
+  assert executions observed (sys.monitoring): 495
+RESULT: PASS -- every suite ran with assertions compiled live (optimize=0).
+```
 
---> Running Tier 3: Cross-Feature Combinations (Pairwise Interaction Flows)...
-Ran 7 tests in 0.796s - OK
+`assert statements live: 0` for `test_m1_adversarial_challenger.py`,
+`test_m1_defect_fixes.py` and `test_status_precedence.py` is expected and honest:
+those suites were written with explicit `_check(cond, msg)` helpers that raise
+(instead of bare `assert`), precisely because the old optimize=2 interpreter strip
+was known when they were authored. Any failing check still raises and aborts the
+suite, so the runner reports them FAIL.
 
---> Running Tier 4: Real-World Scenarios (Series Lifecycle, Dual-Titles, Concurrency, Resumption)...
-Ran 4 tests in 2.093s - OK
+### 2.2 E2E suite via `tests/e2e/run_all_e2e.py` (unittest, genuine)
 
-==============================================================================
-                           E2E TEST EXECUTION SUMMARY
-==============================================================================
+```text
 Tier Name                                                | Pass  | Fail  | Time (s)
 ------------------------------------------------------------------------------
-Tier 1: Feature Coverage (Endpoints, Tracking, Feeds,    | 41    | 0     | 3.47    
-Tier 2: Boundary & Corner Cases (Empty Inputs, Extreme   | 25    | 0     | 0.86    
-Tier 3: Cross-Feature Combinations (Pairwise Interacti   | 7     | 0     | 0.80    
-Tier 4: Real-World Scenarios (Series Lifecycle, Dual-T   | 4     | 0     | 2.09    
+Tier 1: Feature Coverage (Endpoints, Tracking, Feeds,    | 41    | 0     | 10.58
+Tier 2: Boundary & Corner Cases (Empty Inputs, Extreme   | 25    | 0     | 0.84
+Tier 3: Cross-Feature Combinations (Pairwise Interacti   | 7     | 0     | 0.83
+Tier 4: Real-World Scenarios (Series Lifecycle, Dual-T   | 4     | 0     | 1.69
 ------------------------------------------------------------------------------
-TOTAL                                                    | 77    | 0     | 7.22    
+TOTAL                                                    | 77    | 0     | 13.94
 ==============================================================================
  [PASSED] ALL 4 TIERS EXECUTED SUCCESSFULLY WITH 100% PASS RATE!
 ==============================================================================
@@ -224,8 +269,10 @@ TOTAL                                                    | 77    | 0     | 7.22
 | **R1. Boundary & Corner Cases** | Tier 2 (25 tests) across 5 edge condition categories | **VERIFIED (25/25)** |
 | **R1. Cross-Feature Pipelines** | Tier 3 (7 tests) across pairwise subsystem interactions | **VERIFIED (7/7)** |
 | **R1. Realistic Workflows & Stress** | Tier 4 (4 tests) covering full lifecycles, dual titles, and WAL stress | **VERIFIED (4/4)** |
+| **Script-style suites (M1 + legacy)** | 7 suites / 481 `assert` statements compiled live / 495 assertion executions | **VERIFIED (7/7 suites, 0 failures)** |
+| **Assertions actually execute** | `tests/run_tests.py` recompiles every suite with `optimize=0`; injected-false-assert demo proves failures are caught (exit 1) | **VERIFIED** |
 | **Calibre Runtime Integration** | Execution under Calibre Python 3.14.8 (`calibre-debug.exe -e`) | **VERIFIED** |
-| **Hermetic Isolation** | Zero network socket usage, ephemeral SQLite WAL sandboxing | **VERIFIED** |
+| **Hermetic Isolation** | Zero live metadata HTTP (AniList/MangaUpdates stubbed in tests that would reach them), zero live torrent/Calibre resources, ephemeral SQLite WAL sandboxing. Green with outbound HTTP blocked. | **VERIFIED** |
 
 ---
 
@@ -235,4 +282,21 @@ During the development and verification of this opaque-box E2E suite, several ar
 1. **Database Default Seeds**: MangaTrax's `MangaDatabase` automatically provisions 4 default prioritized groups (`danke-Empire`, `1R0N`, `Lu自主规制`, `a-sloth`) and 1 default feed (`Manga Releases (RSS)`). Any tests inspecting group or feed counts must account for this baseline.
 2. **CBZ Tagging Interface**: `inject_comicinfo` expects a Python dictionary payload (`Dict[str, Any]`), not raw XML strings. Keys include `series_name`, `volume`, `authors`, `publisher`, `tags`.
 3. **Nyaa Provider Implementation**: `NyaaMangaProvider` scrapes HTML table markup (`table.torrent-list tbody tr`) using BeautifulSoup, capturing `torrent_url`, `magnet_url`, `seeders`, and `post_size`.
-4. **qBittorrent Priority Signature**: Selective volume downloading uses `set_file_priorities(wanted_volumes=[...])` rather than single-volume file updates.
+4. **qBittorrent Priority Signature**: Selective volume downloading lives in
+   `QBitClient.apply_selective_volume_download()`, which lists files via
+   `get_torrent_files()` and deselects owned volumes via
+   `set_file_priorities(hash, [indices], priority=0)`. The older
+   `filter_torrent_bundle_files()` helper no longer exists — tests must mock at the
+   current boundary.
+5. **Never run a script-style suite directly.** `calibre-debug.exe -e` uses
+   `optimize=2`; bare `assert` statements are stripped at compile time and the suite
+   will happily print "ALL TESTS PASSED" while checking nothing. Use
+   `tests/run_tests.py`, or write new suites with explicit `_check(cond, msg)` raises
+   (as `test_m1_*` and `test_status_precedence.py` do).
+6. **Volume values are display strings in the tagger result.** Since commit d1ee8eb,
+   `auto_tag_staging_cbz_files()` returns `{"volume": "4"}` (or `"1-5"` for bundle
+   ranges) — a display string that is also written into `ComicInfo.xml`, **not** the
+   pre-d1ee8eb float `4.0`. Assertions must match the string contract.
+7. **Settings are strings.** `MangaDatabase.get_setting()` returns TEXT from
+   `app_settings`; numeric settings such as `backfill_last_page` must be coerced
+   (`int(...)`) before comparing to ints.

@@ -10,6 +10,7 @@ import types
 import inspect
 import asyncio
 from typing import Dict, Any, List, Optional, Union, Callable
+from xml.sax.saxutils import escape as _xml_escape
 
 # Set paths
 E2E_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -527,14 +528,64 @@ def generate_rss_xml(items: List[Dict[str, Any]]) -> str:
 
 
 def generate_nyaa_rss(items: List[Dict[str, Any]]) -> str:
-    """Generates Nyaa-compatible XML feed string."""
+    """Generates a valid Nyaa-compatible RSS 2.0 feed string.
+
+    Nyaa publishes torrent metadata as namespaced tags; feedparser surfaces them as
+    ``entry["nyaa_infohash"]`` / ``entry["nyaa_size"]`` / ``entry["nyaa_seeders"]``,
+    which RSSFeedProvider reads.  (Previously this function was malformed: it built a
+    truncated ``lines`` list, never returned, and fell straight through into the next
+    ``def``, so it could never be used.)  Each item accepts: title, link (view URL),
+    guid, pubDate, infohash, size, seeders, leechers, downloads, category_id,
+    category, and optionally enclosure/torrent_url.
+    """
+    def _esc(value: Any) -> str:
+        return _xml_escape(str(value), {'"': "&quot;", "'": "&apos;"})
+
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<rss version="2.0" xmlns:nyaa="https://nyaa.si/xmlns/nyaa">',
-        '  <channel>',
-        '    <title>Nyaa - Manga</title>',
-        '    <link>https://nyaa.si/</link>'
+        "  <channel>",
+        "    <title>Nyaa - Manga</title>",
+        "    <link>https://nyaa.si/</link>",
+        "    <description>Mock Nyaa feed for MangaTrax tests</description>",
     ]
+    for item in items:
+        title = item.get("title", "Sample Manga Vol 1")
+        view_url = item.get("link") or item.get("view_url") or "https://nyaa.si/view/1000"
+        guid = item.get("guid") or view_url
+        infohash = item.get("infohash", "0123456789abcdef0123456789abcdef01234567")
+        size = item.get("size", "150.0 MiB")
+        seeders = item.get("seeders", 25)
+        leechers = item.get("leechers", 5)
+        downloads = item.get("downloads", 100)
+        category = item.get("category", "Literature - English-translated")
+        category_id = item.get("category_id", "3_1")
+        pub_date = item.get("pubDate", "Sat, 01 Nov 2026 00:00:00 +0000")
+
+        lines.append("    <item>")
+        lines.append(f"      <title>{_esc(title)}</title>")
+        lines.append(f"      <link>{_esc(view_url)}</link>")
+        lines.append(f'      <guid isPermaLink="true">{_esc(guid)}</guid>')
+        lines.append(f"      <pubDate>{_esc(pub_date)}</pubDate>")
+        lines.append(f'      <nyaa:categoryId>{_esc(category_id)}</nyaa:categoryId>')
+        lines.append(f"      <nyaa:category>{_esc(category)}</nyaa:category>")
+        lines.append(f"      <nyaa:size>{_esc(size)}</nyaa:size>")
+        lines.append(f"      <nyaa:seeders>{_esc(seeders)}</nyaa:seeders>")
+        lines.append(f"      <nyaa:leechers>{_esc(leechers)}</nyaa:leechers>")
+        lines.append(f"      <nyaa:downloads>{_esc(downloads)}</nyaa:downloads>")
+        lines.append(f"      <nyaa:infoHash>{_esc(infohash)}</nyaa:infoHash>")
+        enclosure_url = item.get("enclosure") or item.get("torrent_url")
+        if enclosure_url:
+            lines.append(
+                f'      <enclosure url="{_esc(enclosure_url)}" '
+                'type="application/x-bittorrent" length="0" />'
+            )
+        lines.append("    </item>")
+    lines.append("  </channel>")
+    lines.append("</rss>")
+    return "\n".join(lines)
+
+
 def generate_nyaa_html(items: List[Dict[str, Any]]) -> str:
     """Generates Nyaa-compatible HTML page with torrent-list table."""
     rows = []

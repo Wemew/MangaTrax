@@ -133,9 +133,12 @@ def test_backfill_start_page_and_resume():
         requested_start_pages = [call[0] for call in crawled_pages]
         assert requested_start_pages == [5, 6, 7]
 
-        # Verify last_page was tracked in settings
+        # Verify last_page was tracked in settings.
+        # app_settings stores every value as TEXT (settings are strings by design),
+        # so get_setting() returns the string "7" -- coerce before comparing to int.
         last_page = db.get_setting("backfill_last_page")
-        assert last_page == 7
+        assert last_page is not None, "backfill_last_page was not persisted"
+        assert int(last_page) == 7, f"Expected backfill_last_page == 7, got {last_page!r}"
 
         # Verify get_backfill_status returns last_page
         final_status = scheduler.get_backfill_status()
@@ -147,15 +150,27 @@ def test_backfill_start_page_and_resume():
 
 def test_template_features_and_modal():
     template_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend", "app", "templates"))
-    
-    with open(os.path.join(template_dir, "base.html"), "r", encoding="utf-8") as f:
-        base_html = f.read()
-    with open(os.path.join(template_dir, "releases.html"), "r", encoding="utf-8") as f:
-        releases_html = f.read()
-    with open(os.path.join(template_dir, "prioritized.html"), "r", encoding="utf-8") as f:
-        prioritized_html = f.read()
-    with open(os.path.join(template_dir, "discovery.html"), "r", encoding="utf-8") as f:
-        discovery_html = f.read()
+
+    def read_template(relative_path):
+        with open(os.path.join(template_dir, relative_path), "r", encoding="utf-8") as f:
+            return f.read()
+
+    base_html = read_template("base.html")
+    releases_html = read_template("releases.html")
+    prioritized_html = read_template("prioritized.html")
+    discovery_html = read_template("discovery.html")
+
+    # The lazy-loading refactor (commit e6e1cf2) moved the per-release / per-series
+    # action buttons out of releases.html / prioritized.html into shared Jinja partials
+    # that those pages include. These assertions follow the markup to where it actually
+    # lives; the previous version only read releases.html and had been stale since that
+    # refactor (it never failed because asserts were stripped by optimize=2). Test bug.
+    partial_names = [
+        "series_card_chunk.html",
+        "series_table_row_chunk.html",
+        "flat_release_row_chunk.html",
+    ]
+    action_markup = "\n".join(read_template(os.path.join("partials", name)) for name in partial_names)
 
     # Base HTML should have modal-backfill-setup and universal functions
     assert 'id="modal-backfill-setup"' in base_html
@@ -167,19 +182,19 @@ def test_template_features_and_modal():
     assert 'unignoreReleaseGlobal' in base_html
     assert 'backfillSeriesGlobal' in base_html
 
-    # Releases HTML should feature blacklist, backfill, track and ignore
-    assert 'ignoreReleaseGlobal' in releases_html
-    assert 'unignoreReleaseGlobal' in releases_html
-    assert 'blacklistSeriesGlobal' in releases_html
-    assert 'backfillSeriesGlobal' in releases_html
+    # Releases page must include the partials that render blacklist/backfill/track/ignore
+    assert 'partials/series_card_chunk.html' in releases_html
+    assert 'partials/flat_release_row_chunk.html' in releases_html
+    assert 'ignoreReleaseGlobal' in action_markup
+    assert 'unignoreReleaseGlobal' in action_markup
+    assert 'blacklistSeriesGlobal' in action_markup
+    assert 'backfillSeriesGlobal' in action_markup
     assert 'handleTrackSeries' in releases_html
     assert 'status=IGNORED' in releases_html
 
     # Prioritized HTML should also feature parity
-    assert 'ignoreReleaseGlobal' in prioritized_html
-    assert 'unignoreReleaseGlobal' in prioritized_html
-    assert 'blacklistSeriesGlobal' in prioritized_html
-    assert 'backfillSeriesGlobal' in prioritized_html
+    assert 'partials/series_card_chunk.html' in prioritized_html
+    assert 'partials/flat_release_row_chunk.html' in prioritized_html
     assert 'status=IGNORED' in prioritized_html
 
     # Discovery should trigger openBackfillModal
@@ -235,16 +250,33 @@ def test_pending_requests_and_bundle_download_filter():
 
         scheduler = MangaScheduler(db=db, cover_cache=CoverCache(tmpdir))
 
-        # Enable mock qbit to exercise the SQL query
-        mock_qbit = MagicMock()
-        mock_qbit.enabled = True
-        mock_qbit.extract_torrent_hash = MagicMock(return_value="abcdef1234567890abcdef1234567890abcdef12")
-        mock_qbit.filter_torrent_bundle_files = MagicMock(return_value={"kept_volumes": [4.0, 5.0], "skipped_volumes": [1.0, 2.0, 3.0]})
+        # The selective-volume download flow now lives in
+        # QBitClient.apply_selective_volume_download(), which lists the torrent's files via
+        # get_torrent_files() and deselects owned volumes via set_file_priorities(). The old
+        # filter_torrent_bundle_files() helper it used to mock no longer exists, so the mock
+        # was inert and the real code path never ran (filtered == 0). Mock at the *current*
+        # boundary and let the real selective-download logic execute -- stale test mock.
+        from app.downloader.qbit import QBitClient
+
+        torrent_hash = "abcdef1234567890abcdef1234567890abcdef12"
+        mock_qbit = QBitClient(base_url="http://mock-qbit:8080", username="admin", password="adminadmin", enabled=True)
+        mock_qbit._ensure_auth = MagicMock(return_value=True)
+        mock_qbit.get_torrent_files = MagicMock(return_value=[
+            {"index": 0, "name": "Bleach Vol. 01.cbz"},
+            {"index": 1, "name": "Bleach Vol. 02.cbz"},
+            {"index": 2, "name": "Bleach Vol. 03.cbz"},
+            {"index": 3, "name": "Bleach Vol. 04.cbz"},
+            {"index": 4, "name": "Bleach Vol. 05.cbz"},
+        ])
+        mock_qbit.set_file_priorities = MagicMock(return_value=True)
         scheduler.get_qbit_client = MagicMock(return_value=mock_qbit)
 
         # Test check_and_filter_active_downloads executes query and filtering cleanly
         filtered = scheduler.check_and_filter_active_downloads()
-        assert filtered == 1
+        assert filtered == 1, f"expected 1 filtered bundle, got {filtered}"
+        # Volumes 1-3 are already owned (present in Calibre) -> priority 0 (skip);
+        # missing volumes 4-5 keep downloading.
+        mock_qbit.set_file_priorities.assert_called_once_with(torrent_hash, [0, 1, 2], priority=0)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

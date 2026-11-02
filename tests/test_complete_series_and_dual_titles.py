@@ -3,6 +3,7 @@ import os
 import tempfile
 import json
 import gc
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend")))
 
@@ -72,7 +73,13 @@ def test_external_metadata_volume_resolution():
         is_complete=True
     )
 
-    is_new, status, missing, rel_id, canon = scheduler._process_release(rel, "Nyaa", matcher)
+    # Hermetic: _process_release() enriches DISCOVERY releases with MangaUpdates synopsis
+    # over HTTP. Stub that HTTP call -- otherwise this test hits the live API (slow, and it
+    # fails/flakes on an offline machine). The canonical title/volume count come from the
+    # seeded local AniList cache above, which is what this test is actually about.
+    from app.metadata.mangaupdates import MangaUpdatesService
+    with patch.object(MangaUpdatesService, "_fetch_from_api", return_value=None):
+        is_new, status, missing, rel_id, canon = scheduler._process_release(rel, "Nyaa", matcher)
 
     assert status == "DISCOVERY"
     assert canon == "The Devil is a Part-Timer!"
@@ -191,7 +198,12 @@ def test_dual_titles_detection_during_backfill():
     covers_dir = tempfile.mkdtemp()
     scheduler = MangaScheduler(db, CoverCache(covers_dir))
 
-    titles = scheduler.detect_series_titles("Class de 2 Banme ni Kawaii Onna no Ko to Tomodachi ni Natta | I Made Friends with the Second Prettiest Girl in My Class")
+    titles = None
+    # detect_series_titles() queries AniList for each candidate; stub the HTTP call so this
+    # test only exercises the delimiter-based title detection (and stays offline/deterministic).
+    from app.metadata.anilist import AniListMetadataService
+    with patch.object(AniListMetadataService, "_fetch_from_anilist", return_value=None):
+        titles = scheduler.detect_series_titles("Class de 2 Banme ni Kawaii Onna no Ko to Tomodachi ni Natta | I Made Friends with the Second Prettiest Girl in My Class")
     assert len(titles) >= 2
     has_romaji = any("Class de 2 Banme" in t for t in titles)
     has_english = any("Second Prettiest Girl" in t for t in titles)
@@ -321,6 +333,12 @@ def test_reconciliation_23_of_24_volumes():
 
     conn = sqlite3.connect(calibre_db_path)
     cur = conn.cursor()
+    # Complete, realistic Calibre metadata.db schema. The scanner joins ALL of these
+    # link tables; the previous mock omitted the authors/publishers/tags tables, so
+    # CalibreMangaScanner.get_all_series() raised (sqlite3.OperationalError: no such
+    # table: books_authors_link), logged the error, returned [] -- and the DB sync it
+    # feeds silently did nothing, so no Calibre ownership was ever recorded and the
+    # reconciliation this test is about never ran. That was a test-fixture bug.
     cur.executescript("""
         CREATE TABLE books (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -336,14 +354,48 @@ def test_reconciliation_23_of_24_volumes():
             book INTEGER NOT NULL,
             series INTEGER NOT NULL
         );
+        CREATE TABLE authors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL
+        );
+        CREATE TABLE books_authors_link (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book INTEGER NOT NULL,
+            author INTEGER NOT NULL
+        );
+        CREATE TABLE publishers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL
+        );
+        CREATE TABLE books_publishers_link (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book INTEGER NOT NULL,
+            publisher INTEGER NOT NULL
+        );
+        CREATE TABLE tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL
+        );
+        CREATE TABLE books_tags_link (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book INTEGER NOT NULL,
+            tag INTEGER NOT NULL
+        );
     """)
 
     cur.execute("INSERT INTO series (id, name) VALUES (1, 'The Devil is a Part-Timer!');")
+    cur.execute("INSERT INTO authors (id, name) VALUES (1, 'Satoshi Wagahara');")
+    cur.execute("INSERT INTO publishers (id, name) VALUES (1, 'Yen Press');")
+    cur.execute("INSERT INTO tags (id, name) VALUES (1, 'Manga');")
+    cur.execute("INSERT INTO tags (id, name) VALUES (2, 'Comedy');")
     # Insert 23 volumes into Calibre (volumes 1 to 23)
     for v in range(1, 24):
         cur.execute("INSERT INTO books (id, title, series_index) VALUES (?, ?, ?);",
                     (v, f"The Devil is a Part-Timer!, Vol. {v}", float(v)))
         cur.execute("INSERT INTO books_series_link (book, series) VALUES (?, 1);", (v,))
+        cur.execute("INSERT INTO books_authors_link (book, author) VALUES (?, 1);", (v,))
+        cur.execute("INSERT INTO books_publishers_link (book, publisher) VALUES (?, 1);", (v,))
+        cur.execute("INSERT INTO books_tags_link (book, tag) VALUES (?, 1);", (v,))
     conn.commit()
     conn.close()
 
@@ -450,9 +502,13 @@ def test_dual_title_delimiter_preservation():
     assert "/" in info["series_name"]
     assert " / " in info["series_name"]
 
-    # Verify resolve_manga_series fallback preserves original delimiters without clobbering into concatenated string
+    # Verify resolve_manga_series fallback preserves original delimiters without clobbering into concatenated string.
+    # Hermetic contract: metadata HTTP must be stubbed, else the result depends on whether
+    # the machine has network access. Without this stub the live AniList query returns the
+    # English title with source="anilist", and the assertion only "passed" offline.
     service = AniListMetadataService()
-    fallback_res = service.resolve_manga_series(info["series_name"])
+    with patch.object(AniListMetadataService, "_fetch_from_anilist", return_value=None):
+        fallback_res = service.resolve_manga_series(info["series_name"])
     assert "/" in fallback_res["canonical_title"], f"Expected slash delimiter preserved, got: {fallback_res['canonical_title']}"
     assert fallback_res["source"] == "fallback"
 
