@@ -6,7 +6,7 @@ import json
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
-from app.database import MangaDatabase
+from app.database import MangaDatabase, resolve_status
 from app.covers import CoverCache
 from app.calibre.scanner import CalibreMangaScanner
 from app.calibre.matcher import MangaCalibreMatcher
@@ -90,7 +90,9 @@ class MangaScheduler:
 
                 notifier = self.get_notifier()
                 for item in resolved:
-                    self.db.update_release_status(item["release_id"], "IN_CALIBRE")
+                    # Automated write: the precedence model decides (promotion to
+                    # IN_CALIBRE is allowed, a downgrade is not).
+                    self.db.update_release_status(item["release_id"], "IN_CALIBRE", enforce_precedence=True)
                     self.db.log_activity(
                         "REQUEST_RESOLVED",
                         f"Resolved: '{item['title']}' is now available in your Calibre library.",
@@ -301,8 +303,10 @@ class MangaScheduler:
                         total_requested += 1
 
                         if is_transition:
-                            # Ensure database status is updated to REQUESTED even if upsert omitted it
-                            self.db.update_release_status(rel_id, "REQUESTED")
+                            # Ensure database status reflects REQUESTED even if the upsert
+                            # preserved a contradictory state.  Precedence-aware so an
+                            # explicit user decision can never be overridden here.
+                            self.db.update_release_status(rel_id, "REQUESTED", enforce_precedence=True)
 
                         if is_new or is_transition:
                             try:
@@ -1025,7 +1029,10 @@ class MangaScheduler:
                     "volume_end": float(tot)
                 }
                 match_res = matcher.check_release(payload, alt_series_names=candidates)
-                new_status = match_res.get("status", r.get("status") or "DISCOVERY")
+                candidate_status = match_res.get("status") or r.get("status") or "DISCOVERY"
+                # Automated expansion writer: must not downgrade a sticky status
+                # (e.g. a complete-series release the user already requested).
+                new_status = resolve_status(r.get("status"), candidate_status)
                 missing_vols = match_res.get("missing_volumes", vols)
                 m_json = json.dumps(missing_vols)
 

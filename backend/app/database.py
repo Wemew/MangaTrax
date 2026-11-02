@@ -10,6 +10,88 @@ import logging
 
 logger = logging.getLogger("mangatrax.database")
 
+# ---------------------------------------------------------------------------
+# Release status precedence model
+# ---------------------------------------------------------------------------
+# Release statuses fall into two families:
+#
+# * RECOMPUTABLE (``DISCOVERY``, ``NEW``): a background feed poll / Calibre sync
+#   owns these.  Automation may freely recompute them while the stored value is
+#   also recomputable (or unset).
+# * STICKY (``REQUESTED``, ``IN_CALIBRE``, ``IGNORED``, ``BLACKLISTED``): they
+#   encode a decision that a poll classification must never undo.
+#
+# Within the sticky family two sub-rules apply:
+# * the USER-VETO tier (``IGNORED``, ``BLACKLISTED``) is absolute for automated
+#   writes -- only an explicit user action (status endpoint, unignore,
+#   unblacklist, re-track) can lift it;
+# * ``REQUESTED`` and ``IN_CALIBRE`` may transition into each other because both
+#   are derived from Calibre ownership reconciliation, not from feed
+#   classification (Feature 8: DISCOVERY/NEW -> REQUESTED when a tracked series
+#   newly appears in Calibre; REQUESTED -> IN_CALIBRE when the missing volumes
+#   are acquired; and the reverse when a full-series release turns out to be
+#   missing volumes).
+#
+# Deliberate API transitions deliberately do NOT go through this model: they
+# call ``MangaDatabase.update_release_status()`` without ``enforce_precedence``
+# so a user can always override a sticky state (e.g. IGNORED -> REQUESTED via
+# POST /api/releases/{id}/status or /unignore).
+STICKY_STATUSES = frozenset({"REQUESTED", "IGNORED", "BLACKLISTED", "IN_CALIBRE"})
+RECOMPUTABLE_STATUSES = frozenset({"DISCOVERY", "NEW"})
+USER_VETO_STATUSES = frozenset({"IGNORED", "BLACKLISTED"})
+
+# Higher rank = stronger; automation may only move a status to an equal or
+# higher rank (except that the user-veto tier is immutable, see resolve_status).
+_STATUS_RANK = {
+    "DISCOVERY": 0,
+    "NEW": 0,
+    "REQUESTED": 1,
+    "IN_CALIBRE": 1,
+    "IGNORED": 2,
+    "BLACKLISTED": 2,
+}
+
+
+def normalize_status(value: Optional[str]) -> Optional[str]:
+    """Canonicalises a status value: ``None``/blank -> ``None``, else stripped upper-case."""
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    return text or None
+
+
+def resolve_status(existing: Optional[str], incoming: Optional[str]) -> Optional[str]:
+    """Single source of truth for every *automated* release-status write.
+
+    ``existing`` is the status currently stored in the database, ``incoming`` is
+    the status that automation (feed poll, Calibre sync, complete-series
+    expansion) just computed.
+
+    Rules:
+      1. An incoming blank/``None`` status never clears an existing status.
+      2. An unset existing status adopts the incoming status.
+      3. The user-veto tier (``IGNORED``, ``BLACKLISTED``) is never changed by
+         automation -- only an explicit user action may lift it (see
+         ``update_release_status``/``remove_from_blacklist``).
+      4. Otherwise the higher-ranked status wins, so a sticky status is never
+         downgraded to a recomputable classification (``DISCOVERY``/``NEW`` ->
+         keeps ``REQUESTED``/``IN_CALIBRE``), while recomputable statuses remain
+         fully automation-owned and ``REQUESTED`` <-> ``IN_CALIBRE`` ownership
+         reconciliation still works.
+    """
+    old = normalize_status(existing)
+    new = normalize_status(incoming)
+    if new is None:
+        return old
+    if old is None:
+        return new
+    if old in USER_VETO_STATUSES:
+        return old
+    if _STATUS_RANK.get(new, 0) >= _STATUS_RANK.get(old, 0):
+        return new
+    return old
+
+
 class MangaDatabase:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -487,7 +569,9 @@ class MangaDatabase:
                 VALUES (?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(name) DO UPDATE SET reason = excluded.reason;
             """, (clean, reason))
-            # Cancel existing requests
+            # Cancel existing requests.  Explicit user action: blacklisting is a
+            # deliberate transition, so it writes BLACKLISTED verbatim and bypasses
+            # resolve_status() (automation may not override the veto afterwards).
             cur.execute("UPDATE releases SET status = 'BLACKLISTED', updated_at = CURRENT_TIMESTAMP WHERE lower(series_name) = lower(?);", (clean,))
             cur.execute("UPDATE series_tracking SET is_monitored = 0 WHERE lower(name) = lower(?);", (clean,))
             conn.commit()
@@ -497,7 +581,19 @@ class MangaDatabase:
     def remove_from_blacklist(self, blacklist_id: int):
         with self.get_connection() as conn:
             cur = conn.cursor()
+            cur.execute("SELECT name FROM series_blacklist WHERE id = ?;", (blacklist_id,))
+            row = cur.fetchone()
             cur.execute("DELETE FROM series_blacklist WHERE id = ?;", (blacklist_id,))
+            if row and row["name"]:
+                # Explicit user action: lift the BLACKLISTED veto so automation may
+                # re-classify these releases again.  BLACKLISTED is otherwise immune to
+                # automated re-upserts (see resolve_status), so without this reset the
+                # releases would stay invisible forever after an unblacklist.
+                cur.execute("""
+                    UPDATE releases
+                    SET status = 'DISCOVERY', updated_at = CURRENT_TIMESTAMP
+                    WHERE lower(series_name) = lower(?) AND status = 'BLACKLISTED';
+                """, (row["name"].strip(),))
             conn.commit()
             self._invalidate_grouped_cache()
 
@@ -530,6 +626,11 @@ class MangaDatabase:
 
             if existing:
                 rel_id = existing["id"]
+                # Automated re-upsert (feed poll / Calibre sync): the precedence model
+                # decides whether the freshly computed classification may replace the
+                # stored status.  This is what stops a background re-poll from wiping
+                # REQUESTED / IN_CALIBRE / IGNORED / BLACKLISTED.
+                resolved_status = resolve_status(existing["status"], rel.get("status"))
                 cur.execute("""
                     UPDATE releases SET
                         title = ?,
@@ -546,7 +647,7 @@ class MangaDatabase:
                         download_url = ?,
                         link = ?,
                         cover_url = ?,
-                        status = CASE WHEN status = 'IGNORED' THEN status ELSE COALESCE(?, status) END,
+                        status = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?;
                 """, (
@@ -568,7 +669,7 @@ class MangaDatabase:
                     rel.get("download_url"),
                     rel.get("link"),
                     rel.get("cover_url"),
-                    rel.get("status"),
+                    resolved_status,
                     rel_id
                 ))
                 conn.commit()
@@ -598,7 +699,7 @@ class MangaDatabase:
                     rel.get("link"),
                     rel.get("cover_url"),
                     rel.get("source_feed_name"),
-                    rel.get("status", "REQUESTED"),
+                    resolve_status(None, rel.get("status")) or "REQUESTED",
                     rel.get("download_status", "IDLE"),
                     rel.get("torrent_hash")
                 ))
@@ -607,9 +708,25 @@ class MangaDatabase:
                 self._invalidate_grouped_cache()
                 return True, rel_id
 
-    def update_release_status(self, release_id: int, status: str):
+    def update_release_status(self, release_id: int, status: str, enforce_precedence: bool = False):
+        """Sets a release status.
+
+        This is the deliberate-transition primitive used by the user-facing API
+        endpoints (``POST /api/releases/{id}/status``, ``/ignore``, ``/unignore``),
+        so by default the value is written verbatim: a sticky state can always be
+        changed by an explicit user action (e.g. IGNORED -> REQUESTED).
+
+        Automated callers (the scheduler) pass ``enforce_precedence=True`` so the
+        shared ``resolve_status()`` precedence model protects user intent.
+        """
         with self.get_connection() as conn:
             cur = conn.cursor()
+            if enforce_precedence:
+                cur.execute("SELECT status FROM releases WHERE id = ?;", (release_id,))
+                row = cur.fetchone()
+                if row is None:
+                    return
+                status = resolve_status(row["status"], status)
             cur.execute("UPDATE releases SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;", (status, release_id))
             conn.commit()
             self._invalidate_grouped_cache()
@@ -624,11 +741,16 @@ class MangaDatabase:
         with self.get_connection() as conn:
             cur = conn.cursor()
             if status:
+                # Automated reconciliation writer (Calibre sync): the freshly computed
+                # status may not downgrade a sticky state -- resolve against the stored one.
+                cur.execute("SELECT status FROM releases WHERE id = ?;", (release_id,))
+                row = cur.fetchone()
+                resolved_status = resolve_status(row["status"] if row else None, status)
                 cur.execute("""
                     UPDATE releases
                     SET volumes_json = ?, missing_vols_json = ?, status = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?;
-                """, (json.dumps(volumes), json.dumps(missing_volumes), status, release_id))
+                """, (json.dumps(volumes), json.dumps(missing_volumes), resolved_status, release_id))
             else:
                 cur.execute("""
                     UPDATE releases
@@ -895,6 +1017,9 @@ class MangaDatabase:
                     website_url = CASE WHEN series_tracking.website_url = '' OR series_tracking.website_url IS NULL OR series_tracking.website_url LIKE '%search=%' THEN excluded.website_url ELSE series_tracking.website_url END,
                     description = CASE WHEN series_tracking.description = '' OR series_tracking.description IS NULL THEN excluded.description ELSE series_tracking.description END;
             """, (clean, default_link, description))
+            # Explicit user action (POST /api/discovery/track): the request is written
+            # verbatim, bypassing resolve_status().  The following feed polls must not
+            # revert it -- that is exactly what resolve_status() now guarantees.
             if release_id:
                 cur.execute("UPDATE releases SET status = 'REQUESTED', updated_at = CURRENT_TIMESTAMP WHERE id = ?;", (release_id,))
             else:
@@ -1358,8 +1483,9 @@ class MangaDatabase:
                                 if not rel["missing_volumes"] and rel["status"] in ("REQUESTED", "DISCOVERY"):
                                     rel["missing_volumes"] = list(rel["volumes"])
 
-                            new_st = "IN_CALIBRE" if not rel["missing_volumes"] else ("REQUESTED" if calibre_match else rel["status"])
-                            rel["status"] = new_st
+                            candidate_st = "IN_CALIBRE" if not rel["missing_volumes"] else ("REQUESTED" if calibre_match else rel["status"])
+                            # Automated expansion side-effect: never downgrade a sticky status.
+                            rel["status"] = resolve_status(rel["status"], candidate_st)
 
                             try:
                                 cur.execute("""
@@ -1380,7 +1506,9 @@ class MangaDatabase:
                         actual_missing = [v for v in rel["volumes"] if round(float(v), 2) not in owned_vols]
                         if actual_missing != rel["missing_volumes"]:
                             rel["missing_volumes"] = actual_missing
-                            new_rel_st = "IN_CALIBRE" if not actual_missing else ("REQUESTED" if calibre_match.get("is_monitored", 1) else "NEW")
+                            candidate_rel_st = "IN_CALIBRE" if not actual_missing else ("REQUESTED" if calibre_match.get("is_monitored", 1) else "NEW")
+                            # Automated reconcile side-effect: never downgrade a sticky status.
+                            new_rel_st = resolve_status(rel["status"], candidate_rel_st)
                             rel["status"] = new_rel_st
                             try:
                                 cur.execute("UPDATE releases SET missing_vols_json = ?, status = ? WHERE id = ?;", (json.dumps(actual_missing), new_rel_st, rel["id"]))
