@@ -104,6 +104,266 @@ DEFAULT_KNOWN_GROUPS = [
 
 MAX_BUNDLE_SPAN = 1000
 
+# Common scanlation/format tag vocabulary that is sometimes reused as a release
+# group by accident.  "compilation" was missing, so the format tag
+# "(Digital-Compilation)" was accepted as a group and shadowed the real one
+# ("(Oak)").  Rejecting these compound format tags never affects publishers or
+# real groups: only candidates made *entirely* of these words are rejected.
+COMPOUND_FORMAT_TAGS = {
+    "compilation", "compilations", "digital compilation", "digital-compilation",
+    "digital+digital-compilation", "digital + digital-compilation", "colored", "coloured",
+}
+BUZZWORDS |= COMPOUND_FORMAT_TAGS
+
+# ---------------------------------------------------------------------------
+# Ported NovelTrax guards (RELEASE_DETECTION_SPEC.md §2, §5, §6 — MangaTrax D3)
+# ---------------------------------------------------------------------------
+# Leading site prefixes: "download"/"free download" always, but "read"/"get" ONLY
+# when followed by a separator.  The naive rule turned
+# "Reading Our Way to a Happy New World" into "ing Our Way to a Happy New World".
+_SITE_PREFIX_RE = re.compile(
+    r"^(?:\s*(?:free\s+)?download\b\s*[:\-–—]?\s*|\s*(?:read|get)\s*[:\-–—]\s*)",
+    re.IGNORECASE,
+)
+
+# Spec §5 Pattern 0: a parenthesised volume range after an edition number, e.g.
+# "DanMachi Omnibus 1 (Vols 1-3)" -> "DanMachi Omnibus Vols 1-3", so the range
+# expands while the edition number stays out of the series name.
+_PAREN_OMNIBUS_RE = re.compile(
+    r"^(?P<series>.+?)\s+\d+\s*\(\s*"
+    r"(?P<range>(?:volumes?|vols?|books?|book)\.?\s*\d+(?:\.\d+)?\s*[-–—~to]+\s*"
+    r"(?:(?:volumes?|vols?|books?|book)\.?\s*)?\d+(?:\.\d+)?)"
+    r"\s*\)(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+
+# Spec §5 Pattern 1b: a BARE numeric range is a multi-volume bundle, never a
+# chapter ("a range cannot be a chapter").  Zero-padded ranges ("01-02") are
+# chapter notation in manga feeds and are deliberately NOT treated as volumes --
+# they stay under the existing chapter policy ("Series 001-009" must not invent
+# a volume mapping).
+_BARE_VOLUME_RANGE_RE = re.compile(
+    r"^(?P<series>.+?)\s*(?:[-–—:,]\s*)?"
+    r"(?P<start>\d{1,3}(?:\.\d+)?)\s*[-–—~]\s*(?P<end>\d{1,3}(?:\.\d+)?)$"
+)
+
+# "<chapters A-B> as v<X>-<Y>" idiom.  MangaTrax takes the volumes from the
+# "v<X>-<Y>" half (chapters 1-9 are volumes 1-2, not volumes 1-9) and keeps the
+# chapter ranges as data.  Requires an explicit "as" AND an explicit volume token
+# preceded by a chapter range, so it cannot eat an ordinary title.
+_CHAPTER_AS_VOLUME_RE = re.compile(
+    r"^(?P<series>.+?)\s+"
+    r"(?P<chapter_start>\d{1,4}(?:\.\d+)?)\s*[-–—~]\s*(?P<chapter_end>\d{1,4}(?:\.\d+)?)"
+    r"\s+as\s+"
+    r"(?:volumes?|vols?|books?|v)\.?\s*"
+    r"(?P<volume_start>\d{1,3}(?:\.\d+)?)"
+    r"(?:\s*[-–—~]\s*(?P<volume_end>\d{1,3}(?:\.\d+)?))?"
+    r"(?P<tail>.*)$",
+    re.IGNORECASE,
+)
+# Trailing "+ <chapters C-D>" clauses are chapter data only, never extra volumes.
+_CHAPTER_RANGE_TAIL_RE = re.compile(
+    r"\+\s*(\d{1,4}(?:\.\d+)?)\s*[-–—~]\s*(\d{1,4}(?:\.\d+)?)"
+)
+
+# Explicit chapter markers, e.g. "Chapter 250", "Ch. 250", "c374", "#01".  The
+# trailing number requirement keeps ordinary words such as "Chronicles" safe.
+_EXPLICIT_CHAPTER_NUMBER_RE = re.compile(
+    r"(?i)(?:\b(?:chapters?|chap|ch)\.?\s*[-–—:]?\s*(\d{1,4}(?:\.\d+)?)\b"
+    r"|\bc(\d{1,4}(?:\.\d+)?)\b"
+    r"|#\s*(\d{1,4}(?:\.\d+)?))"
+)
+# A title ending in a bare number: "... 250", "... - 250", "[250]".
+_TRAILING_BARE_NUMBER_RE = re.compile(
+    r"(?i)(?:[\s\-–—:(\[])(\d{1,4}(?:\.\d+)?)\s*[\]\)]?\s*$"
+)
+# A volume keyword anywhere in a title legitimises the number that follows it.
+_VOLUME_KEYWORD_RE = re.compile(
+    r"(?i)\b(?:volumes?|vols?|books?|parts?|pts?)\.?\s*\d|\bv\.?\s*\d"
+)
+
+
+def _looks_like_chapter_title(raw_title: str) -> bool:
+    """Diagnostic chapter flag (spec §3 / §5 Pattern 2) — never a discard decision.
+
+    True when the title carries chapter information only:
+
+    * the existing title-only chapter classifier fires (explicit Chapter/Ch./c/#/
+      zero-padded/bracket-number/chapter-range markers); or
+    * the title ends in a bare SINGLE number with no volume keyword anywhere (spec
+      Pattern 2, e.g. "Dandadan 250"), and that number is not an edition year.
+
+    MangaTrax's discard policy is unchanged: the scheduler's context-guarded
+    chapter discard still decides whether a bare-number release is dropped (only
+    when the base series is already known), and ``is_chapter_only()`` itself is
+    untouched.
+    """
+    if not raw_title:
+        return False
+    if is_chapter_only(raw_title):
+        return True
+    if is_complete_series_release(raw_title):
+        return False
+    if _VOLUME_KEYWORD_RE.search(raw_title):
+        return False
+    # A bare numeric range that passes the bundle guards is a volume bundle, and a
+    # volume bundle is never a chapter (spec §5 Pattern 1b).
+    if _parse_bare_volume_range(clean_manga_title(raw_title)):
+        return False
+    m = _TRAILING_BARE_NUMBER_RE.search(raw_title.strip())
+    if not m:
+        return False
+    try:
+        number = float(m.group(1))
+    except (TypeError, ValueError):
+        return False
+    # Edition years are not chapter numbers (spec §5 Pattern 2 year guard).
+    if 1900 <= number <= 2099:
+        return False
+    return True
+
+
+def strip_site_prefix(text: str) -> str:
+    """Remove a leading download/read/get site prefix (spec §2 step 2)."""
+    if not text:
+        return text
+    return _SITE_PREFIX_RE.sub("", str(text), count=1)
+
+
+def _expand_volume_span(start: float, end: float) -> List[float]:
+    """Integer-stepped expansion of a volume span (start/end may be fractional)."""
+    steps = int(round(end - start))
+    if steps <= 0:
+        return [start]
+    return [start + i for i in range(steps + 1)]
+
+
+def _parse_bare_volume_range(title: str) -> Optional[Dict[str, Any]]:
+    """Parse a bare numeric range ("DanMachi 1-4") as a volume bundle.
+
+    Returns ``None`` (fall through to the other patterns) unless the spec §5
+    Pattern 1b guards hold: the series part is non-empty, ``0 < start <= 300``,
+    ``start <= end <= 300`` and the span is at most 100 volumes.  Zero-padded
+    numbers are chapter notation, not volumes, so they never match here.
+    """
+    if not title:
+        return None
+    if re.search(r"#\s*\d", title):
+        return None
+    m = _BARE_VOLUME_RANGE_RE.match(title.strip())
+    if not m:
+        return None
+    start_text = m.group("start")
+    end_text = m.group("end")
+    # Zero-padded ("01-02", "001-009") = chapter notation in manga feeds.
+    if re.match(r"^0\d", start_text) or re.match(r"^0\d", end_text):
+        return None
+    series = m.group("series").strip(" -–—:,|.")
+    try:
+        start = float(start_text)
+        end = float(end_text)
+    except ValueError:
+        return None
+    if not series:
+        return None
+    if not (0 < start <= 300) or not (start <= end <= 300) or (end - start) > 100:
+        return None
+    return {
+        "series": series,
+        "start": start,
+        "end": end,
+        "volumes": _expand_volume_span(start, end),
+    }
+
+
+def _extract_chapter_as_volume(title: str) -> Optional[Dict[str, Any]]:
+    """Parse the "<chapters A-B> as v<X>-<Y> [+ <chapters C-D>]" idiom.
+
+    Returns the volumes from the ``v`` half, the chapter ranges as data, and a
+    ``clean_title`` with the whole clause (chapter range + literal "as" + volume
+    token, plus any trailing "+ chapters" clause) removed, so the series name is
+    everything before the chapter range.  ``None`` when the idiom does not apply
+    (an explicit "as" plus an explicit volume token are both required).
+    """
+    if not title:
+        return None
+    m = _CHAPTER_AS_VOLUME_RE.match(title.strip())
+    if not m:
+        return None
+    series = (m.group("series") or "").strip()
+    if not series:
+        return None
+    try:
+        chapter_start = float(m.group("chapter_start"))
+        chapter_end = float(m.group("chapter_end"))
+        volume_start = float(m.group("volume_start"))
+        volume_end = float(m.group("volume_end")) if m.group("volume_end") else volume_start
+    except (TypeError, ValueError):
+        return None
+    if volume_start > volume_end:
+        volume_start, volume_end = volume_end, volume_start
+    # Same sanity guards as Pattern 1b: real volume ranges are small.
+    if not (0 < volume_start <= 300) or not (0 < volume_end <= 300) or (volume_end - volume_start) > 100:
+        return None
+
+    tail = m.group("tail") or ""
+    chapter_ranges: List[List[float]] = [[min(chapter_start, chapter_end), max(chapter_start, chapter_end)]]
+    for cm in _CHAPTER_RANGE_TAIL_RE.finditer(tail):
+        cs = float(cm.group(1))
+        ce = float(cm.group(2))
+        chapter_ranges.append([min(cs, ce), max(cs, ce)])
+    # The trailing "+ chapters" clause is chapter data only -- drop it from the
+    # title used for series extraction (metadata brackets are dropped by
+    # clean_manga_title as usual).
+    tail_without_chapters = _CHAPTER_RANGE_TAIL_RE.sub(" ", tail)
+    return {
+        "series_prefix": series,
+        "clean_title": f"{series} {tail_without_chapters}".strip(),
+        "chapter_ranges": chapter_ranges,
+        "volumes": _expand_volume_span(volume_start, volume_end),
+        "volume_start": volume_start,
+        "volume_end": volume_end,
+    }
+
+
+def _chapter_number_from_title(raw_title: str) -> Optional[float]:
+    """Explicit chapter marker number (Chapter/Ch./c/NN) when the title has one."""
+    if not raw_title:
+        return None
+    m = _EXPLICIT_CHAPTER_NUMBER_RE.search(raw_title)
+    if not m:
+        return None
+    for group in m.groups():
+        if group:
+            try:
+                return float(group)
+            except ValueError:
+                return None
+    return None
+
+
+def _volume_result(
+    base: Dict[str, Any],
+    series_name: str,
+    *,
+    is_bundle: bool,
+    volume_start: float,
+    volume_end: float,
+    volumes: List[float],
+    confidence: float,
+) -> Dict[str, Any]:
+    """Copy *base* (which carries the chapter diagnostics) and fill the volume fields."""
+    out = dict(base)
+    out.update({
+        "series_name": series_name,
+        "is_bundle": is_bundle,
+        "volume_start": volume_start,
+        "volume_end": volume_end,
+        "volumes": volumes,
+        "confidence": confidence,
+    })
+    return out
+
 def is_valid_group_candidate(clean: str) -> bool:
     clean = clean.strip()
     if not clean or len(clean) < 2 or len(clean) > 40:
@@ -111,8 +371,10 @@ def is_valid_group_candidate(clean: str) -> bool:
     # If it's a year or year range like 2020 or 2012-2018
     if re.match(r"^(?:19|20)\d{2}(?:\s*[-–—~to/]\s*(?:19|20)\d{2})?$", clean):
         return False
-    # If it's a volume or chapter tag like v01, Vol 1, Ch. 10
-    if re.match(r"^(?:vol\.?|volume|v|ch\.?|chapter|c)\s*\d+", clean, re.IGNORECASE):
+    # If it's a volume or chapter tag like v01, Vol 1, Ch. 10, Vols 1-3.
+    # Plural keywords are included so a preserved bracket range such as
+    # "(Vols 1-3)" is never mistaken for a release group.
+    if re.match(r"^(?:vols?\.?|volumes?|v|ch\.?|chapters?|chap|c|books?|parts?|pts?)\s*\d+", clean, re.IGNORECASE):
         return False
     # Pure numbers or ranges
     if re.match(r"^\d+(?:\s*[-–—~to/]\s*\d+)?$", clean):
@@ -184,13 +446,25 @@ def is_light_novel(raw_title: str) -> bool:
     """
     Returns True if the release is identified as a Light Novel or Web Novel, not a Manga.
     MangaTrax exclusively tracks Manga releases (CBZ/CBR format).
+
+    Paren/bracket convention (RELEASE_DETECTION_SPEC.md §4.5): manga releases put
+    release metadata and groups in **parentheses** -- ``(2025-2026) (Digital)
+    (1r0n, Anon)`` -- while light novels put imprint/group tags in **square
+    brackets** -- ``[Seven Seas] [Stick]``.  A parenthesised *group or imprint
+    name* is therefore manga-style metadata and must never decide "light novel" on
+    its own (``Blue Lock - Episode Nagi (2024-2026) (Digital) (Stick)`` is a
+    genuine manga release).  Media-type words (``(Light Novel)``, ``[LN]``,
+    ``(Novel)``, ``[EPUB]``) state the format itself and stay decisive in either
+    bracket style.
+
     Detects:
-      1. Explicit LN / Novel / Audiobook tags e.g. [LN], (LN), [Light Novel], [Novel], (Web Novel).
-      2. Dedicated Light Novel imprints e.g. Yen On, Airship, Cross Infinite World.
+      1. Explicit LN / Novel / Audiobook media-type tags e.g. [LN], (LN), [Light Novel], (Novel).
+      2. Dedicated Light Novel imprints e.g. [Yen On], [Airship], [Seven Seas Siren]
+         (square-bracketed or bare, never inside parentheses).
       3. Ebook container formats without manga tags e.g. EPUB, MOBI, AZW3.
-      4. Bracket pattern [Publisher] [ReleaseGroup] without manga tags:
+      4. Square-bracket [Publisher] [ReleaseGroup] pairs without manga tags:
          e.g. 'The Tale of a Little Alchemist Blessed by the Spirits v01-04 [Seven Seas] [Stick]'
-      5. Standalone [Stick] release group tag without manga tags.
+      5. Standalone [Stick] release group tag (square brackets only) without manga tags.
     """
     if not raw_title:
         return False
@@ -199,16 +473,22 @@ def is_light_novel(raw_title: str) -> bool:
     # If title explicitly specifies Manga or CBZ/CBR comic format, it's a valid manga release
     has_manga_marker = bool(re.search(r'\b(?:manga|cbz|cbr|comic)\b', t_lower))
 
-    # 1. Explicit LN / Novel / Audiobook tags
-    if re.search(r'\[(?:ln|light\s*novel|wn|web\s*novel|novel|novels|audiobook)\]|\((?:ln|light\s*novel|wn|web\s*novel|novel|novels|audiobook)\)', t_lower):
+    # Parenthesised metadata is removed before the imprint/group rules run: in the
+    # manga convention "(Stick)" is a scanlation group tag, not an LN signal.
+    t_without_parens = re.sub(r"\([^)]*\)", " ", raw_title).lower()
+
+    # 1. Explicit media-type tags -- these state the format itself, so both bracket
+    #    styles are decisive: [LN], (LN), [Light Novel], (Novel), [Audiobook], ...
+    if re.search(r'[\[\(]\s*(?:ln|light\s*novel|wn|web\s*novel|novels?|audiobook)\s*[\]\)]', t_lower):
         if not has_manga_marker:
             return True
-    if re.search(r'\b(?:light\s*novels?|web\s*novels?|audiobooks?)\b', t_lower):
+    if re.search(r'\b(?:light\s*novels?|web\s*novels?|audiobooks?)\b', t_without_parens):
         if not has_manga_marker:
             return True
 
     # 2. Dedicated Light Novel Imprints (Yen On is exclusively LN, Airship is Seven Seas LN line, etc.)
-    if re.search(r'\b(?:yen\s*on|airship|cross\s*infinite\s*world|tentai\s*books|hanashi\s*media|seven\s*seas\s*siren)\b', t_lower):
+    #    Checked with parenthesised metadata stripped: only bracket/bare occurrences count.
+    if re.search(r'\b(?:yen\s*on|airship|cross\s*infinite\s*world|tentai\s*books|hanashi\s*media|seven\s*seas\s*siren)\b', t_without_parens):
         if not has_manga_marker:
             return True
 
@@ -217,22 +497,22 @@ def is_light_novel(raw_title: str) -> bool:
         if not has_manga_marker:
             return True
 
-    # 4. Pattern: [Publisher] [ReleaseGroup] or (Publisher) [ReleaseGroup] without manga marker
-    # e.g., 'The Tale of a Little Alchemist Blessed by the Spirits v01-04 [Seven Seas] [Stick]'
-    bracket_pairs = re.findall(r'\[([^\]]+)\]|\(([^\)]+)\)', raw_title)
-    clean_brackets = [b[0].strip() if b[0] else b[1].strip() for b in bracket_pairs if (b[0] or b[1])]
-    if len(clean_brackets) >= 2 and not has_manga_marker:
-        for i in range(len(clean_brackets) - 1):
-            cand_pub = clean_brackets[i].lower()
-            cand_grp = clean_brackets[i+1].lower()
+    # 4. Pattern: [Publisher] [ReleaseGroup] without manga marker.  Square brackets
+    #    only -- the LN imprint convention -- e.g. '[Seven Seas] [Stick]'.
+    square_brackets = [b.strip() for b in re.findall(r'\[([^\]]+)\]', raw_title) if b.strip()]
+    if len(square_brackets) >= 2 and not has_manga_marker:
+        for i in range(len(square_brackets) - 1):
+            cand_pub = square_brackets[i].lower()
+            cand_grp = square_brackets[i+1].lower()
             if cand_pub in KNOWN_PUBLISHERS:
                 # Ensure the second bracket is not just a format buzzword or volume tag
-                if cand_grp not in {'cbz', 'cbr', 'manga'} and not re.match(r'^(?:v|vol)\.?\s*\d+', cand_grp):
+                if cand_grp not in {'cbz', 'cbr', 'manga'} and not re.match(r'^(?:v|vol|vols?)\.?\s*\d+', cand_grp):
                     return True
 
-    # 5. Standalone [Stick] release group without manga/cbz marker
-    # 'Stick' exclusively rips light novels / audiobooks in EPUB format
-    if re.search(r'\[(?:stick)\]|\((?:stick)\)', t_lower) and not has_manga_marker:
+    # 5. Standalone [Stick] release group without manga/cbz marker.
+    #    'Stick' rips light novels / audiobooks in EPUB format, but only the
+    #    square-bracket form is decisive; "(Stick)" is manga-style group metadata.
+    if re.search(r'\[(?:stick)\]', t_lower) and not has_manga_marker:
         return True
 
     return False
@@ -287,6 +567,13 @@ def is_chapter_only(raw_title: str) -> bool:
     if re.search(r"#\s*\d+", title):
         return True
 
+    # 2b. D3 / spec §5 Pattern 1b: a bare numeric RANGE that passes the bundle
+    # sanity guards is a multi-volume release, not a chapter.  Zero-padded ranges
+    # ("01-02", "001-009") are chapter notation in manga feeds and do not match
+    # here, so the existing chapter policy for them is unchanged.
+    if _parse_bare_volume_range(clean_manga_title(raw_title)):
+        return False
+
     # Clean brackets of non-chapter metadata like [Digital], [CBZ], [English], years (2020)
     cleaned = title
     cleaned = re.sub(r"\[(?:digital|cbz|cbr|pdf|epub|scanlation|scans?|raw|retail|multi|english|eng|ita|fra|esp|ger)\]", " ", cleaned)
@@ -321,6 +608,10 @@ def clean_manga_title(raw_title: str) -> str:
 
     cleaned = raw_title.strip()
 
+    # Strip leading site prefixes ("Download:", "Free Download -", "Read:", "Get -").
+    # "read"/"get" require a separator, so "Reading Our Way..." keeps its first word.
+    cleaned = strip_site_prefix(cleaned)
+
     # Strip file extensions if present
     cleaned = re.sub(r"\.(?:cbz|cbr|zip|rar|epub|pdf)$", "", cleaned, flags=re.IGNORECASE)
 
@@ -340,7 +631,13 @@ def clean_manga_title(raw_title: str) -> str:
             return " "
 
         has_chap = re.search(r"(?:chapters?|ch|c)\.?\s*\d+", unbracketed, re.IGNORECASE)
-        has_vol = re.search(r"(?:vol\.?|volume|v)\s*\d+", unbracketed, re.IGNORECASE)
+        # D3: plural keywords/parts count as volume markers too, so "[Vols 1-3]"
+        # survives bracket triage and reaches the (plural-aware) bundle parser.
+        has_vol = re.search(
+            r"(?:volumes?|vols?|books?|parts?|pts?)\.?\s*\d+|\bv\.?\s*\d+",
+            unbracketed,
+            re.IGNORECASE,
+        )
         has_range = re.search(r"\b\d+\s*[-–—~to]+\s*\d+\b", unbracketed, re.IGNORECASE)
 
         # Pure chapter bracket -> discard
@@ -365,6 +662,7 @@ def clean_manga_title(raw_title: str) -> str:
         r"\bcbz\s*ver(?:sion)?\b", r"\bcbr\s*ver(?:sion)?\b", r"\bver(?:sion)?\b",
         r"\bdigital\b", r"\bretail\b", r"\bscan\b", r"\bscanlation\b", r"\bscans\b",
         r"\bsiterip\b", r"\bsite-rip\b", r"\bwebrip\b", r"\bweb-rip\b", r"\brip\b", r"\braws?\b",
+        r"\bdownload\b", r"\bfree\s+download\b",
         r"\b1080p\b", r"\b720p\b", r"\b480p\b", r"\b2160p\b", r"\b1600p\b", r"\b4k\b", r"\b8k\b", r"\bhd\b", r"\bsd\b", r"\bhq\b", r"\blq\b",
         r"\bavif\b", r"\bwebp\b",
         r"\bmanga\b", r"\bmanhwa\b", r"\bmanhua\b", r"\bwebtoon\b", r"\bcomic\b", r"\bcomics\b",
@@ -387,10 +685,33 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
     Parses manga titles for series name, bundle ranges (e.g. Vol 01-05), or single volumes.
     Always generates ALL individual volumes in bundle ranges (e.g., 1 to 7 for v1-v7).
     Extracts release group and handles mixed volume/chapter updates by focusing on volumes.
+
+    D3 (RELEASE_DETECTION_SPEC.md §5): also understands the NovelTrax idioms --
+    parenthesised omnibus ranges, plural keywords (Vols/Volumes/Books), Oxford-comma
+    lists, bare numeric ranges as bundles, and the "<chapters A-B> as v<X>-<Y>"
+    chapter-to-volume mapping.  Chapter information is exposed as diagnostics
+    (``is_chapter``, ``chapter_number``, ``chapter_ranges``) and must never be used
+    to change the scheduler's chapter-discard policy.
     """
-    cleaned = clean_manga_title(raw_title)
     release_group = extract_release_group(raw_title, known_groups=known_groups)
     is_comp = is_complete_series_release(raw_title)
+
+    # Pattern 0 (spec §5): normalise "DanMachi Omnibus 1 (Vols 1-3)" to
+    # "DanMachi Omnibus Vols 1-3" BEFORE bracket triage, so the range survives and
+    # the edition number stays out of the series name.
+    parse_title = raw_title or ""
+    m_paren = _PAREN_OMNIBUS_RE.match(parse_title.strip())
+    if m_paren:
+        parse_title = f"{m_paren.group('series')} {m_paren.group('range')} {m_paren.group('rest')}"
+
+    # Chapter-range -> volume mapping: "<chapters A-B> as v<X>-<Y> [+ chapters C-D]".
+    # The whole clause (chapter range + literal "as" + volume token + trailing
+    # chapter clause) is removed from the title used for the series name.
+    chapter_meta = _extract_chapter_as_volume(parse_title)
+    if chapter_meta:
+        parse_title = chapter_meta["clean_title"]
+
+    cleaned = clean_manga_title(parse_title)
 
     if release_group:
         # Strip extracted release group from cleaned title if present (e.g. from scene format -Group)
@@ -408,25 +729,60 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
         "volume_start": 1.0 if is_comp else None,
         "volume_end": None,
         "volumes": [],
-        "confidence": 0.9 if is_comp else 0.0
+        "confidence": 0.9 if is_comp else 0.0,
+        # Diagnostics only.  MangaTrax's discard policy is unchanged: the
+        # scheduler's context-guarded chapter discard still owns that decision.
+        "is_chapter": _looks_like_chapter_title(raw_title),
+        "chapter_number": None,
+        "chapter_ranges": [],
+        "chapter_start": None,
+        "chapter_end": None,
     }
+    if chapter_meta:
+        result["chapter_ranges"] = [list(r) for r in chapter_meta["chapter_ranges"]]
+        result["chapter_start"] = min(r[0] for r in chapter_meta["chapter_ranges"])
+        result["chapter_end"] = max(r[1] for r in chapter_meta["chapter_ranges"])
+    else:
+        result["chapter_number"] = _chapter_number_from_title(raw_title)
+        if result["chapter_number"] is None and result["is_chapter"]:
+            trailing = _TRAILING_BARE_NUMBER_RE.search((raw_title or "").strip())
+            if trailing:
+                try:
+                    result["chapter_number"] = float(trailing.group(1))
+                except (TypeError, ValueError):
+                    pass
+
+    # Chapter-as-volume idiom: volumes come from the "v<X>-<Y>" half, NOT from the
+    # chapter numbers (chapters 1-9 map to volumes 1-2, never volumes 1-9).
+    if chapter_meta:
+        start_vol = chapter_meta["volume_start"]
+        end_vol = chapter_meta["volume_end"]
+        return _volume_result(
+            result,
+            cleaned,
+            is_bundle=(end_vol > start_vol),
+            volume_start=start_vol,
+            volume_end=end_vol,
+            volumes=chapter_meta["volumes"],
+            confidence=0.95,
+        )
 
     if not cleaned or is_chapter_only(raw_title):
         return result
 
-    # Pattern 1: Multi-volume bundle range:
+    # Pattern 1: Multi-volume bundle range (plural-aware: Vol/Vols/Volume/Volumes/Book):
     bundle_pattern = re.compile(
         r"^(?P<series>.+?)\s*(?:[-–—:]\s*)?"
-        r"(?:\b(?:volumes|volume|vol)\b\.?|\bv\.?)\s*(?P<start>\d+(?:\.\d+)?)"
+        r"(?:\b(?:volumes?|vols?|books?|book)\b\.?|\bv\.?)\s*(?P<start>\d+(?:\.\d+)?)"
         r"\s*[-–—~to]+\s*"
-        r"(?:(?:volumes|volume|vol)\b\.?|\bv\.?)?\s*(?P<end>\d+(?:\.\d+)?)"
+        r"(?:(?:volumes?|vols?|books?|book)\b\.?|\bv\.?)?\s*(?P<end>\d+(?:\.\d+)?)"
         r"(?:\s*(?:[:\-–—]|\b).*)?$",
         re.IGNORECASE
     )
     m_bundle = bundle_pattern.match(cleaned)
     if m_bundle:
         series = m_bundle.group("series").strip(" -–—:,|.")
-        series = re.sub(r"(?i)\b(?:volumes|volume|vol\.?|book)\b$", "", series).strip(" -–—:,|.")
+        series = re.sub(r"(?i)\b(?:volumes?|vols?\.?|books?)\b$", "", series).strip(" -–—:,|.")
         try:
             start_vol = float(m_bundle.group("start"))
             end_vol = float(m_bundle.group("end"))
@@ -444,75 +800,66 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
                 vols.append(float(curr))
                 curr += 1
 
-            return {
-                "raw_title": raw_title,
-                "clean_title": cleaned,
-                "series_name": series,
-                "release_group": release_group,
-                "is_bundle": True,
-                "is_complete": is_comp,
-                "volume_start": start_vol,
-                "volume_end": end_vol,
-                "volumes": vols,
-                "confidence": 0.95
-            }
+            return _volume_result(
+                result, series, is_bundle=True, volume_start=start_vol,
+                volume_end=end_vol, volumes=vols, confidence=0.95,
+            )
         except ValueError:
             pass
 
-    # Pattern 1b: Comma or plus separated bundle
+    # Pattern 1b: Comma/plus/and separated bundle, incl. the Oxford comma
+    # ("Vol 1, 2, and 3") from spec §5 Pattern 0b.
     list_bundle_pattern = re.compile(
-        r"^(?P<series>.+?)\s*(?:[-–—:]\s*)?"
-        r"(?:\b(?:volumes|volume|vol)\b\.?|\bv\.?)\s*(?P<vols_str>\d+(?:\s*[,+&]\s*(?:(?:volumes|volume|vol)\b\.?|\bv\.?)?\s*\d+)+)"
+        r"^(?P<series>.+?)\s*(?:[-–—:,]\s*)?"
+        r"(?:\b(?:volumes?|vols?|books?)\b\.?|\bv\.?)\s*"
+        r"(?P<vols_str>\d+(?:\s*(?:,\s*(?:and\b|[+&])|[,+&]|\band\b)\s*(?:(?:volumes?|vols?|books?)\b\.?|\bv\.?)?\s*\d+)+)"
         r"(?:\s*(?:[:\-–—]|\b).*)?$",
         re.IGNORECASE
     )
     m_list = list_bundle_pattern.match(cleaned)
     if m_list:
         series = m_list.group("series").strip(" -–—:,|.")
-        series = re.sub(r"(?i)\b(?:volumes|volume|vol\.?|book)\b$", "", series).strip(" -–—:,|.")
+        series = re.sub(r"(?i)\b(?:volumes?|vols?\.?|books?)\b$", "", series).strip(" -–—:,|.")
         raw_nums = re.findall(r"\d+", m_list.group("vols_str"))
         if len(raw_nums) >= 2:
             parsed_vols = sorted(list(set(float(n) for n in raw_nums)))
-            return {
-                "raw_title": raw_title,
-                "clean_title": cleaned,
-                "series_name": series,
-                "release_group": release_group,
-                "is_bundle": True,
-                "is_complete": is_comp,
-                "volume_start": parsed_vols[0],
-                "volume_end": parsed_vols[-1],
-                "volumes": parsed_vols,
-                "confidence": 0.95
-            }
+            return _volume_result(
+                result, series, is_bundle=True, volume_start=parsed_vols[0],
+                volume_end=parsed_vols[-1], volumes=parsed_vols, confidence=0.95,
+            )
 
-    # Pattern 2: Single Volume:
+    # Pattern 2: Single Volume (explicit keyword, incl. plural keywords/parts):
     single_pattern = re.compile(
         r"^(?P<series>.+?)\s*(?:[-–—:,]\s*)?"
-        r"(?:\b(?:volume|vol|book)\b\.?|\bv\.?)\s*(?P<vol>\d+(?:\.\d+)?)"
+        r"(?:\b(?:volumes?|vols?|books?|parts?|pts?)\b\.?|\bv\.?)\s*(?P<vol>\d+(?:\.\d+)?)"
         r"(?:\s*(?:[:\-–—]|\b).*)?$",
         re.IGNORECASE
     )
     m_single = single_pattern.match(cleaned)
     if m_single:
         series = m_single.group("series").strip(" -–—:,|.")
-        series = re.sub(r"(?i)\b(?:volume|vol\.?|book)\b$", "", series).strip(" -–—:,|.")
+        series = re.sub(r"(?i)\b(?:volumes?|vols?\.?|books?|parts?|pts?\.?)\b$", "", series).strip(" -–—:,|.")
         try:
             vol = float(m_single.group("vol"))
-            return {
-                "raw_title": raw_title,
-                "clean_title": cleaned,
-                "series_name": series,
-                "release_group": release_group,
-                "is_bundle": False,
-                "is_complete": is_comp,
-                "volume_start": vol,
-                "volume_end": vol,
-                "volumes": [vol],
-                "confidence": 0.95
-            }
+            return _volume_result(
+                result, series, is_bundle=False, volume_start=vol,
+                volume_end=vol, volumes=[vol], confidence=0.95,
+            )
         except ValueError:
             pass
+
+    # Pattern 3 (spec §5 Pattern 1b): a BARE numeric range is a bundle, not a
+    # chapter/volume-1 ("DanMachi 1-4", "86 - 1-4", "Mob Psycho 100 - 1-3").
+    bare_range = _parse_bare_volume_range(cleaned)
+    if bare_range:
+        return _volume_result(
+            result, bare_range["series"],
+            is_bundle=len(bare_range["volumes"]) > 1,
+            volume_start=bare_range["start"],
+            volume_end=bare_range["end"],
+            volumes=bare_range["volumes"],
+            confidence=0.85,
+        )
 
     return result
 
@@ -586,97 +933,186 @@ def parse_calibre_volumes_and_series(
     Calibre's series_index only stores 1.0, ensuring both volumes 1.0 and 2.0 are recognized).
     Also supports bundle notations like 'Vol. 1-2', 'v01-v04', 'v01+v02', 'v01, 02',
     as well as standalone books without series tags.
+
+    D3 (RELEASE_DETECTION_SPEC.md §6): the volume parser is NovelTrax's newer copy,
+    including both guards that MangaTrax was missing:
+
+    * **reversed-range guard** -- a reversed range (``Vol 3-1``) is only swapped
+      when the title carries an explicit volume prefix; a bare ``3-1`` is not a
+      range and falls through (it would otherwise truncate a title like
+      ``Mob Psycho 100 - 1``);
+    * **bracket-delimiter guard** -- ``Title [100 - Vol 1]`` is not a range: a
+      bare number before the delimiter inside brackets never pairs with the
+      explicit volume tag after it.
     """
     vols: Set[float] = set()
     detected_series: Optional[str] = series_name.strip() if series_name else None
 
-    # 1. Start with Calibre's series_index if present
+    # 1. Start with Calibre's series_index if present (MangaTrax tracks from vol 1)
     if series_index is not None and series_index > 0:
         vols.add(round(float(series_index), 2))
 
     if not title:
         return detected_series, vols
 
-    # 2. Check full title using general bundle/volume extractor (bundles or single volumes)
-    bundle_info = extract_manga_bundle_and_volumes(title)
-    if bundle_info.get("volumes"):
-        for v in bundle_info["volumes"]:
-            vols.add(round(float(v), 2))
-        # If series_index was default 1.0 but title explicitly specified another volume number, discard default 1.0
-        if series_index == 1.0 and 1.0 not in bundle_info["volumes"]:
-            vols.discard(1.0)
-    elif bundle_info.get("volume_start") is not None:
-        vs = round(float(bundle_info["volume_start"]), 2)
-        vols.add(vs)
-        if series_index == 1.0 and vs != 1.0:
-            vols.discard(1.0)
-    if not detected_series and bundle_info.get("series_name"):
-        detected_series = bundle_info["series_name"]
+    # 2. Series-name detection from the title, with the trailing bare-range guard:
+    #    a truncated title like "Mob Psycho 100 - 1" must keep its series number.
+    if not detected_series:
+        clean_name = re.sub(
+            r"(?i)\s*(?:[-–—:]\s*)?(?:(?:\b(?:volumes?|volume|vols?|vol|books?|book|bk)\b\.?|\bv\.?)\s*\d+.*|\[.*?\]|\(.*?\))\s*$",
+            "",
+            title
+        ).strip(" -–—:,|.")
+        m_bare_trail = re.search(
+            r"(?i)(?:\s*[-–—:]\s*|\s+)(?P<s_bare>\d+(?:\.\d+)?)\s*[-–—~to/]+\s*(?P<e_bare>\d+(?:\.\d+)?)\s*$",
+            clean_name
+        )
+        if m_bare_trail:
+            s_b = float(m_bare_trail.group("s_bare"))
+            e_b = float(m_bare_trail.group("e_bare"))
+            if s_b <= e_b:
+                clean_name = clean_name[:m_bare_trail.start()].strip(" -–—:,|.")
+        if clean_name:
+            detected_series = clean_name
 
-    # 3. Test combinations / substrings if title is just volume or has custom notations
-    candidates = [title]
+    # Prioritise clean_t (title with the series prefix removed) before the raw
+    # title, so numbers inside the series name cannot prematurely match a range.
+    candidates: List[str] = []
     if detected_series:
-        candidates.append(f"{detected_series} {title}")
         clean_t = re.sub(r"^" + re.escape(detected_series), "", title, flags=re.IGNORECASE).strip(" -–—:,|.")
         if clean_t:
             candidates.append(clean_t)
+    candidates.append(title)
+    if detected_series:
+        # MangaTrax compatibility: titles that are just a volume notation.
+        candidates.append(f"{detected_series} {title}")
+
+    # 3. Extract volumes; ranges first (they win over the single/list patterns).
+    extracted_vols: Set[float] = set()
+    found_range = False
 
     for c in candidates:
         if not c:
             continue
-        # Pattern range: v01-02, vol 1-3, v01-v02, 01-02
-        m = re.search(
-            r"(?i)(?:(?:\b(?:volumes?|volume|vols?|vol|books?|book|bk)\b\.?|\bv\.?)\s*|\b)"
-            r"(?P<start>\d+(?:\.\d+)?)"
+
+        # Bracketed ranges like [1-4], [Vol 1-3], (v01-04), [0-2].
+        # Guard: a delimiter before the volume tag inside brackets
+        # ("Title [100 - Vol 1]") is not a range.
+        m_bracket = re.search(
+            r"[\[\(]\s*(?:(?P<p1>\b(?:volumes?|volume|vols?|vol|books?|book|bk)\b\.?|\bv\.?)\s*)?(?P<start>\d+(?:\.\d+)?)"
             r"\s*[-–—~to/]+\s*"
-            r"(?:(?:\b(?:volumes?|volume|vols?|vol|books?|book|bk)\b\.?|\bv\.?)\s*)?"
-            r"(?P<end>\d+(?:\.\d+)?)\b",
-            c
+            r"(?:(?P<p2>\b(?:volumes?|volume|vols?|vol|books?|book|bk)\b\.?|\bv\.?)\s*)?(?P<end>\d+(?:\.\d+)?)\s*[\]\)]",
+            c,
+            re.IGNORECASE
         )
-        if m:
-            s_val = float(m.group("start"))
-            e_val = float(m.group("end"))
-            if s_val > e_val:
-                s_val, e_val = e_val, s_val
-            # Sanity check: manga bundles are realistically between 1 and 2000, with span <= 50
-            if 0 < s_val <= 2000 and 0 < e_val <= 2000 and (e_val - s_val) <= 50:
-                curr = int(s_val)
-                while curr <= int(e_val):
-                    vols.add(float(curr))
-                    curr += 1
-                break
-
-        # Pattern list: v1, 2, 3 or v01+v02 or v1 & v2
-        m_list = re.search(
-            r"(?i)(?:(?:\b(?:volumes?|volume|vols?|vol)\b\.?|\bv\.?)\s*)"
-            r"(?P<list>\d+(?:\s*[,+&]\s*(?:(?:\b(?:volumes?|volume|vols?|vol)\b\.?|\bv\.?)\s*)?\d+)+)",
-            c
-        )
-        if m_list:
-            raw_nums = re.findall(r"\d+", m_list.group("list"))
-            for n in raw_nums:
-                vols.add(float(int(n)))
-            break
-
-        # Single volume pattern: Vol. 23, v05, Volume 12, Book 3
-        m_single = re.search(
-            r"(?i)\b(?:volumes?|volume|vols?|vol|books?|book|bk|v)\b\.?\s*(\d+(?:\.\d+)?)\b",
-            c
-        )
-        if m_single:
-            try:
-                s_num = float(m_single.group(1))
-                if 0 < s_num <= 2000:
-                    vols.add(s_num)
-                    # If series_index had Calibre's default 1.0 but title explicitly states e.g. Vol 23, drop default 1.0
-                    if series_index == 1.0 and s_num != 1.0 and "1" not in re.findall(r"\d+", m_single.group(0)):
-                        vols.discard(1.0)
-                    break
-            except ValueError:
+        if m_bracket:
+            p1 = m_bracket.group("p1")
+            p2 = m_bracket.group("p2")
+            if not p1 and p2:
+                # Delimiter before the volume tag inside brackets -> not a range.
                 pass
+            else:
+                s_val = float(m_bracket.group("start"))
+                e_val = float(m_bracket.group("end"))
+                has_marker = bool(p1 or p2)
+                if s_val > e_val:
+                    if not p1:
+                        # Reversed ranges require an explicit volume prefix.
+                        pass
+                    else:
+                        s_val, e_val = e_val, s_val
+                if s_val <= e_val and 0 <= s_val <= 2000 and 0 <= e_val <= 2000 and (e_val - s_val) <= 100:
+                    if (s_val < 1000 and e_val < 1000) or has_marker:
+                        curr = int(s_val)
+                        while curr <= int(e_val):
+                            if curr >= s_val:
+                                extracted_vols.add(float(curr))
+                            curr += 1
+                        if e_val != int(e_val):
+                            extracted_vols.add(round(float(e_val), 2))
+                        if s_val != int(s_val):
+                            extracted_vols.add(round(float(s_val), 2))
+                        found_range = True
+                        break
 
-    # If still no series detected and title has volume info, extract base series
-    if not detected_series:
+        # Standard range: Vol 1-3, v01-02, Volume 1 to 4, 01-03, Vol 1-2.5, bare 1-4.
+        # A reversed range is only swapped when an explicit volume prefix matched.
+        m_range = re.search(
+            r"(?i)(?:"
+            r"(?P<p1>\b(?:volumes?|volume|vols?|vol|books?|book|bk)\b\.?|\bv\.?)\s*(?P<start1>\d+(?:\.\d+)?)\s*[-–—~to/]+\s*(?:(?P<p2>\b(?:volumes?|volume|vols?|vol|books?|book|bk)\b\.?|\bv\.?)\s*)?(?P<end1>\d+(?:\.\d+)?)\b"
+            r"|"
+            r"(?<![-–—/])\b(?P<start2>\d+(?:\.\d+)?)\s*[-–—~to/]+\s*(?P<end2>\d+(?:\.\d+)?)\b(?!\s*[-–—~to/]+\s*\d)"
+            r")",
+            c
+        )
+        if m_range:
+            p1 = m_range.group("p1")
+            p2 = m_range.group("p2")
+            s_val = float(m_range.group("start1") or m_range.group("start2"))
+            e_val = float(m_range.group("end1") or m_range.group("end2"))
+            has_marker = bool(p1 or p2)
+            if s_val > e_val:
+                # Reversed ranges (e.g. Vol 3-1) are only valid with a volume prefix.
+                if not p1:
+                    pass
+                else:
+                    s_val, e_val = e_val, s_val
+            if s_val <= e_val and 0 <= s_val <= 2000 and 0 <= e_val <= 2000 and (e_val - s_val) <= 100:
+                if (s_val < 1000 and e_val < 1000) or has_marker:
+                    curr = int(s_val)
+                    while curr <= int(e_val):
+                        if curr >= s_val:
+                            extracted_vols.add(float(curr))
+                        curr += 1
+                    if e_val != int(e_val):
+                        extracted_vols.add(round(float(e_val), 2))
+                    if s_val != int(s_val):
+                        extracted_vols.add(round(float(s_val), 2))
+                    found_range = True
+                    break
+
+    if not found_range:
+        for c in candidates:
+            if not c:
+                continue
+            # Pattern list: v1, 2, 3 or Vol 1 + 2 or v1 & v2, incl. the Oxford comma
+            # ("Vol 1, 2, and 3").
+            m_list = re.search(
+                r"(?i)(?:(?:\b(?:volumes?|volume|vols?|vol|books?|book|bk)\b\.?|\bv\.?)\s*)"
+                r"(?P<list>\d+(?:\.\d+)?(?:\s*(?:,\s*(?:and\b|[+&])|[,+&]|\band\b)\s*(?:(?:\b(?:volumes?|volume|vols?|vol|books?|book|bk)\b\.?|\bv\.?)\s*)?\d+(?:\.\d+)?)+)",
+                c
+            )
+            if m_list:
+                raw_nums = re.findall(r"\d+(?:\.\d+)?", m_list.group("list"))
+                for n in raw_nums:
+                    val = round(float(n), 2)
+                    if 0 <= val <= 2000:
+                        extracted_vols.add(val)
+                if extracted_vols:
+                    break
+
+            # Single volume pattern: Vol. 23, v05, Volume 12, Book 3, v15, Vol 1.5
+            m_single = re.search(
+                r"(?i)(?:\b(?:volumes?|volume|vols?|vol|books?|book|bk)\b\.?|\bv\.?)\s*(\d+(?:\.\d+)?)\b",
+                c
+            )
+            if m_single:
+                try:
+                    s_num = float(m_single.group(1))
+                    if 0 <= s_num <= 2000:
+                        extracted_vols.add(round(s_num, 2))
+                        break
+                except ValueError:
+                    pass
+
+    # 4. Discard the Calibre default series_index = 1.0 when the title explicitly
+    #    names volumes that do not contain 1.0 (omnibus/volume-N book).
+    if extracted_vols:
+        if series_index == 1.0 and 1.0 not in extracted_vols:
+            vols.discard(1.0)
+        vols.update(extracted_vols)
+    elif detected_series is None:
+        # Fallback: derive the series name from a title that only carries volumes.
         clean_name = re.sub(
             r"(?i)\s*(?:[-–—:]\s*)?(?:(?:\b(?:volumes?|volume|vols?|vol|books?|book)\b\.?|\bv\.?)\s*\d+.*|\d+\s*[-–—~to/].*)$",
             "",
