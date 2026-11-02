@@ -133,3 +133,36 @@ def split_series_candidate_parts(title: str) -> List[str]:
   - `test_e2e_endpoints.py`: (New) FastAPI endpoint test suite
   - `test_security_remediation.py`: (New) SSRF, XSS, input validation test suite
   - `test_high_priority_additions.py`: (New) New feature additions test suite
+
+---
+
+## Outcome (final)
+
+| Milestone | Result |
+|---|---|
+| E2E Track | ✅ 77 opaque-box tests, Tiers 1-4, hermetic/offline |
+| M1 Functional Defect Remediation | ✅ after the verification gate initially returned **FAIL** (see below) |
+| M2 Feature Recommendations & Additions | ✅ `FEATURE_RECOMMENDATIONS.md` + CBZ `<Series>` audit/repair, tagger preview/manual-tag, downloads status API, unified alias search, `discard_unmarked_chapters` toggle |
+| M3 Security & Auth | ✅ 3-mode auth gate (`none`/`basic`/`oidc` via PocketID), user audit trail (`activity_logs.actor` + `users` + JIT), SSRF guard, strict schemas, path containment, XSS/LIKE/LIMIT hardening |
+| M4 Simplification & Dependency Pruning | ✅ `requirements.txt` 10 → 7, canonical title splitter (13 duplicates removed), dead code eliminated, GETs side-effect free |
+| M5 Final Acceptance | ✅ 14 suites / 1017 live assertions / 0 failures; E2E 77/77 |
+
+### Critical correction to earlier verification claims
+`calibre-debug.exe -e` runs Python with `optimize=2`, so every bare `assert` in the script-style suites was
+**stripped at compile time**. All prior "100% verified / ALL TESTS PASSED" figures for those suites were
+therefore not evidence. [`tests/run_tests.py`](tests/run_tests.py) recompiles each suite with `optimize=0`
+and is now the **only** sanctioned entry point for script suites; it prints the interpreter's optimize level
+and counts both compiled asserts and actual executions. The E2E suite is `unittest`-based and was always genuine.
+
+### Defects found only because verification became honest
+- **Status clobbering (data loss):** feed re-polls overwrote deliberate `REQUESTED`/`IN_CALIBRE`/`BLACKLISTED`
+  statuses, silently emptying the wanted list. Fixed with an explicit `resolve_status()` precedence model.
+- **AniList rename vs. matching:** series were re-keyed to AniList English titles, breaking Calibre matching and
+  corrupting `<Series>` in already-tagged CBZ files. Fixed by splitting the stable matching key from the display title.
+- **Marker-less chapters** (`Series 180`) ingested as junk releases; now discarded via a context-guarded check.
+- **Cover cache silently dead** without `httpx` (`covers.py` returned `None`); a real stdlib downloader with
+  per-redirect-hop SSRF validation replaced it.
+
+### Final dependency set (7)
+`fastapi`, `uvicorn[standard]`, `jinja2`, `beautifulsoup4`, `feedparser`, `pydantic`, `authlib`.
+Removed: `httpx` (→ stdlib `urllib`), `apscheduler` (unused), `python-multipart` (unused).
