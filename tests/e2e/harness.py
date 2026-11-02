@@ -187,6 +187,36 @@ from app.calibre.matcher import MangaCalibreMatcher
 from app.downloader.qbit import QBitClient
 from app.tagger.cbz_tagger import generate_comicinfo_xml, inject_comicinfo, has_comicinfo, auto_tag_staging_cbz_files
 from app.parser import extract_manga_bundle_and_volumes, string_similarity, clean_manga_title
+from app.metadata.anilist import AniListMetadataService
+from app.metadata.mangaupdates import MangaUpdatesService
+
+
+# ---------------------------------------------------------------------------
+# Hermetic isolation of live external metadata services.
+#
+# TEST_INFRA.md promises that the E2E suite runs with "zero external network
+# connectivity".  Without this guard the suite silently depended on live AniList
+# / MangaUpdates responses: `/api/discovery/track` resolves the canonical
+# English title over the network and tracks the series under *that* name, which
+# made tier 3/4 assertions and staging-tagging flows non-deterministic and
+# order-dependent (passing only when AniList happened to be unreachable or
+# returned the unchanged title).
+#
+# Disabling only the two HTTP transports keeps every real code path (DB cache
+# lookup, delimiter candidates, fallback to the raw title) intact while making
+# the result deterministic: the services behave exactly as they do in an
+# offline deployment.
+# ---------------------------------------------------------------------------
+def _offline_anilist_fetch(self, search_term):
+    return None
+
+
+def _offline_mangaupdates_fetch(self, search_term):
+    return None
+
+
+AniListMetadataService._fetch_from_anilist = _offline_anilist_fetch
+MangaUpdatesService._fetch_from_api = _offline_mangaupdates_fetch
 
 
 class ResponseWrapper:
@@ -327,14 +357,20 @@ class E2ETestContext:
         self.cover_cache = CoverCache(self.data_dir)
         self.scheduler = MangaScheduler(self.db, self.cover_cache)
 
-        # Wire active globals in main_app to point to this isolated context
+        # Wire active globals in main_app to point to this isolated context.
+        # main_app.mangaupdates must be rebound as well: it is a module-level
+        # singleton wired to the process-wide database at import time, so any
+        # route that uses it would otherwise read/write outside this context
+        # (cross-context state leakage).
         self._orig_db = main_app.db
         self._orig_scheduler = main_app.scheduler
         self._orig_cover_cache = main_app.cover_cache
+        self._orig_mangaupdates = main_app.mangaupdates
 
         main_app.db = self.db
         main_app.scheduler = self.scheduler
         main_app.cover_cache = self.cover_cache
+        main_app.mangaupdates = MangaUpdatesService(db=self.db)
 
         self.client = E2EClient(self)
 
@@ -342,6 +378,7 @@ class E2ETestContext:
         main_app.db = self._orig_db
         main_app.scheduler = self._orig_scheduler
         main_app.cover_cache = self._orig_cover_cache
+        main_app.mangaupdates = self._orig_mangaupdates
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def __enter__(self):

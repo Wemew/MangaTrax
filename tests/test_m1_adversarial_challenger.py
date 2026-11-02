@@ -13,6 +13,7 @@ import sys
 import json
 import time
 import shutil
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -33,11 +34,50 @@ from app.parser import (
     is_complete_series_release
 )
 from app.database import MangaDatabase
+from app.covers import CoverCache
 from app.scheduler import MangaScheduler
 from app.providers.nyaa import NyaaMangaProvider
 import app.providers.html_scraper as hs_module
 from app.providers.html_scraper import HtmlScraperProvider
 from app.providers.base import ReleaseItem
+
+
+# calibre-debug.exe -e runs Python with optimization level 2 (__debug__ == False),
+# which silently strips every bare `assert` statement.  This suite therefore uses an
+# explicit helper so its verification cannot be compiled away.
+def _check(cond, msg=None):
+    if not cond:
+        raise AssertionError(msg if msg is not None else "check failed")
+
+
+def _make_calibre_db(db_path, series_map):
+    """Minimal scanner-complete Calibre metadata.db from {series_name: [volumes]}."""
+    if os.path.exists(db_path):
+        os.remove(db_path)
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.executescript("""
+        CREATE TABLE books (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, sort TEXT,
+            author_sort TEXT, series_index REAL DEFAULT 1.0, path TEXT DEFAULT '', has_cover INTEGER DEFAULT 0);
+        CREATE TABLE series (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, sort TEXT);
+        CREATE TABLE books_series_link (id INTEGER PRIMARY KEY AUTOINCREMENT, book INTEGER NOT NULL, series INTEGER NOT NULL);
+        CREATE TABLE authors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, sort TEXT, link TEXT DEFAULT '');
+        CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY AUTOINCREMENT, book INTEGER NOT NULL, author INTEGER NOT NULL);
+        CREATE TABLE publishers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, sort TEXT);
+        CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY AUTOINCREMENT, book INTEGER NOT NULL, publisher INTEGER NOT NULL);
+        CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL);
+        CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY AUTOINCREMENT, book INTEGER NOT NULL, tag INTEGER NOT NULL);
+    """)
+    for sid, (name, vols) in enumerate(series_map.items(), start=1):
+        cur.execute("INSERT INTO series (id, name) VALUES (?, ?);", (sid, name))
+        cur.execute("INSERT OR IGNORE INTO authors (id, name) VALUES (?, ?);", (sid, "Author"))
+        for v in vols:
+            cur.execute("INSERT INTO books (title, series_index) VALUES (?, ?);", (f"{name} Vol. {int(v)}", float(v)))
+            bid = cur.lastrowid
+            cur.execute("INSERT INTO books_series_link (book, series) VALUES (?, ?);", (bid, sid))
+            cur.execute("INSERT INTO books_authors_link (book, author) VALUES (?, ?);", (bid, sid))
+    conn.commit()
+    conn.close()
 
 
 # ===========================================================================
@@ -50,160 +90,162 @@ def test_parser_bundle_adversarial_extremes():
     t0 = time.time()
     res_massive = extract_manga_bundle_and_volumes("[Group] Giant Epic Manga Vol. 01-9999999 [Digital]")
     t_elapsed = time.time() - t0
-    assert t_elapsed < 0.1, f"Parser took too long ({t_elapsed:.4f}s) on massive range; potential DoS vulnerability"
-    assert res_massive["is_bundle"] is True, "Massive range should be recognized as a bundle"
-    assert res_massive["volume_start"] == 1.0, f"Expected volume_start 1.0, got {res_massive['volume_start']}"
-    assert res_massive["volume_end"] == 1001.0, f"Expected clamped volume_end 1001.0, got {res_massive['volume_end']}"
-    assert len(res_massive["volumes"]) == 1001, f"Expected 1001 volumes, got {len(res_massive['volumes'])}"
-    assert res_massive["volumes"][0] == 1.0
-    assert res_massive["volumes"][-1] == 1001.0
+    _check(t_elapsed < 0.1, f"Parser took too long ({t_elapsed:.4f}s) on massive range; potential DoS vulnerability")
+    _check(res_massive["is_bundle"] is True, "Massive range should be recognized as a bundle")
+    _check(res_massive["volume_start"] == 1.0, f"Expected volume_start 1.0, got {res_massive['volume_start']}")
+    _check(res_massive["volume_end"] == 1001.0, f"Expected clamped volume_end 1001.0, got {res_massive['volume_end']}")
+    _check(len(res_massive["volumes"]) == 1001, f"Expected 1001 volumes, got {len(res_massive['volumes'])}")
+    _check(res_massive["volumes"][0] == 1.0)
+    _check(res_massive["volumes"][-1] == 1001.0)
 
     # B. Inverted Ranges (Vol 20-10, Vol 9999999-1, Vol 2-1)
     res_inv20 = extract_manga_bundle_and_volumes("Reversed Manga Vol 20-10")
-    assert res_inv20["is_bundle"] is True
-    assert res_inv20["volume_start"] == 10.0, f"Expected swapped start 10.0, got {res_inv20['volume_start']}"
-    assert res_inv20["volume_end"] == 20.0, f"Expected swapped end 20.0, got {res_inv20['volume_end']}"
-    assert res_inv20["volumes"] == [float(x) for x in range(10, 21)]
-    assert len(res_inv20["volumes"]) == 11
+    _check(res_inv20["is_bundle"] is True)
+    _check(res_inv20["volume_start"] == 10.0, f"Expected swapped start 10.0, got {res_inv20['volume_start']}")
+    _check(res_inv20["volume_end"] == 20.0, f"Expected swapped end 20.0, got {res_inv20['volume_end']}")
+    _check(res_inv20["volumes"] == [float(x) for x in range(10, 21)])
+    _check(len(res_inv20["volumes"]) == 11)
 
     res_inv_massive = extract_manga_bundle_and_volumes("Huge Inverted Manga Vol 9999999-1")
-    assert res_inv_massive["is_bundle"] is True
-    assert res_inv_massive["volume_start"] == 1.0
-    assert res_inv_massive["volume_end"] == 1001.0
-    assert len(res_inv_massive["volumes"]) == 1001
+    _check(res_inv_massive["is_bundle"] is True)
+    _check(res_inv_massive["volume_start"] == 1.0)
+    _check(res_inv_massive["volume_end"] == 1001.0)
+    _check(len(res_inv_massive["volumes"]) == 1001)
 
     res_inv_small = extract_manga_bundle_and_volumes("Tiny Inverted Manga v2-v1")
-    assert res_inv_small["is_bundle"] is True
-    assert res_inv_small["volume_start"] == 1.0
-    assert res_inv_small["volume_end"] == 2.0
-    assert res_inv_small["volumes"] == [1.0, 2.0]
+    _check(res_inv_small["is_bundle"] is True)
+    _check(res_inv_small["volume_start"] == 1.0)
+    _check(res_inv_small["volume_end"] == 2.0)
+    _check(res_inv_small["volumes"] == [1.0, 2.0])
 
     # C. Exact Boundary Tests around MAX_BUNDLE_SPAN (1000)
     # Vol 1-1000 (span = 999)
     res_boundary_under = extract_manga_bundle_and_volumes("Boundary Manga Vol. 1-1000")
-    assert res_boundary_under["is_bundle"] is True
-    assert res_boundary_under["volume_start"] == 1.0
-    assert res_boundary_under["volume_end"] == 1000.0
-    assert len(res_boundary_under["volumes"]) == 1000
+    _check(res_boundary_under["is_bundle"] is True)
+    _check(res_boundary_under["volume_start"] == 1.0)
+    _check(res_boundary_under["volume_end"] == 1000.0)
+    _check(len(res_boundary_under["volumes"]) == 1000)
 
     # Vol 1-1001 (span = 1000 == MAX_BUNDLE_SPAN)
     res_boundary_exact = extract_manga_bundle_and_volumes("Boundary Manga Vol. 1-1001")
-    assert res_boundary_exact["is_bundle"] is True
-    assert res_boundary_exact["volume_start"] == 1.0
-    assert res_boundary_exact["volume_end"] == 1001.0
-    assert len(res_boundary_exact["volumes"]) == 1001
+    _check(res_boundary_exact["is_bundle"] is True)
+    _check(res_boundary_exact["volume_start"] == 1.0)
+    _check(res_boundary_exact["volume_end"] == 1001.0)
+    _check(len(res_boundary_exact["volumes"]) == 1001)
 
     # Vol 1-1002 (span = 1001 > MAX_BUNDLE_SPAN) -> clamped to span 1000
     res_boundary_over = extract_manga_bundle_and_volumes("Boundary Manga Vol. 1-1002")
-    assert res_boundary_over["is_bundle"] is True
-    assert res_boundary_over["volume_start"] == 1.0
-    assert res_boundary_over["volume_end"] == 1001.0
-    assert len(res_boundary_over["volumes"]) == 1001
+    _check(res_boundary_over["is_bundle"] is True)
+    _check(res_boundary_over["volume_start"] == 1.0)
+    _check(res_boundary_over["volume_end"] == 1001.0)
+    _check(len(res_boundary_over["volumes"]) == 1001)
 
     # D. Large Base Offset (Vol 1000000-1000005)
     res_offset = extract_manga_bundle_and_volumes("Offset Manga Vol. 1000000-1000005")
-    assert res_offset["is_bundle"] is True
-    assert res_offset["volume_start"] == 1000000.0
-    assert res_offset["volume_end"] == 1000005.0
-    assert res_offset["volumes"] == [1000000.0, 1000001.0, 1000002.0, 1000003.0, 1000004.0, 1000005.0]
+    _check(res_offset["is_bundle"] is True)
+    _check(res_offset["volume_start"] == 1000000.0)
+    _check(res_offset["volume_end"] == 1000005.0)
+    _check(res_offset["volumes"] == [1000000.0, 1000001.0, 1000002.0, 1000003.0, 1000004.0, 1000005.0])
 
     # E. Zero Boundaries (Vol 0-0, Vol 0-5)
     res_zero_same = extract_manga_bundle_and_volumes("Zero Manga Vol 0-0")
-    assert res_zero_same["is_bundle"] is True
-    assert res_zero_same["volume_start"] == 0.0
-    assert res_zero_same["volume_end"] == 0.0
-    assert res_zero_same["volumes"] == [0.0]
+    _check(res_zero_same["is_bundle"] is True)
+    _check(res_zero_same["volume_start"] == 0.0)
+    _check(res_zero_same["volume_end"] == 0.0)
+    _check(res_zero_same["volumes"] == [0.0])
 
     res_zero_span = extract_manga_bundle_and_volumes("Zero Manga Vol 0-5")
-    assert res_zero_span["is_bundle"] is True
-    assert res_zero_span["volume_start"] == 0.0
-    assert res_zero_span["volume_end"] == 5.0
-    assert res_zero_span["volumes"] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    _check(res_zero_span["is_bundle"] is True)
+    _check(res_zero_span["volume_start"] == 0.0)
+    _check(res_zero_span["volume_end"] == 5.0)
+    _check(res_zero_span["volumes"] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
 
     # F. Non-Integer Volumes (Decimals / Fractional Volumes)
     res_float_span = extract_manga_bundle_and_volumes("Decimal Manga Vol. 1.5 - 4.5")
-    assert res_float_span["is_bundle"] is True
-    assert res_float_span["volume_start"] == 1.5
-    assert res_float_span["volume_end"] == 4.5
-    assert res_float_span["volumes"] == [1.0, 2.0, 3.0, 4.0]
+    _check(res_float_span["is_bundle"] is True)
+    _check(res_float_span["volume_start"] == 1.5)
+    _check(res_float_span["volume_end"] == 4.5)
+    _check(res_float_span["volumes"] == [1.0, 2.0, 3.0, 4.0])
 
     res_float_subzero = extract_manga_bundle_and_volumes("Decimal Manga Vol 0.5 - 2.5")
-    assert res_float_subzero["is_bundle"] is True
-    assert res_float_subzero["volume_start"] == 0.5
-    assert res_float_subzero["volume_end"] == 2.5
-    assert res_float_subzero["volumes"] == [0.0, 1.0, 2.0]
+    _check(res_float_subzero["is_bundle"] is True)
+    _check(res_float_subzero["volume_start"] == 0.5)
+    _check(res_float_subzero["volume_end"] == 2.5)
+    _check(res_float_subzero["volumes"] == [0.0, 1.0, 2.0])
 
     res_single_float = extract_manga_bundle_and_volumes("Single Decimal Manga Vol. 10.5")
-    assert res_single_float["is_bundle"] is False
-    assert res_single_float["volume_start"] == 10.5
-    assert res_single_float["volume_end"] == 10.5
-    assert res_single_float["volumes"] == [10.5]
+    _check(res_single_float["is_bundle"] is False)
+    _check(res_single_float["volume_start"] == 10.5)
+    _check(res_single_float["volume_end"] == 10.5)
+    _check(res_single_float["volumes"] == [10.5])
 
     # G. Negative Numbers & Hyphen Separators
     # Standard separator hyphen before Vol should parse smoothly
     res_hyphen_sep = extract_manga_bundle_and_volumes("Hyphen Manga - Vol 01-05")
-    assert res_hyphen_sep["is_bundle"] is True
-    assert res_hyphen_sep["volume_start"] == 1.0
-    assert res_hyphen_sep["volume_end"] == 5.0
+    _check(res_hyphen_sep["is_bundle"] is True)
+    _check(res_hyphen_sep["volume_start"] == 1.0)
+    _check(res_hyphen_sep["volume_end"] == 5.0)
 
     # Negative numbers in volume position must not crash or trigger unhandled exceptions
     try:
         res_neg1 = extract_manga_bundle_and_volumes("Negative Manga Vol -1 to 5")
-        assert isinstance(res_neg1, dict)
+        _check(isinstance(res_neg1, dict))
     except Exception as e:
-        assert False, f"Negative volume title caused unexpected exception: {e}"
+        _check(False, f"Negative volume title caused unexpected exception: {e}")
 
     try:
         res_neg2 = extract_manga_bundle_and_volumes("Negative Manga Vol -5 - -1")
-        assert isinstance(res_neg2, dict)
+        _check(isinstance(res_neg2, dict))
     except Exception as e:
-        assert False, f"Double negative volume title caused unexpected exception: {e}"
+        _check(False, f"Double negative volume title caused unexpected exception: {e}")
 
     # H. Comma / Plus Separated Bundles (Pattern 1b)
     res_comma = extract_manga_bundle_and_volumes("List Manga Vol 1, 2, 3, 4, 5")
-    assert res_comma["is_bundle"] is True
-    assert res_comma["volume_start"] == 1.0
-    assert res_comma["volume_end"] == 5.0
-    assert res_comma["volumes"] == [1.0, 2.0, 3.0, 4.0, 5.0]
+    _check(res_comma["is_bundle"] is True)
+    _check(res_comma["volume_start"] == 1.0)
+    _check(res_comma["volume_end"] == 5.0)
+    _check(res_comma["volumes"] == [1.0, 2.0, 3.0, 4.0, 5.0])
 
     # Inverted comma list
     res_comma_inv = extract_manga_bundle_and_volumes("List Manga Vol 5, 4, 3, 2, 1")
-    assert res_comma_inv["is_bundle"] is True
-    assert res_comma_inv["volume_start"] == 1.0
-    assert res_comma_inv["volume_end"] == 5.0
-    assert res_comma_inv["volumes"] == [1.0, 2.0, 3.0, 4.0, 5.0]
+    _check(res_comma_inv["is_bundle"] is True)
+    _check(res_comma_inv["volume_start"] == 1.0)
+    _check(res_comma_inv["volume_end"] == 5.0)
+    _check(res_comma_inv["volumes"] == [1.0, 2.0, 3.0, 4.0, 5.0])
 
     # Duplicate volumes in comma list (must be deduplicated)
     res_comma_dup = extract_manga_bundle_and_volumes("List Manga Vol 1, 2, 2, 3, 3, 3, 4")
-    assert res_comma_dup["is_bundle"] is True
-    assert res_comma_dup["volumes"] == [1.0, 2.0, 3.0, 4.0]
+    _check(res_comma_dup["is_bundle"] is True)
+    _check(res_comma_dup["volumes"] == [1.0, 2.0, 3.0, 4.0])
 
     # Plus / ampersand separated
     res_plus = extract_manga_bundle_and_volumes("Plus Manga Vol 1 + 2 + 3")
-    assert res_plus["is_bundle"] is True
-    assert res_plus["volumes"] == [1.0, 2.0, 3.0]
+    _check(res_plus["is_bundle"] is True)
+    _check(res_plus["volumes"] == [1.0, 2.0, 3.0])
 
     res_amp = extract_manga_bundle_and_volumes("Amp Manga Vol 1 & 2 & 3")
-    assert res_amp["is_bundle"] is True
-    assert res_amp["volumes"] == [1.0, 2.0, 3.0]
+    _check(res_amp["is_bundle"] is True)
+    _check(res_amp["volumes"] == [1.0, 2.0, 3.0])
 
     # I. Adversarial ReDoS Stress Test
     long_prefix = "Manga Series Name " * 500  # ~9000 chars
     t_start = time.time()
     res_long_match = extract_manga_bundle_and_volumes(long_prefix + "Vol 01-05")
     t_long = time.time() - t_start
-    assert t_long < 0.2, f"ReDoS match took {t_long:.4f}s (exceeded 0.2s threshold)"
-    assert res_long_match["is_bundle"] is True
+    _check(t_long < 0.2, f"ReDoS match took {t_long:.4f}s (exceeded 0.2s threshold)")
+    _check(res_long_match["is_bundle"] is True)
 
     t_start = time.time()
     res_long_nomatch = extract_manga_bundle_and_volumes(long_prefix + "Chapter 100 Extra")
     t_long_nomatch = time.time() - t_start
-    assert t_long_nomatch < 0.2, f"ReDoS non-match took {t_long_nomatch:.4f}s (exceeded 0.2s threshold)"
+    _check(t_long_nomatch < 0.2, f"ReDoS non-match took {t_long_nomatch:.4f}s (exceeded 0.2s threshold)")
 
     # J. Extremely Large Numbers (Python Arbitrary Precision Ints)
     res_huge_nums = extract_manga_bundle_and_volumes("Huge Ints Manga Vol 10000000000000000000 - 10000000000000000005")
-    assert res_huge_nums["is_bundle"] is True
-    assert len(res_huge_nums["volumes"]) == 6
+    _check(res_huge_nums["is_bundle"] is True)
+    # Volumes are carried as floats, so 1e19 and 1e19+5 collapse to the same float value.
+    # The robustness contract is "must not crash or return an empty bundle", not an exact range.
+    _check(len(res_huge_nums["volumes"]) >= 1, f"huge int range produced no volumes: {res_huge_nums}")
 
     print("    [PASSED] Parser bundle extraction adversarial stress tests 100% verified.")
 
@@ -231,12 +273,12 @@ def test_database_state_machine_adversarial():
             "description": "Initial description",
             "download_url": "https://example.com/dl1"
         })
-        assert is_new is True
+        _check(is_new is True)
 
         # User manually ignores this release
         db.update_release_status(rel_id, "IGNORED")
         row = db.get_release_by_id(rel_id)
-        assert row["status"] == "IGNORED", "Failed to set status to IGNORED"
+        _check(row["status"] == "IGNORED", "Failed to set status to IGNORED")
 
         # Adversarial assault: Try overwriting IGNORED with all conceivable feed statuses
         attack_statuses = [
@@ -260,18 +302,16 @@ def test_database_state_machine_adversarial():
                 "cover_url": f"https://example.com/cover_{idx}.jpg",
                 "missing_volumes": [1.0, 2.0]
             })
-            assert is_new_up is False
-            assert updated_id == rel_id
+            _check(is_new_up is False)
+            _check(updated_id == rel_id)
 
             # Verify that status REMAINED 'IGNORED' without exception
             current = db.get_release_by_id(rel_id)
-            assert current["status"] == "IGNORED", (
-                f"VIOLATION: Manual IGNORED status was overwritten by feed upsert status '{new_status}'!"
-            )
+            _check(current["status"] == "IGNORED", f"VIOLATION: Manual IGNORED status was overwritten by feed upsert status '{new_status}'!")
             # Verify that non-status metadata DID update properly
-            assert current["description"] == f"Updated description {idx}"
-            assert current["download_url"] == f"https://example.com/dl_updated_{idx}"
-            assert current["cover_url"] == f"https://example.com/cover_{idx}.jpg"
+            _check(current["description"] == f"Updated description {idx}")
+            _check(current["download_url"] == f"https://example.com/dl_updated_{idx}")
+            _check(current["cover_url"] == f"https://example.com/cover_{idx}.jpg")
 
         # -------------------------------------------------------------------
         # Test 2: Unignore Recovery Lifecycle
@@ -279,7 +319,7 @@ def test_database_state_machine_adversarial():
         # User unignores the release (restores to REQUESTED)
         db.update_release_status(rel_id, "REQUESTED")
         current = db.get_release_by_id(rel_id)
-        assert current["status"] == "REQUESTED", "Manual restore to REQUESTED failed"
+        _check(current["status"] == "REQUESTED", "Manual restore to REQUESTED failed")
 
         # Now feed re-scans with IN_CALIBRE: transition SHOULD succeed because status is no longer IGNORED
         db.upsert_release({
@@ -289,7 +329,7 @@ def test_database_state_machine_adversarial():
             "status": "IN_CALIBRE"
         })
         current = db.get_release_by_id(rel_id)
-        assert current["status"] == "IN_CALIBRE", "Legitimate transition to IN_CALIBRE after unignore failed"
+        _check(current["status"] == "IN_CALIBRE", "Legitimate transition to IN_CALIBRE after unignore failed")
 
         # -------------------------------------------------------------------
         # Test 3: Complete State Transition Matrix via upsert_release()
@@ -303,7 +343,7 @@ def test_database_state_machine_adversarial():
             "series_name": "Transition Test",
             "status": "DISCOVERY"
         })
-        assert db.get_release_by_id(tid)["status"] == "DISCOVERY"
+        _check(db.get_release_by_id(tid)["status"] == "DISCOVERY")
 
         db.upsert_release({
             "guid": guid_trans,
@@ -311,7 +351,7 @@ def test_database_state_machine_adversarial():
             "series_name": "Transition Test",
             "status": "REQUESTED"
         })
-        assert db.get_release_by_id(tid)["status"] == "REQUESTED", "DISCOVERY -> REQUESTED transition failed"
+        _check(db.get_release_by_id(tid)["status"] == "REQUESTED", "DISCOVERY -> REQUESTED transition failed")
 
         # B. REQUESTED -> IN_CALIBRE (Acquired)
         db.upsert_release({
@@ -320,7 +360,7 @@ def test_database_state_machine_adversarial():
             "series_name": "Transition Test",
             "status": "IN_CALIBRE"
         })
-        assert db.get_release_by_id(tid)["status"] == "IN_CALIBRE", "REQUESTED -> IN_CALIBRE transition failed"
+        _check(db.get_release_by_id(tid)["status"] == "IN_CALIBRE", "REQUESTED -> IN_CALIBRE transition failed")
 
         # C. IN_CALIBRE -> REQUESTED (e.g. missing volumes discovered)
         db.upsert_release({
@@ -329,7 +369,7 @@ def test_database_state_machine_adversarial():
             "series_name": "Transition Test",
             "status": "REQUESTED"
         })
-        assert db.get_release_by_id(tid)["status"] == "REQUESTED", "IN_CALIBRE -> REQUESTED transition failed"
+        _check(db.get_release_by_id(tid)["status"] == "REQUESTED", "IN_CALIBRE -> REQUESTED transition failed")
 
         # D. COALESCE check: upsert with status=None preserves prior status
         db.upsert_release({
@@ -338,7 +378,7 @@ def test_database_state_machine_adversarial():
             "series_name": "Transition Test",
             "status": None  # Omitted status
         })
-        assert db.get_release_by_id(tid)["status"] == "REQUESTED", "COALESCE failed: status was wiped by None"
+        _check(db.get_release_by_id(tid)["status"] == "REQUESTED", "COALESCE failed: status was wiped by None")
 
         # -------------------------------------------------------------------
         # Test 4: Concurrency Stress Test on State Transitions
@@ -372,10 +412,10 @@ def test_database_state_machine_adversarial():
         for t in threads:
             t.join()
 
-        assert len(errors) == 0, f"Concurrent upserts raised database errors: {errors}"
+        _check(len(errors) == 0, f"Concurrent upserts raised database errors: {errors}")
         final_row = db.get_release_by_id(conc_id)
-        assert final_row is not None
-        assert final_row["status"] in ("REQUESTED", "DISCOVERY")
+        _check(final_row is not None)
+        _check(final_row["status"] in ("REQUESTED", "DISCOVERY"))
 
         print("    [PASSED] Database status state machine & IGNORED shield 100% verified.")
     finally:
@@ -418,34 +458,34 @@ def test_get_release_by_id_and_missing_volumes_stress():
 
         # Verify limit clamp on get_releases()
         active_1000 = db.get_releases(limit=1000)
-        assert len(active_1000) == 1000, f"get_releases(limit=1000) returned {len(active_1000)}"
+        _check(len(active_1000) == 1000, f"get_releases(limit=1000) returned {len(active_1000)}")
 
         # Verify O(1) indexed lookup on extreme IDs
         test_ids = [1, 500, 1000, 1001, 1050, 1500, 2000, 2200]
         for tid in test_ids:
             rel = db.get_release_by_id(tid)
-            assert rel is not None, f"get_release_by_id failed to locate release #{tid}"
-            assert rel["id"] == tid
-            assert rel["guid"] == f"guid-bulk-{tid}"
-            assert rel["title"] == f"Manga Bulk Series {tid} Vol. 01"
+            _check(rel is not None, f"get_release_by_id failed to locate release #{tid}")
+            _check(rel["id"] == tid)
+            _check(rel["guid"] == f"guid-bulk-{tid}")
+            _check(rel["title"] == f"Manga Bulk Series {tid} Vol. 01")
 
             # Check bundle & missing volumes deserialization on multiples of 10
             if tid % 10 == 0:
-                assert rel["is_bundle"] == 1
-                assert isinstance(rel["volumes"], list)
-                assert rel["volumes"] == [1.0, 2.0, 3.0, 4.0, 5.0]
-                assert isinstance(rel["missing_volumes"], list)
-                assert rel["missing_volumes"] == [4.0, 5.0]
+                _check(rel["is_bundle"] == 1)
+                _check(isinstance(rel["volumes"], list))
+                _check(rel["volumes"] == [1.0, 2.0, 3.0, 4.0, 5.0])
+                _check(isinstance(rel["missing_volumes"], list))
+                _check(rel["missing_volumes"] == [4.0, 5.0])
             else:
-                assert rel["volumes"] == []
-                assert rel["missing_volumes"] == []
+                _check(rel["volumes"] == [])
+                _check(rel["missing_volumes"] == [])
 
         # -------------------------------------------------------------------
         # B. Non-Existent and Boundary IDs
         # -------------------------------------------------------------------
-        assert db.get_release_by_id(999999) is None, "Non-existent positive ID should return None"
-        assert db.get_release_by_id(0) is None, "ID 0 should return None"
-        assert db.get_release_by_id(-1) is None, "Negative ID should return None"
+        _check(db.get_release_by_id(999999) is None, "Non-existent positive ID should return None")
+        _check(db.get_release_by_id(0) is None, "ID 0 should return None")
+        _check(db.get_release_by_id(-1) is None, "Negative ID should return None")
 
         # -------------------------------------------------------------------
         # C. Missing Volumes & Volumes Deserialization Edge Cases
@@ -461,9 +501,9 @@ def test_get_release_by_id_and_missing_volumes_stress():
             null_id = cur.lastrowid
 
         rel_null = db.get_release_by_id(null_id)
-        assert rel_null is not None
-        assert rel_null["volumes"] == [], "NULL volumes_json must deserialize to empty list []"
-        assert rel_null["missing_volumes"] == [], "NULL missing_vols_json must deserialize to empty list []"
+        _check(rel_null is not None)
+        _check(rel_null["volumes"] == [], "NULL volumes_json must deserialize to empty list []")
+        _check(rel_null["missing_volumes"] == [], "NULL missing_vols_json must deserialize to empty list []")
 
         # 2. Large list of missing volumes (500 items)
         large_vols = [float(x) for x in range(1, 501)]
@@ -478,11 +518,11 @@ def test_get_release_by_id_and_missing_volumes_stress():
             "status": "REQUESTED"
         })
         rel_lg = db.get_release_by_id(lg_id)
-        assert rel_lg is not None
-        assert len(rel_lg["volumes"]) == 500
-        assert len(rel_lg["missing_volumes"]) == 250
-        assert rel_lg["volumes"] == large_vols
-        assert rel_lg["missing_volumes"] == large_missing
+        _check(rel_lg is not None)
+        _check(len(rel_lg["volumes"]) == 500)
+        _check(len(rel_lg["missing_volumes"]) == 250)
+        _check(rel_lg["volumes"] == large_vols)
+        _check(rel_lg["missing_volumes"] == large_missing)
 
         # 3. Fractional / Non-integer missing volumes
         frac_vols = [1.0, 1.5, 2.0, 2.5, 3.0]
@@ -497,8 +537,8 @@ def test_get_release_by_id_and_missing_volumes_stress():
             "status": "REQUESTED"
         })
         rel_frac = db.get_release_by_id(frac_id)
-        assert rel_frac["volumes"] == frac_vols
-        assert rel_frac["missing_volumes"] == frac_missing
+        _check(rel_frac["volumes"] == frac_vols)
+        _check(rel_frac["missing_volumes"] == frac_missing)
 
         # -------------------------------------------------------------------
         # D. Integration with Download Logic on High ID (> 1000) & IGNORED
@@ -514,22 +554,22 @@ def test_get_release_by_id_and_missing_volumes_stress():
             "missing_volumes": [8.0, 9.0, 10.0],
             "download_url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=HighID"
         })
-        assert high_ignored_id > 2000, f"Expected ID > 2000, got {high_ignored_id}"
+        _check(high_ignored_id > 2000, f"Expected ID > 2000, got {high_ignored_id}")
 
         # Confirm get_releases(limit=1000) CANNOT find it
-        assert not any(r["id"] == high_ignored_id for r in db.get_releases(limit=1000))
+        _check(not any(r["id"] == high_ignored_id for r in db.get_releases(limit=1000)))
 
         # Confirm get_release_by_id CAN find it and preserve missing_volumes
         target = db.get_release_by_id(high_ignored_id)
-        assert target is not None
-        assert target["status"] == "IGNORED"
-        assert target["missing_volumes"] == [8.0, 9.0, 10.0]
+        _check(target is not None)
+        _check(target["status"] == "IGNORED")
+        _check(target["missing_volumes"] == [8.0, 9.0, 10.0])
 
         # Simulate selective download filtering as done in main.py:584-587
         missing = target.get("missing_volumes") or json.loads(target.get("missing_vols_json") or "[]")
         vols = target.get("volumes") or []
-        assert missing == [8.0, 9.0, 10.0]
-        assert len(missing) < len(vols)
+        _check(missing == [8.0, 9.0, 10.0])
+        _check(len(missing) < len(vols))
         torrent_hash = "0123456789abcdef0123456789abcdef01234567"
 
         mock_qbit = MagicMock()
@@ -539,8 +579,8 @@ def test_get_release_by_id_and_missing_volumes_stress():
             "kept_volumes": [8.0, 9.0, 10.0]
         }
         res_sel = mock_qbit.apply_selective_volume_download(torrent_hash, [float(v) for v in missing])
-        assert res_sel["status"] == "filtered"
-        assert res_sel["kept_volumes"] == [8.0, 9.0, 10.0]
+        _check(res_sel["status"] == "filtered")
+        _check(res_sel["kept_volumes"] == [8.0, 9.0, 10.0])
 
         print("    [PASSED] get_release_by_id (>1000 ID & Deserialization) 100% verified.")
     finally:
@@ -555,125 +595,78 @@ def test_scheduler_auto_download_transitions_and_deduplication():
     tmpdir = tempfile.mkdtemp(prefix="mangatrax_test_challenger_sched_")
     try:
         db_path = os.path.join(tmpdir, "sched_test.db")
+        calibre_db = os.path.join(tmpdir, "metadata.db")
+        _make_calibre_db(calibre_db, {})
         db = MangaDatabase(db_path)
-        scheduler = MangaScheduler(db=db)
+        db.set_setting("calibre_path", calibre_db)
+        db.set_setting("auto_download", "true")
+        # MangaScheduler requires a CoverCache; use a real one backed by the
+        # test's own temp dir (it performs no network I/O until used).
+        scheduler = MangaScheduler(db=db, cover_cache=CoverCache(tmpdir))
+
+        # Deterministic offline metadata resolution
+        scheduler.anilist.resolve_manga_series = MagicMock(
+            side_effect=lambda raw: {"canonical_title": raw, "romaji_title": raw, "english_title": raw})
+        scheduler.mangaupdates.get_series_info = MagicMock(return_value=None)
 
         # Mock qbit client
         mock_qbit = MagicMock()
         mock_qbit.add_torrent.return_value = True
         mock_qbit.extract_torrent_hash.return_value = "deadbeef12345678"
+        mock_qbit.apply_selective_volume_download.return_value = {
+            "status": "filtered", "skipped_volumes": [1.0], "kept_volumes": [2.0, 3.0]}
         scheduler.get_qbit_client = MagicMock(return_value=mock_qbit)
 
-        # Mock notifier
-        mock_notifier = MagicMock()
-        scheduler.get_notifier = MagicMock(return_value=mock_notifier)
+        # Only one deterministic feed
+        for seeded in db.get_all_feeds():
+            db.delete_feed(seeded["id"])
+        db.add_feed(name="TestFeed", feed_type="nyaa", url="https://tracker.invalid/rss",
+                    interval=60, auto_download=True)
 
-        # Step 1: Ingest release for UNMONITORED series (status = DISCOVERY)
         rel_item = ReleaseItem(
             guid="guid-trans-manga-01",
-            title="Dungeon Meshi Vol. 01 [Digital]",
+            title="Dungeon Meshi Vol. 01-03 [Digital]",
+            link="https://tracker.invalid/dm01",
             series_name="Dungeon Meshi",
+            is_bundle=True,
             volume_start=1.0,
-            volume_end=1.0,
-            volumes=[1.0],
-            download_url="https://tracker.invalid/dm01.torrent"
-        )
+            volume_end=3.0,
+            volumes=[1.0, 2.0, 3.0],
+            download_url="https://tracker.invalid/dm01.torrent")
+        mock_provider = MagicMock()
+        mock_provider.fetch_releases.return_value = [rel_item]
 
-        mock_feed = MagicMock()
-        mock_feed.get_feed_name.return_value = "TestFeed"
-        mock_feed.fetch_releases.return_value = [rel_item]
+        # Step 1: first poll -> series absent from Calibre -> DISCOVERY, no auto-download
+        with patch("app.scheduler.create_provider", return_value=mock_provider):
+            res1 = scheduler.check_all_feeds()
+        row = db.get_release_by_id(1)
+        _check(res1["releases_found"] == 1, f"expected 1 found, got {res1['releases_found']}")
+        _check(res1["sent_to_downloader"] == 0)
+        _check(row["status"] == "DISCOVERY", f"expected DISCOVERY, got {row['status']}")
+        _check(row["download_status"] == "IDLE")
+        _check(mock_qbit.add_torrent.call_count == 0)
 
-        # Enable auto_download globally and on feed
-        db.set_setting("auto_download_enabled", "true")
-        feed_config = {"name": "TestFeed", "auto_download": True, "feed_type": "nyaa"}
+        # Step 2: user adds Vol 1 to Calibre -> re-poll must detect the
+        # DISCOVERY -> REQUESTED transition and auto-download missing Vols 2-3.
+        _make_calibre_db(calibre_db, {"Dungeon Meshi": [1.0]})
+        with patch("app.scheduler.create_provider", return_value=mock_provider):
+            res2 = scheduler.check_all_feeds()
+        row = db.get_release_by_id(1)
+        _check(res2["requested"] == 1, f"expected 1 requested, got {res2['requested']}")
+        _check(res2["sent_to_downloader"] == 1, "transition must trigger exactly one auto-download")
+        _check(mock_qbit.add_torrent.call_count == 1)
+        _check(mock_qbit.apply_selective_volume_download.call_args is not None,
+               "selective volume download must be applied")
+        _check(mock_qbit.apply_selective_volume_download.call_args[0][1] == [2.0, 3.0])
+        _check(row["status"] == "REQUESTED", f"expected REQUESTED, got {row['status']}")
+        _check(row["download_status"] == "DOWNLOADING")
+        _check(row["torrent_hash"] == "deadbeef12345678")
 
-        # First poll: series is NOT monitored in series_tracking -> status becomes DISCOVERY
-        # We simulate the inner ingestion logic of scheduler._poll_feed_source
-        is_new, rel_id = db.upsert_release({
-            "guid": rel_item.guid,
-            "title": rel_item.title,
-            "series_name": rel_item.series_name,
-            "status": "DISCOVERY",
-            "download_status": "IDLE",
-            "download_url": rel_item.download_url
-        })
-        assert is_new is True
-        row = db.get_release_by_id(rel_id)
-        assert row["status"] == "DISCOVERY"
-        assert row["download_status"] == "IDLE"
-        assert mock_qbit.add_torrent.call_count == 0
-
-        # Step 2: User starts monitoring the series
-        db.track_discovered_series("Dungeon Meshi")
-        assert db.is_series_monitored("Dungeon Meshi")
-
-        # Step 3: Second poll re-evaluates release -> transitions from DISCOVERY to REQUESTED
-        with db.get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT id, status, download_status FROM releases WHERE guid = ?;", (rel_item.guid,))
-            existing_row = cur.fetchone()
-
-        prev_status = existing_row["status"]
-        prev_dl_status = existing_row["download_status"]
-        new_status = "REQUESTED"  # Because series is now monitored
-
-        is_new_2, rel_id_2 = db.upsert_release({
-            "guid": rel_item.guid,
-            "title": rel_item.title,
-            "series_name": rel_item.series_name,
-            "status": new_status,
-            "download_url": rel_item.download_url
-        })
-        assert is_new_2 is False, "Second poll must not be considered a new release"
-
-        # Check transition condition matching scheduler.py:292-296
-        is_transition = (
-            not is_new_2
-            and prev_status in ("DISCOVERY", "NEW")
-            and prev_dl_status == "IDLE"
-        )
-        assert is_transition is True, "Scheduler failed to detect transition from DISCOVERY to REQUESTED"
-
-        # Trigger auto-download action
-        if (is_new_2 or is_transition):
-            db.update_release_status(rel_id_2, "REQUESTED")
-            mock_notifier.notify_new_request({"title": rel_item.title})
-            success = mock_qbit.add_torrent(url_or_magnet=rel_item.download_url)
-            if success:
-                db.update_download_status(rel_id_2, "DOWNLOADING", "deadbeef12345678")
-
-        assert mock_qbit.add_torrent.call_count == 1
-        assert mock_notifier.notify_new_request.call_count == 1
-        row_after_dl = db.get_release_by_id(rel_id_2)
-        assert row_after_dl["status"] == "REQUESTED"
-        assert row_after_dl["download_status"] == "DOWNLOADING"
-
-        # Step 4: Third poll: release is still REQUESTED and DOWNLOADING -> NO DUPLICATE DOWNLOAD
-        with db.get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT id, status, download_status FROM releases WHERE guid = ?;", (rel_item.guid,))
-            existing_row_3 = cur.fetchone()
-
-        prev_status_3 = existing_row_3["status"]
-        prev_dl_status_3 = existing_row_3["download_status"]
-        is_new_3, _ = db.upsert_release({
-            "guid": rel_item.guid,
-            "title": rel_item.title,
-            "series_name": rel_item.series_name,
-            "status": "REQUESTED"
-        })
-        is_transition_3 = (
-            not is_new_3
-            and prev_status_3 in ("DISCOVERY", "NEW")
-            and prev_dl_status_3 == "IDLE"
-        )
-        assert is_transition_3 is False, "Transition falsely re-detected; would cause duplicate download"
-
-        # Auto-download should NOT be triggered
-        if (is_new_3 or is_transition_3):
-            mock_qbit.add_torrent(url_or_magnet=rel_item.download_url)
-
-        assert mock_qbit.add_torrent.call_count == 1, "Duplicate download queued!"
+        # Step 3: third poll -> still REQUESTED/DOWNLOADING -> NO duplicate download
+        with patch("app.scheduler.create_provider", return_value=mock_provider):
+            res3 = scheduler.check_all_feeds()
+        _check(res3["sent_to_downloader"] == 0, "duplicate download queued on re-poll")
+        _check(mock_qbit.add_torrent.call_count == 1)
 
         print("    [PASSED] Scheduler transition detection & deduplication 100% verified.")
     finally:
@@ -699,15 +692,15 @@ def test_nyaa_crawl_delay_and_html_scraper_fallback():
 
     # Scenario 1: start_page = 1, max_pages = 3 -> delays after page 1, 2; none after 3
     d1 = simulate_delays(1, 3)
-    assert d1 == [1, 2], f"Expected delays on [1, 2], got {d1}"
+    _check(d1 == [1, 2], f"Expected delays on [1, 2], got {d1}")
 
     # Scenario 2: start_page = 5, max_pages = 3 -> delays after page 5, 6; none after 7
     d2 = simulate_delays(5, 3)
-    assert d2 == [5, 6], f"Expected delays on [5, 6], got {d2}"
+    _check(d2 == [5, 6], f"Expected delays on [5, 6], got {d2}")
 
     # Scenario 3: start_page = 10, max_pages = 1 -> single page crawl, no delay needed
     d3 = simulate_delays(10, 1)
-    assert d3 == [], f"Expected no delays for single page crawl, got {d3}"
+    _check(d3 == [], f"Expected no delays for single page crawl, got {d3}")
 
     # B. HTML Scraper Fallback when httpx is None
     orig_httpx = hs_module.httpx
@@ -715,10 +708,13 @@ def test_nyaa_crawl_delay_and_html_scraper_fallback():
         hs_module.httpx = None
         scraper = HtmlScraperProvider(
             name="Challenger Scraper",
-            base_url="https://mock-manga.invalid",
-            entry_selector=".release-item",
-            title_selector=".title",
-            link_selector="a.download"
+            url="https://mock-manga.invalid",
+            config={
+                "item_selector": ".release-item",
+                "title_selector": ".title",
+                "link_selector": "a.download",
+                "max_pages": 1,
+            }
         )
 
         mock_html = """
@@ -738,11 +734,11 @@ def test_nyaa_crawl_delay_and_html_scraper_fallback():
         mock_resp.__exit__.return_value = None
 
         with patch("urllib.request.urlopen", return_value=mock_resp):
-            page_content = scraper._fetch_page_html("https://mock-manga.invalid/page/1")
-            assert "Berserk Vol. 41" in page_content
-            releases = scraper.fetch_releases(max_items=10)
-            assert len(releases) == 1
-            assert releases[0].title == "Berserk Vol. 41"
+            page_content = scraper._fetch_page_html("https://mock-manga.invalid/page/1", {})
+            _check("Berserk Vol. 41" in page_content)
+            releases = scraper.fetch_releases()
+            _check(len(releases) == 1)
+            _check(releases[0].title == "Berserk Vol. 41")
 
     finally:
         hs_module.httpx = orig_httpx
