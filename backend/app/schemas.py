@@ -719,6 +719,7 @@ class DebugActionRequest(BaseModel):
         "clear-descriptions",
         "clear-thumbnails",
         "normalize-english-titles",
+        "purge-non-manga",
         "reset-all-data",
     ]
 

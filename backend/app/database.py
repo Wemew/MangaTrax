@@ -34,6 +34,58 @@ def _like_contains(term: str) -> str:
     """LIKE pattern with SQL wildcards escaped (clauses must add ESCAPE '\\')."""
     return f"%{escape_like(str(term).lower())}%"
 
+
+# ---------------------------------------------------------------------------
+# Release media typing (D1: non-destructive replacement of the startup purge)
+# ---------------------------------------------------------------------------
+# MangaTrax tracks manga.  A release can additionally be typed as one of the
+# other media classes, derived from the *title only* (torrent verification / D2
+# is deliberately out of scope).  The rules that keep typing safe:
+#
+# * typing NEVER deletes a row and NEVER writes ``status`` -- the resolve_status()
+#   precedence model stays the single owner of status transitions;
+# * only rows still typed ``unknown`` are ever (re)typed, so human/library
+#   decisions and previously typed rows survive;
+# * ``unknown`` means "inconclusive" and is therefore always visible in the
+#   tracking views.  Silence is not evidence of non-manga.
+MEDIA_TYPE_MANGA = "manga"
+MEDIA_TYPE_LIGHT_NOVEL = "light_novel"
+MEDIA_TYPE_CHAPTER_ONLY = "chapter_only"
+MEDIA_TYPE_NOVEL = "novel"
+MEDIA_TYPE_AUDIOBOOK = "audiobook"
+MEDIA_TYPE_UNKNOWN = "unknown"
+MEDIA_TYPES = (
+    MEDIA_TYPE_MANGA,
+    MEDIA_TYPE_LIGHT_NOVEL,
+    MEDIA_TYPE_CHAPTER_ONLY,
+    MEDIA_TYPE_NOVEL,
+    MEDIA_TYPE_AUDIOBOOK,
+    MEDIA_TYPE_UNKNOWN,
+)
+# Types hidden from the manga tracking views (they are retained in the DB and can
+# be inspected/purged explicitly -- never deleted automatically).
+NON_MANGA_MEDIA_TYPES = (
+    MEDIA_TYPE_LIGHT_NOVEL,
+    MEDIA_TYPE_CHAPTER_ONLY,
+    MEDIA_TYPE_NOVEL,
+    MEDIA_TYPE_AUDIOBOOK,
+)
+
+
+def tracked_media_clause(alias: str = "") -> str:
+    """SQL predicate: keep ``manga`` and inconclusive ``unknown`` rows visible.
+
+    ``alias`` is the table alias used by the enclosing query (e.g. ``"r"``), so
+    the clause reads ``COALESCE(r.media_type, 'unknown') NOT IN (...types)``.
+    Both the grouped and flat tracked views (Releases, Discovery, wishlist /
+    pending requests, status counters, prioritized-releases tab, search) use
+    this single predicate; there must be no second definition of the filter.
+    """
+    prefix = f"{alias}." if alias else ""
+    types = ", ".join(f"'{t}'" for t in NON_MANGA_MEDIA_TYPES)
+    return f"COALESCE({prefix}media_type, 'unknown') NOT IN ({types})"
+
+
 # ---------------------------------------------------------------------------
 # Release status precedence model
 # ---------------------------------------------------------------------------
@@ -276,6 +328,7 @@ class MangaDatabase:
                     status TEXT DEFAULT 'REQUESTED',
                     download_status TEXT DEFAULT 'IDLE',
                     torrent_hash TEXT,
+                    media_type TEXT DEFAULT 'unknown',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
@@ -292,6 +345,11 @@ class MangaDatabase:
                 cur.execute("ALTER TABLE releases ADD COLUMN mangaupdates_url TEXT DEFAULT '';")
             if "is_complete" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN is_complete INTEGER DEFAULT 0;")
+            # D1: media typing. Values: manga|light_novel|chapter_only|novel|audiobook|unknown.
+            # Rows are TYPED instead of deleted; the tracked views filter non-manga types
+            # out and 'unknown' deliberately stays visible (inconclusive means kept).
+            if "media_type" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN media_type TEXT DEFAULT 'unknown';")
 
             # Backfill is_complete for existing releases matching complete indicators (local SQL/regex only, NO network calls)
             try:
@@ -322,21 +380,12 @@ class MangaDatabase:
             except Exception:
                 pass
 
-            # Purge any light novel / non-manga releases inadvertently stored in database
-            try:
-                cur.execute("SELECT id, title FROM releases;")
-                all_releases = cur.fetchall()
-                from app.parser import is_light_novel, is_chapter_only
-                ln_ids = [r["id"] for r in all_releases if is_light_novel(r["title"])]
-                if ln_ids:
-                    cur.executemany("DELETE FROM releases WHERE id = ?;", [(lid,) for lid in ln_ids])
-                
-                # Purge any chapter-only releases (without volume indicators) inadvertently stored
-                ch_ids = [r["id"] for r in all_releases if is_chapter_only(r["title"])]
-                if ch_ids:
-                    cur.executemany("DELETE FROM releases WHERE id = ?;", [(cid,) for cid in ch_ids])
-            except Exception:
-                pass
+            # D1: the old startup purge deleted every release whose title tripped the
+            # title-only is_light_novel()/is_chapter_only() heuristics, on EVERY init,
+            # with no status filter -- one false positive destroyed tracked/wishlisted
+            # rows.  It is replaced by a NON-DESTRUCTIVE one-shot re-typing pass
+            # (_run_media_filter_once, run after this transaction); nothing here (or
+            # anywhere else on the automatic startup path) may delete releases.
 
             # Re-evaluate and sanitize release_group in releases table
             try:
@@ -486,6 +535,15 @@ class MangaDatabase:
                 "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",
                 ("discard_unmarked_chapters", os.getenv("MANGATRAX_DISCARD_UNMARKED_CHAPTERS", "true")),
             )
+            cur.execute(
+                "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",
+                ("filter_non_manga", os.getenv("MANGATRAX_FILTER_NON_MANGA", "true")),
+            )
+            # One-shot marker for the D1 re-typing pass ('' = not applied yet).
+            cur.execute(
+                "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",
+                ("media_filter_applied", ""),
+            )
 
             # Seed sample manga feed if empty
             cur.execute("SELECT count(*) FROM feeds;")
@@ -507,6 +565,7 @@ class MangaDatabase:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_updated_at ON releases(updated_at);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_rg ON releases(release_group);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_vol_start ON releases(volume_start);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_media_type ON releases(media_type);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_series_tracking_name ON series_tracking(name);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_series_tracking_monitored ON series_tracking(is_monitored);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_meta_cache_term ON manga_metadata_cache(search_term);")
@@ -514,6 +573,107 @@ class MangaDatabase:
             conn.commit()
         finally:
             conn.close()
+
+        # D1: type legacy rows (non-destructively) once.  This runs AFTER the schema
+        # transaction above so it never contends for the write lock, and it is the
+        # only media-typing work on the automatic startup path.
+        self._run_media_filter_once()
+
+    def _run_media_filter_once(self):
+        """One-shot, NON-DESTRUCTIVE re-typing of rows stored before media typing.
+
+        Replaces the old init-time ``DELETE FROM releases`` purge (D1).  Behaviour:
+
+        * rows are re-labelled, never deleted;
+        * only rows still typed ``unknown`` are examined, so anything already
+          classified (or decided by a human) is untouched;
+        * ``status`` is never written -- this pass cannot clobber the
+          ``resolve_status()`` precedence model;
+        * gated by the ``media_filter_applied`` marker: any value other than
+          ``''``/``'0'`` counts as already applied (so a legacy ``'true'`` value
+          cannot make it re-run), and by ``filter_non_manga`` (default true);
+        * failure is logged and swallowed -- typing must never block startup.
+
+        Runs on ONE explicitly-closed connection: this executes inside
+        ``__init__`` and on Windows a leaked (cycle-held) sqlite handle would keep
+        the database file locked.
+        """
+        typed = {MEDIA_TYPE_LIGHT_NOVEL: 0, MEDIA_TYPE_CHAPTER_ONLY: 0}
+        changed = 0
+        try:
+            conn = self.get_connection()
+            try:
+                cur = conn.cursor()
+
+                def _setting(key: str, default: str) -> str:
+                    cur.execute("SELECT value FROM app_settings WHERE key = ?;", (key,))
+                    row = cur.fetchone()
+                    return (row["value"] if row else default) or default
+
+                marker = _setting("media_filter_applied", "").strip()
+                if marker not in ("", "0"):
+                    return 0
+                filter_setting = _setting("filter_non_manga", "true").strip().lower()
+                if filter_setting in ("false", "0", "no", "off"):
+                    return 0
+
+                from app.parser import is_chapter_only, is_light_novel
+
+                cur.execute(
+                    "SELECT id, title FROM releases "
+                    "WHERE COALESCE(media_type, 'unknown') IN ('unknown', '');"
+                )
+                rows = cur.fetchall()
+                for row in rows:
+                    title = (row["title"] or "").strip()
+                    if not title:
+                        continue
+                    if is_light_novel(title):
+                        kind = MEDIA_TYPE_LIGHT_NOVEL
+                    elif is_chapter_only(title):
+                        kind = MEDIA_TYPE_CHAPTER_ONLY
+                    else:
+                        continue
+                    cur.execute(
+                        "UPDATE releases SET media_type = ? "
+                        "WHERE id = ? AND COALESCE(media_type, 'unknown') IN ('unknown', '');",
+                        (kind, row["id"]),
+                    )
+                    typed[kind] += 1
+                    changed += 1
+
+                cur.execute(
+                    "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = ?;",
+                    ("media_filter_applied", "1", "1"),
+                )
+                if changed:
+                    cur.execute(
+                        "INSERT INTO activity_logs (event_type, message, details, actor) "
+                        "VALUES (?, ?, ?, ?);",
+                        (
+                            "MEDIA_RECLASSIFY",
+                            "Re-typed stored releases by media type (no rows deleted)",
+                            f"Light novel: {typed[MEDIA_TYPE_LIGHT_NOVEL]}, "
+                            f"chapter-only: {typed[MEDIA_TYPE_CHAPTER_ONLY]}. "
+                            "Non-manga types are hidden from the tracking views and kept in the database.",
+                            _resolve_audit_actor("system"),
+                        ),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:  # pragma: no cover - typing must never block startup
+            logger.warning("Media re-typing pass skipped: %s", exc)
+            return 0
+
+        if changed:
+            self._invalidate_grouped_cache()
+            logger.info(
+                "Media filter: typed %s light-novel and %s chapter-only row(s); nothing deleted.",
+                typed[MEDIA_TYPE_LIGHT_NOVEL], typed[MEDIA_TYPE_CHAPTER_ONLY],
+            )
+        return changed
 
     # --- Settings ---
     def get_setting(self, key: str, default: str = "") -> str:
@@ -892,26 +1052,33 @@ class MangaDatabase:
             self._invalidate_grouped_cache()
 
     def get_releases(self, status: Optional[str] = None, limit: int = 500, offset: int = 0) -> List[Dict[str, Any]]:
+        media_guard = tracked_media_clause()
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("SELECT lower(name) FROM prioritized_groups;")
             p_groups = {row[0] for row in cur.fetchall()}
 
             if status == "COMPLETED":
-                cur.execute("""
+                cur.execute(f"""
                     SELECT * FROM releases 
                     WHERE (is_complete = 1 OR lower(title) LIKE '%complete%')
                       AND status NOT IN ('BLACKLISTED', 'IGNORED')
                       AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
+                      AND {media_guard}
                     ORDER BY updated_at DESC LIMIT ? OFFSET ?;
                 """, (limit, offset))
             elif status:
-                cur.execute("SELECT * FROM releases WHERE status = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?;", (status, limit, offset))
+                cur.execute(
+                    f"SELECT * FROM releases WHERE status = ? AND {media_guard} "
+                    "ORDER BY updated_at DESC LIMIT ? OFFSET ?;",
+                    (status, limit, offset),
+                )
             else:
-                cur.execute("""
+                cur.execute(f"""
                     SELECT * FROM releases 
                     WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
                       AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
+                      AND {media_guard}
                     ORDER BY 
                         CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                         updated_at DESC 
@@ -963,10 +1130,11 @@ class MangaDatabase:
         prefix = f"{escape_like(term.lower())}%"
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("""
+            cur.execute(f"""
                 SELECT * FROM releases
-                WHERE lower(title) LIKE ? ESCAPE '\\'
-                   OR lower(COALESCE(series_name, '')) LIKE ? ESCAPE '\\'
+                WHERE (lower(title) LIKE ? ESCAPE '\\'
+                   OR lower(COALESCE(series_name, '')) LIKE ? ESCAPE '\\')
+                  AND {tracked_media_clause()}
                 ORDER BY
                     CASE
                         WHEN lower(title) LIKE ? ESCAPE '\\' THEN 0
@@ -1040,6 +1208,7 @@ class MangaDatabase:
                       AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED')
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1))
+                      AND {tracked_media_clause('r')}
                       {search_clause}
                 )
                 SELECT count(*) FROM ranked_discovery WHERE rn = 1;
@@ -1081,6 +1250,7 @@ class MangaDatabase:
                       AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED')
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1))
+                      AND {tracked_media_clause('r')}
                       {search_clause}
                 )
                 SELECT * FROM ranked_discovery
@@ -1353,18 +1523,21 @@ class MangaDatabase:
 
     # --- Dashboard Summary ---
     def get_dashboard_stats(self) -> Dict[str, Any]:
+        # D1 query guard: non-manga types never contribute to the manga counters
+        # (unknown stays counted -- inconclusive means kept).
+        media_guard = tracked_media_clause()
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("SELECT count(*) FROM series_tracking WHERE is_monitored = 1;")
             monitored_series = cur.fetchone()[0]
 
-            cur.execute("SELECT count(*) FROM releases WHERE status = 'REQUESTED';")
+            cur.execute(f"SELECT count(*) FROM releases WHERE status = 'REQUESTED' AND {media_guard};")
             pending_requests = cur.fetchone()[0]
 
-            cur.execute("SELECT count(*) FROM releases WHERE status = 'IN_CALIBRE';")
+            cur.execute(f"SELECT count(*) FROM releases WHERE status = 'IN_CALIBRE' AND {media_guard};")
             acquired_books = cur.fetchone()[0]
 
-            cur.execute("SELECT count(*) FROM releases WHERE download_status = 'DOWNLOADING';")
+            cur.execute(f"SELECT count(*) FROM releases WHERE download_status = 'DOWNLOADING' AND {media_guard};")
             active_downloads = cur.fetchone()[0]
 
             discovered_count = self.count_discovery_releases()
@@ -1399,6 +1572,46 @@ class MangaDatabase:
             self._invalidate_grouped_cache()
             self.log_activity("DEBUG_CLEAR", "Cleared discovered manga series", f"Removed {count} unreviewed discovery releases.")
             return count
+
+    def purge_non_manga_releases(self, actor: Optional[str] = None) -> int:
+        """Explicit, opt-in maintenance purge of rows typed as non-manga (D1).
+
+        This is the ONLY code path that deletes releases by media type, and it is
+        never called automatically: the startup path merely *re-types* rows (see
+        :meth:`_run_media_filter_once`).  It only removes rows whose ``media_type``
+        is an explicit non-manga value, so ``manga``, ``unknown`` and NULL rows are
+        never touched -- inconclusive means kept.
+
+        Reachable through ``POST /api/debug/action`` with ``action='purge-non-manga'``
+        (gated by ``MANGATRAX_DEBUG_ACTIONS=1``), never from ``init_db``.
+        """
+        non_manga = "(" + ", ".join(f"'{t}'" for t in NON_MANGA_MEDIA_TYPES) + ")"
+        conn = self.get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT count(*) FROM releases "
+                f"WHERE COALESCE(media_type, 'unknown') IN {non_manga};"
+            )
+            count = cur.fetchone()[0]
+            if count:
+                cur.execute(
+                    "DELETE FROM releases "
+                    f"WHERE COALESCE(media_type, 'unknown') IN {non_manga};"
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        if count:
+            self._invalidate_grouped_cache()
+            self.log_activity(
+                "MEDIA_PURGE",
+                "Purged non-manga releases (explicit maintenance action)",
+                f"Removed {count} row(s) typed light_novel/chapter_only/novel/audiobook. "
+                "Manga and unknown rows were kept.",
+                actor=actor,
+            )
+        return count
 
     # --- Manga Metadata Cache (AniList) ---
     def get_cached_manga_metadata(self, search_term: str) -> Optional[Dict[str, Any]]:
@@ -1762,6 +1975,7 @@ class MangaDatabase:
                 return cached_data, 0
 
         persisted = 0
+        media_guard = tracked_media_clause()
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("SELECT lower(name) FROM prioritized_groups;")
@@ -1769,46 +1983,54 @@ class MangaDatabase:
 
             if prioritized_only:
                 if status == "COMPLETED":
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT * FROM releases 
                         WHERE (is_complete = 1 OR lower(title) LIKE '%complete%')
                           AND status NOT IN ('BLACKLISTED', 'IGNORED')
                           AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                           AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                          AND {media_guard}
                         ORDER BY updated_at DESC;
                     """)
                 elif status:
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT * FROM releases 
                         WHERE status = ? AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                          AND {media_guard}
                         ORDER BY updated_at DESC;
                     """, (status,))
                 else:
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT * FROM releases 
                         WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
                           AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                           AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                          AND {media_guard}
                         ORDER BY 
                             CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                             updated_at DESC;
                     """)
             else:
                 if status == "COMPLETED":
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT * FROM releases 
                         WHERE (is_complete = 1 OR lower(title) LIKE '%complete%')
                           AND status NOT IN ('BLACKLISTED', 'IGNORED')
                           AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
+                          AND {media_guard}
                         ORDER BY updated_at DESC;
                     """)
                 elif status:
-                    cur.execute("SELECT * FROM releases WHERE status = ? ORDER BY updated_at DESC;", (status,))
+                    cur.execute(
+                        f"SELECT * FROM releases WHERE status = ? AND {media_guard} ORDER BY updated_at DESC;",
+                        (status,),
+                    )
                 else:
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT * FROM releases 
                         WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
                           AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
+                          AND {media_guard}
                         ORDER BY 
                             CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                             updated_at DESC;
@@ -2192,9 +2414,11 @@ class MangaDatabase:
     def get_prioritized_groups(self) -> List[Dict[str, Any]]:
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("""
+            cur.execute(f"""
                 SELECT pg.*, 
-                       (SELECT count(*) FROM releases r WHERE lower(COALESCE(r.release_group, '')) = lower(pg.name)) as release_count
+                       (SELECT count(*) FROM releases r
+                         WHERE lower(COALESCE(r.release_group, '')) = lower(pg.name)
+                           AND {tracked_media_clause('r')}) as release_count
                 FROM prioritized_groups pg
                 ORDER BY pg.priority DESC, pg.name COLLATE NOCASE ASC;
             """)
@@ -2232,29 +2456,33 @@ class MangaDatabase:
 
     def get_prioritized_releases(self, status: Optional[str] = None, limit: int = 500, offset: int = 0) -> List[Dict[str, Any]]:
         """Returns releases published by prioritized release groups."""
+        media_guard = tracked_media_clause()
         with self.get_connection() as conn:
             cur = conn.cursor()
             if status == "COMPLETED":
-                cur.execute("""
+                cur.execute(f"""
                     SELECT * FROM releases 
                     WHERE (is_complete = 1 OR lower(title) LIKE '%complete%')
                       AND status NOT IN ('BLACKLISTED', 'IGNORED')
                       AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                       AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                      AND {media_guard}
                     ORDER BY updated_at DESC LIMIT ? OFFSET ?;
                 """, (limit, offset))
             elif status:
-                cur.execute("""
+                cur.execute(f"""
                     SELECT * FROM releases 
                     WHERE status = ? AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                      AND {media_guard}
                     ORDER BY updated_at DESC LIMIT ? OFFSET ?;
                 """, (status, limit, offset))
             else:
-                cur.execute("""
+                cur.execute(f"""
                     SELECT * FROM releases 
                     WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
                       AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                       AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                      AND {media_guard}
                     ORDER BY 
                         CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                         updated_at DESC 

@@ -1101,28 +1101,64 @@ def test_light_novel_filtering():
         assert is_new is False
         assert rel_id is None
 
-        # 4. Database auto-purge on startup
-        # Manually force-insert a light novel into releases table
+        # 4. Startup is NON-DESTRUCTIVE (D1).  Re-initialising the database must never
+        # delete a stored release, even when its title trips the title-only
+        # is_light_novel()/is_chapter_only() heuristics: a single false positive used
+        # to destroy REQUESTED/IGNORED rows on EVERY init.  Non-manga rows are now
+        # *typed* and hidden from the tracking views instead; only the explicit,
+        # opt-in purge removes them.
+        def _row_by_guid(guid):
+            with db.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT guid, status, media_type FROM releases WHERE guid = ?;",
+                    (guid,),
+                )
+                found = cur.fetchone()
+                return dict(found) if found else None
+
+        # Manually force-insert a light novel into releases table (wishlist status:
+        # exactly the kind of tracked row the old purge could destroy).
         with db.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
                 INSERT INTO releases (guid, title, series_name, status)
-                VALUES ('ln-manual-1', 'The Tale of a Little Alchemist Blessed by the Spirits v01-04 [Seven Seas] [Stick]', 'The Tale of a Little Alchemist Blessed by the Spirits', 'DISCOVERY');
+                VALUES ('ln-manual-1', 'The Tale of a Little Alchemist Blessed by the Spirits v01-04 [Seven Seas] [Stick]', 'The Tale of a Little Alchemist Blessed by the Spirits', 'REQUESTED');
             """)
             conn.commit()
 
-        # Verify it exists
+        # Verify it exists and is visible before the init cycles.
         releases_before = db.get_discovery_releases()
         assert any(r["guid"] == "ln-manual-1" for r in releases_before)
 
-        # Trigger database init/purge
+        # Re-initialise repeatedly: the row must survive, status untouched.
         db.init_db()
+        db.init_db()
+        survivor = _row_by_guid("ln-manual-1")
+        assert survivor is not None, "startup deleted a stored release (destructive purge regression)"
+        assert survivor["status"] == "REQUESTED", survivor
+        # The one-shot re-typing pass already ran on the empty database, so a row
+        # added afterwards stays 'unknown' -- inconclusive means kept (and visible).
+        assert survivor["media_type"] == "unknown", survivor
+        assert any(r["guid"] == "ln-manual-1" for r in db.get_discovery_releases())
 
-        # Verify it was purged from the database
-        releases_after = db.get_discovery_releases()
-        assert not any(r["guid"] == "ln-manual-1" for r in releases_after)
+        # The purge is a separate, explicit opt-in action and only removes rows that
+        # are explicitly typed non-manga; 'unknown' rows are never touched.
+        assert db.purge_non_manga_releases() == 0
+        assert _row_by_guid("ln-manual-1") is not None
 
-        print("    [PASSED] Light novels detected, rejected by scheduler, and purged from database.")
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE releases SET media_type = 'light_novel' WHERE guid = 'ln-manual-1';")
+            conn.commit()
+        # A typed non-manga row is hidden from the tracked view immediately...
+        assert not any(r["guid"] == "ln-manual-1" for r in db.get_discovery_releases())
+        # ...but still stored, and removed only when the user explicitly asks.
+        assert _row_by_guid("ln-manual-1") is not None
+        assert db.purge_non_manga_releases() == 1
+        assert _row_by_guid("ln-manual-1") is None
+
+        print("    [PASSED] Light novels detected, rejected by scheduler; startup keeps rows (typed only), explicit purge opt-in.")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 

@@ -1604,6 +1604,12 @@ async def api_debug_action(payload: Dict[str, Any]):
         # series' stable name.
         count = db.repair_rekeyed_series_names()
         return JSONResponse({"status": "success", "message": f"Re-keyed {count} release row(s) back to their tracked series' stable matching keys."})
+    elif action == "purge-non-manga":
+        # D1: the explicit, opt-in counterpart of the daily re-typing pass.  Startup
+        # only *types* non-manga rows (never deletes); a user who genuinely wants them
+        # gone asks for it here.  Rows typed manga/unknown are never touched.
+        count = db.purge_non_manga_releases()
+        return JSONResponse({"status": "success", "message": f"Purged {count} non-manga release row(s) (manga and unknown rows were kept)."})
     elif action == "reset-all-data":
         db.reset_all_data()
         cover_cache.clear_cache()
