@@ -18,6 +18,9 @@ from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
 from app.tagger.cbz_tagger import has_comicinfo
 from app.metadata.mangaupdates import MangaUpdatesService
+from app import auth as auth_module
+from app import schemas
+from app import security
 
 # Setup Logging
 logging.basicConfig(
@@ -39,6 +42,19 @@ cover_cache = CoverCache(DATA_DIR)
 mangaupdates = MangaUpdatesService(db=db)
 scheduler = MangaScheduler(db, cover_cache)
 
+# --- Authentication (MANGATRAX_AUTH_MODE = none | basic | oidc; default none) ---
+# Misconfiguration in an enabled mode must never silently fall back to an open
+# server: validate() raises, we log an actionable message and exit.
+AUTH_CONFIG = auth_module.AuthConfig.from_env()
+try:
+    AUTH_CONFIG.validate()
+except auth_module.AuthConfigError as exc:
+    logger.critical("Authentication configuration error: %s", exc)
+    logger.critical("Refusing to start with an unusable authentication configuration.")
+    raise SystemExit(1)
+logger.info("Authentication configuration: %s", AUTH_CONFIG.describe())
+AUTH = auth_module.AuthManager(AUTH_CONFIG, user_store=db)
+
 # Lifespan Context Manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -57,6 +73,41 @@ async def lifespan(app: FastAPI):
     scheduler.stop()
 
 app = FastAPI(title="MangaTrax", lifespan=lifespan)
+
+# --- Authentication middleware ---
+# Registered BEFORE the security-headers middleware so that challenge/redirect
+# responses produced here still pass through it and receive the security headers.
+# `MANGATRAX_AUTH_MODE=none` (the default) lets every request through and stamps
+# the audit actor as "anonymous"; background worker events use actor="scheduler".
+@app.middleware("http")
+async def enforce_authentication(request: Request, call_next):
+    try:
+        decision = AUTH.check_request(request.method, request.url.path, request.headers, request.cookies)
+    except Exception as exc:  # pragma: no cover - defensive: never fail open
+        logger.error("Authentication middleware error: %s", exc)
+        return JSONResponse({"detail": "Authentication error"}, status_code=500)
+
+    actor_token = auth_module.set_current_actor(decision.actor)
+    try:
+        if decision.action == "redirect_login":
+            return RedirectResponse(decision.location or "/auth/login", status_code=302)
+        if decision.action == "unauthorized":
+            response_headers = {}
+            if decision.www_authenticate:
+                response_headers["WWW-Authenticate"] = decision.www_authenticate
+            return JSONResponse(
+                {"detail": decision.detail or "Authentication required"},
+                status_code=401,
+                headers=response_headers,
+            )
+        if decision.action == "forbidden":
+            return JSONResponse(
+                {"detail": decision.detail or "Request rejected"},
+                status_code=403,
+            )
+        return await call_next(request)
+    finally:
+        auth_module.reset_current_actor(actor_token)
 
 # Security Headers Middleware
 @app.middleware("http")
@@ -83,6 +134,129 @@ def jinja_localdate(value: Optional[str]) -> str:
 
 templates.env.filters["localtime"] = jinja_localtime
 templates.env.filters["localdate"] = jinja_localdate
+# Stored-XSS defense: only http(s) URLs may be rendered as an href.
+templates.env.filters["safe_url"] = security.safe_url_filter
+
+
+def _register_template_global(name: str, value) -> None:
+    """Expose a Jinja global when the template engine supports globals.
+
+    The E2E harness replaces Jinja2Templates with a minimal in-memory shim, so
+    this is deliberately tolerant of a mock environment object.
+    """
+    try:
+        templates.env.globals[name] = value
+    except Exception:  # pragma: no cover - mock template environment
+        pass
+
+
+_register_template_global("auth_mode", AUTH_CONFIG.mode)
+_register_template_global("auth_actor", auth_module.get_current_actor)
+_register_template_global("debug_actions_enabled", AUTH_CONFIG.debug_actions)
+
+
+def _validated_payload(model_cls, payload, *, status_code: int = 400):
+    """Validate a JSON payload against a Pydantic model, mapping errors to HTTP 400."""
+    try:
+        return schemas.validate(model_cls, payload)
+    except schemas.ValidationError as exc:
+        raise HTTPException(status_code=status_code, detail=schemas.validation_error_messages(exc)) from exc
+
+
+def _operator_allowed_path_roots():
+    """Optional deployment-level path allow-list (``MANGATRAX_PATH_ROOTS``).
+
+    ``os.pathsep``-separated list of directories that ``calibre_path`` /
+    ``staging_dir`` settings may point into.  Unset means the traversal, NUL,
+    relative-path and symlink checks still apply, but new mount points can be
+    configured freely (existing deployments keep working).
+    """
+    raw = os.getenv("MANGATRAX_PATH_ROOTS", "") or ""
+    return [part.strip() for part in raw.split(os.pathsep) if part.strip()]
+
+
+# --- Authentication & health endpoints (exempt from the auth gate) ---
+
+@app.get("/health")
+async def health_check():
+    """Liveness probe (exempt from auth so Docker/Traefik health checks work)."""
+    return JSONResponse(AUTH.health_payload())
+
+
+@app.get("/auth/login")
+async def auth_login(next: str = Query("/")):
+    """Start the OIDC authorization-code + PKCE flow (redirect to PocketID)."""
+    if AUTH_CONFIG.mode != "oidc":
+        # Nothing to log in to: basic shows the browser challenge from the
+        # middleware, none has no authentication at all.
+        return RedirectResponse("/", status_code=302)
+    try:
+        start = AUTH.start_login(next)
+    except auth_module.AuthError as exc:
+        logger.error("Could not start OIDC login: %s", exc)
+        if AUTH_CONFIG.break_glass_enabled:
+            # PocketID is unreachable: fall back to the Basic challenge so the
+            # operator can still get in with the break-glass credentials.
+            return JSONResponse(
+                {"detail": "OIDC provider unavailable; use break-glass Basic credentials"},
+                status_code=401,
+                headers={"WWW-Authenticate": auth_module.BASIC_CHALLENGE},
+            )
+        return JSONResponse({"detail": "OIDC provider unavailable"}, status_code=503)
+    response = RedirectResponse(start.authorization_url, status_code=302)
+    response.set_cookie(
+        key=start.state_cookie_name,
+        value=start.state_cookie,
+        max_age=auth_module.STATE_TTL_SECONDS,
+        httponly=True,
+        secure=AUTH_CONFIG.cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+    return response
+
+
+@app.get("/auth/callback")
+async def auth_callback(
+    request: Request,
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None),
+):
+    """Complete the OIDC flow: verify state+nonce, exchange code, set session."""
+    if AUTH_CONFIG.mode != "oidc":
+        return RedirectResponse("/", status_code=302)
+    if error:
+        logger.warning("OIDC provider returned an error: %s", error)
+        return RedirectResponse("/auth/login?error=oidc_denied", status_code=302)
+    state_cookie = request.cookies.get(auth_module.STATE_COOKIE_NAME, "")
+    try:
+        result = AUTH.complete_login(code, state, state_cookie)
+    except auth_module.AuthError as exc:
+        # Generic message to the browser; the reason is only logged server-side.
+        logger.warning("OIDC callback rejected: %s", exc)
+        return RedirectResponse("/auth/login?error=oidc_failed", status_code=302)
+    response = RedirectResponse(result.redirect_url or "/", status_code=302)
+    response.set_cookie(
+        key=auth_module.SESSION_COOKIE_NAME,
+        value=result.session_cookie,
+        max_age=AUTH_CONFIG.session_max_age,
+        httponly=True,
+        secure=AUTH_CONFIG.cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+    response.delete_cookie(auth_module.STATE_COOKIE_NAME, path="/")
+    return response
+
+
+@app.get("/auth/logout")
+async def auth_logout():
+    """Clear the local session and, when advertised, log out at the IdP too."""
+    result = AUTH.logout()
+    response = RedirectResponse(result.redirect_url or "/", status_code=302)
+    response.delete_cookie(auth_module.SESSION_COOKIE_NAME, path="/")
+    return response
 
 # --- HTML UI Routes ---
 
@@ -378,7 +552,8 @@ async def settings_view(request: Request):
         context={
             "active_page": "settings",
             "settings": settings,
-            "prioritized_groups": prioritized_groups
+            "prioritized_groups": prioritized_groups,
+            "debug_actions_enabled": AUTH_CONFIG.debug_actions
         }
     )
 
@@ -392,8 +567,19 @@ async def api_calibre_sync():
 
 @app.get("/api/calibre/test")
 async def api_calibre_test(path: str = Query(...)):
-    """Test connection to Calibre library at given path."""
-    scanner = CalibreMangaScanner(path)
+    """Test connection to Calibre library at given path.
+
+    M3 feature 21: the probe path is contained to the configured library roots
+    (blocking path traversal, symlink escapes and arbitrary filesystem probing).
+    """
+    configured_calibre = db.get_setting("calibre_path", CALIBRE_DIR)
+    configured_staging = db.get_setting("staging_dir", "")
+    allowed_roots = [root for root in (configured_calibre, CALIBRE_DIR, configured_staging) if root]
+    try:
+        safe_path = security.ensure_path_within_roots(path, allowed_roots)
+    except security.UnsafePathError as exc:
+        raise HTTPException(status_code=403, detail=f"Rejected calibre path: {exc}") from exc
+    scanner = CalibreMangaScanner(safe_path)
     summary = scanner.get_library_summary()
     return JSONResponse(summary)
 
@@ -430,12 +616,10 @@ async def api_feeds_check():
 @app.post("/api/feeds/test")
 async def api_feeds_test(payload: Dict[str, Any]):
     """Live test a feed or scraper extraction without saving to database."""
-    url = payload.get("url", "")
-    feed_type = payload.get("feed_type", "rss")
-    config = payload.get("config", {})
-
-    if not url:
-        return JSONResponse({"status": "error", "message": "URL is required"}, status_code=400)
+    model = _validated_payload(schemas.FeedTestRequest, payload)
+    url = model.url
+    feed_type = model.feed_type
+    config = model.config
 
     try:
         provider = create_provider({"name": "Test Feed", "feed_type": feed_type, "url": url, "config_json": json.dumps(config)})
@@ -450,25 +634,16 @@ async def api_feeds_test(payload: Dict[str, Any]):
 @app.post("/api/feeds")
 async def api_add_feed(payload: Dict[str, Any]):
     """Add a new feed or web scraper."""
-    name = payload.get("name")
-    feed_type = payload.get("feed_type")
-    url = payload.get("url")
-    interval = payload.get("interval", 60)
-    auto_download = payload.get("auto_download", True)
-    config = payload.get("config", {})
-
-    if not name or not url or not feed_type:
-        return JSONResponse({"status": "error", "message": "Missing required fields"}, status_code=400)
-
+    model = _validated_payload(schemas.FeedCreateRequest, payload)
     feed_id = db.add_feed(
-        name=name,
-        feed_type=feed_type,
-        url=url,
-        config_json=json.dumps(config),
-        auto_download=auto_download,
-        interval=interval
+        name=model.name,
+        feed_type=model.feed_type,
+        url=model.url,
+        config_json=json.dumps(model.config),
+        auto_download=model.auto_download,
+        interval=model.interval
     )
-    db.log_activity("FEED_ADDED", f"Added manga feed: {name}", f"Type: {feed_type}, URL: {url}")
+    db.log_activity("FEED_ADDED", f"Added manga feed: {model.name}", f"Type: {model.feed_type}, URL: {model.url}")
     return JSONResponse({"status": "success", "feed_id": feed_id})
 
 @app.delete("/api/feeds/{feed_id}")
@@ -486,10 +661,10 @@ async def api_staging_tag():
 @app.post("/api/downloader/test")
 async def api_downloader_test(payload: Optional[Dict[str, Any]] = None):
     """Test connection to qBittorrent, either with saved settings or transient test settings."""
-    p = payload or {}
-    url = p.get("qbit_url")
-    username = p.get("qbit_username")
-    password = p.get("qbit_password")
+    model = _validated_payload(schemas.DownloaderTestRequest, payload or {})
+    url = model.qbit_url
+    username = model.qbit_username
+    password = model.qbit_password
 
     if url is not None or username is not None:
         client = QBitClient(
@@ -507,12 +682,13 @@ async def api_downloader_test(payload: Optional[Dict[str, Any]] = None):
 @app.post("/api/downloader/configure")
 async def api_downloader_configure(payload: Dict[str, Any]):
     """Save in-app BitTorrent downloader configuration and test connection."""
-    qbit_url = (payload.get("qbit_url") or "").strip()
-    qbit_user = (payload.get("qbit_username") or "").strip()
-    qbit_pass = payload.get("qbit_password")
-    qbit_enabled = str(payload.get("qbit_enabled", "true")).lower()
-    qbit_category = (payload.get("qbit_category") or "manga").strip() or "manga"
-    qbit_tags = (payload.get("qbit_tags") or "mangatrax").strip() or "mangatrax"
+    model = _validated_payload(schemas.DownloaderConfigureRequest, payload)
+    qbit_url = (model.qbit_url or "").strip()
+    qbit_user = (model.qbit_username or "").strip()
+    qbit_pass = model.qbit_password
+    qbit_enabled = str(model.qbit_enabled if model.qbit_enabled is not None else "true").lower()
+    qbit_category = (model.qbit_category or "manga").strip() or "manga"
+    qbit_tags = (model.qbit_tags or "mangatrax").strip() or "mangatrax"
 
     if qbit_url:
         db.set_setting("qbit_url", qbit_url)
@@ -603,42 +779,35 @@ async def api_toggle_series(series_id: int):
 
 @app.post("/api/series/{series_id}/link")
 async def api_update_series_link(series_id: int, payload: Dict[str, Any]):
-    """Update or save custom website link for a series."""
-    website_url = payload.get("website_url", "")
-    db.update_series_link(series_id, website_url)
-    return JSONResponse({"status": "success", "website_url": website_url})
+    """Update or save custom website link for a series (http/https only)."""
+    model = _validated_payload(schemas.SeriesLinkUpdateRequest, payload)
+    db.update_series_link(series_id, model.website_url)
+    return JSONResponse({"status": "success", "website_url": model.website_url})
 
 @app.post("/api/series/{series_id}/backfill")
 async def api_series_backfill(series_id: int, payload: Optional[Dict[str, Any]] = None):
     """Executes a targeted Nyaa search backfill in background for a tracked series."""
+    model = _validated_payload(schemas.SeriesBackfillRequest, payload or {})
     series_list = db.get_all_series()
     target = next((s for s in series_list if s["id"] == series_id), None)
     if not target:
         raise HTTPException(status_code=404, detail="Series not found")
 
-    p = payload or {}
-    max_pages = int(p.get("max_pages", 3))
-    res = scheduler.run_series_backfill_async(target["name"], max_pages=max_pages)
+    res = scheduler.run_series_backfill_async(target["name"], max_pages=model.max_pages)
     return JSONResponse(res)
 
 @app.post("/api/series/backfill")
 async def api_series_backfill_by_name(payload: Dict[str, Any]):
     """Executes a targeted Nyaa search backfill in background by series name."""
-    series_name = payload.get("series_name")
-    if not series_name:
-        return JSONResponse({"status": "error", "message": "Series name required"}, status_code=400)
-    max_pages = int(payload.get("max_pages", 3))
-    res = scheduler.run_series_backfill_async(series_name, max_pages=max_pages)
+    model = _validated_payload(schemas.SeriesBackfillByNameRequest, payload)
+    res = scheduler.run_series_backfill_async(model.series_name, max_pages=model.max_pages)
     return JSONResponse(res)
 
 @app.post("/api/releases/{release_id}/status")
 async def api_update_release_status(release_id: int, payload: Dict[str, Any]):
     """Update release status (e.g. IN_CALIBRE, REQUESTED, or IGNORED)."""
-    status = payload.get("status")
-    if not status:
-        return JSONResponse({"status": "error", "message": "Status required"}, status_code=400)
-
-    db.update_release_status(release_id, status)
+    model = _validated_payload(schemas.ReleaseStatusUpdateRequest, payload)
+    db.update_release_status(release_id, model.status)
     return JSONResponse({"status": "success"})
 
 @app.post("/api/releases/{release_id}/ignore")
@@ -658,13 +827,9 @@ async def api_unignore_release(release_id: int):
 @app.post("/api/blacklist")
 async def api_add_blacklist(payload: Dict[str, Any]):
     """Add a series to the blacklist and purge pending requests for it."""
-    name = payload.get("name")
-    reason = payload.get("reason", "")
-    if not name:
-        return JSONResponse({"status": "error", "message": "Series name required"}, status_code=400)
-
-    success = db.add_to_blacklist(name, reason)
-    db.log_activity("SERIES_BLACKLISTED", f"Blacklisted series: {name}", reason)
+    model = _validated_payload(schemas.BlacklistCreateRequest, payload)
+    success = db.add_to_blacklist(model.name, model.reason)
+    db.log_activity("SERIES_BLACKLISTED", f"Blacklisted series: {model.name}", model.reason)
     return JSONResponse({"status": "success"})
 
 @app.delete("/api/blacklist/{blacklist_id}")
@@ -683,14 +848,9 @@ async def api_get_prioritized_groups():
 
 @app.post("/api/prioritized/groups")
 async def api_add_prioritized_group(payload: Dict[str, Any]):
-    name = payload.get("name")
-    notes = payload.get("notes", "")
-    priority = payload.get("priority", 1)
-    if not name:
-        return JSONResponse({"status": "error", "message": "Group name required"}, status_code=400)
-
-    success = db.add_prioritized_group(name, notes, priority)
-    db.log_activity("GROUP_PRIORITIZED", f"Added prioritized release group: {name}", notes)
+    model = _validated_payload(schemas.PrioritizedGroupCreateRequest, payload)
+    success = db.add_prioritized_group(model.name, model.notes, model.priority)
+    db.log_activity("GROUP_PRIORITIZED", f"Added prioritized release group: {model.name}", model.notes)
     return JSONResponse({"status": "success"})
 
 @app.delete("/api/prioritized/groups/{group_id}")
@@ -707,10 +867,9 @@ async def api_get_prioritized_releases(status: Optional[str] = None):
 @app.post("/api/discovery/track")
 async def api_discovery_track(payload: Dict[str, Any]):
     """Track a newly discovered series and request the volume, using canonical English series name."""
-    series_name = payload.get("series_name")
-    release_id = payload.get("release_id")
-    if not series_name:
-        return JSONResponse({"status": "error", "message": "Series name required"}, status_code=400)
+    model = _validated_payload(schemas.DiscoveryTrackRequest, payload)
+    series_name = model.series_name
+    release_id = model.release_id
 
     # Prefer canonical English title
     english_name = scheduler.anilist.resolve_english_title(series_name)
@@ -730,13 +889,9 @@ async def api_discovery_track(payload: Dict[str, Any]):
 @app.post("/api/discovery/blacklist")
 async def api_discovery_blacklist(payload: Dict[str, Any]):
     """Blacklist a series directly from a discovery card."""
-    series_name = payload.get("series_name")
-    reason = payload.get("reason", "Blacklisted from Discovery panel")
-    if not series_name:
-        return JSONResponse({"status": "error", "message": "Series name required"}, status_code=400)
-
-    db.add_to_blacklist(series_name, reason)
-    db.log_activity("SERIES_BLACKLISTED", f"Blacklisted series from discovery: {series_name}")
+    model = _validated_payload(schemas.DiscoveryBlacklistRequest, payload)
+    db.add_to_blacklist(model.series_name, model.reason)
+    db.log_activity("SERIES_BLACKLISTED", f"Blacklisted series from discovery: {model.series_name}")
     return JSONResponse({"status": "success"})
 
 @app.post("/api/discovery/{release_id}/fetch-info")
@@ -771,8 +926,18 @@ async def api_discovery_fetch_info(release_id: int):
 
 @app.post("/api/settings")
 async def api_save_settings(payload: Dict[str, Any]):
-    """Save application settings."""
-    for k, v in payload.items():
+    """Save application settings (strict key whitelist; unknown keys rejected)."""
+    model = _validated_payload(schemas.SettingsUpdateRequest, payload)
+    provided = model.model_dump(exclude_unset=True, exclude_none=True) if hasattr(model, "model_dump") else {}
+    operator_roots = _operator_allowed_path_roots()
+    if operator_roots:
+        for key in ("calibre_path", "staging_dir"):
+            if key in provided:
+                try:
+                    security.ensure_path_within_roots(str(provided[key]), operator_roots)
+                except security.UnsafePathError as exc:
+                    raise HTTPException(status_code=400, detail=f"{key}: {exc}") from exc
+    for k, v in provided.items():
         db.set_setting(k, str(v))
     db.log_activity("SETTINGS_UPDATED", "Application settings updated")
     return JSONResponse({"status": "success"})
@@ -780,9 +945,9 @@ async def api_save_settings(payload: Dict[str, Any]):
 @app.post("/api/settings/test-webhook")
 async def api_test_webhook(payload: Optional[Dict[str, Any]] = None):
     """Test Discord and/or generic webhook endpoints with immediate feedback."""
-    p = payload or {}
-    discord_url = p.get("discord_webhook_url")
-    generic_url = p.get("generic_webhook_url") or p.get("apprise_url")
+    model = _validated_payload(schemas.WebhookTestRequest, payload or {})
+    discord_url = model.discord_webhook_url
+    generic_url = model.generic_webhook_url or model.apprise_url
     notifier = scheduler.get_notifier()
     res = notifier.test_webhook(discord_url=discord_url, apprise_url=generic_url)
     return JSONResponse(res)
@@ -796,21 +961,10 @@ async def api_backfill_start(payload: Optional[Dict[str, Any]] = None):
     if scheduler.is_backfilling:
         return JSONResponse({"status": "in_progress", "message": "Backfill already running"})
 
-    p = payload or {}
-    max_pages = p.get("max_pages")
-    if max_pages is not None:
-        max_pages = int(max_pages)
-    delay = p.get("delay")
-    if delay is not None:
-        delay = float(delay)
-    start_page = p.get("start_page")
-    if start_page is not None:
-        try:
-            start_page = max(1, int(start_page))
-        except (ValueError, TypeError):
-            start_page = 1
-    else:
-        start_page = 1
+    model = _validated_payload(schemas.BackfillStartRequest, payload or {})
+    max_pages = model.max_pages
+    delay = model.delay
+    start_page = model.start_page if model.start_page is not None else 1
 
     scheduler.run_polite_backfill(
         max_pages=max_pages,
@@ -832,8 +986,18 @@ async def api_backfill_status():
 
 @app.post("/api/debug/action")
 async def api_debug_action(payload: Dict[str, Any]):
-    """Debug maintenance operations: clear discovery, descriptions, or cover cache."""
-    action = payload.get("action")
+    """Debug maintenance operations: clear discovery, descriptions, or cover cache.
+
+    M3 feature: destructive maintenance endpoints are opt-in only.  They are
+    disabled by default and require ``MANGATRAX_DEBUG_ACTIONS=1``.
+    """
+    if not AUTH_CONFIG.debug_actions:
+        raise HTTPException(
+            status_code=403,
+            detail="Debug actions are disabled. Set MANGATRAX_DEBUG_ACTIONS=1 to enable them.",
+        )
+    model = _validated_payload(schemas.DebugActionRequest, payload)
+    action = model.action
     if action == "clear-discovery":
         count = db.clear_discovered_series()
         return JSONResponse({"status": "success", "message": f"Cleared {count} unreviewed manga series from Discovery."})

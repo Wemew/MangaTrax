@@ -1,11 +1,35 @@
 import re
+import socket
 import logging
 from typing import List, Dict, Any, Optional
 import feedparser
+from app import security
 from app.providers.base import BaseFeedProvider, ReleaseItem
 from app.parser import extract_manga_bundle_and_volumes, is_chapter_only, is_light_novel
 
 logger = logging.getLogger("mangatrax.providers.rss")
+
+FEED_FETCH_TIMEOUT_SECONDS = 15.0
+
+
+def _parse_feed_with_timeout(url: str, headers: Dict[str, str], timeout: float = FEED_FETCH_TIMEOUT_SECONDS):
+    """Parse a remote RSS/Atom URL with an explicit socket timeout and shields.
+
+    ``feedparser.parse(url)`` uses ``urllib`` internally without accepting a
+    timeout argument, so the process-wide default socket timeout is temporarily
+    lowered for the fetch (restored in ``finally``).  Any network/parse failure
+    is contained and returns ``None`` instead of raising into the scheduler loop.
+    """
+    previous_timeout = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(timeout)
+        return feedparser.parse(url, request_headers=headers)
+    except Exception as exc:  # pragma: no cover - network error path
+        logger.error("Error fetching RSS feed at %s: %s", url, exc)
+        return None
+    finally:
+        socket.setdefaulttimeout(previous_timeout)
+
 
 class RSSFeedProvider(BaseFeedProvider):
     """
@@ -19,7 +43,17 @@ class RSSFeedProvider(BaseFeedProvider):
         headers = {
             "User-Agent": "MangaTrax/1.0 (Manga Release Monitor; +https://github.com/Wemew/MangaTrax)",
         }
-        feed = feedparser.parse(self.url, request_headers=headers)
+        # M3 SSRF guard: reject non-http(s) schemes and literal loopback/private/
+        # metadata/intranet hosts before any request is made.
+        try:
+            security.validate_outbound_url(self.url)
+        except security.UnsafeURLError as exc:
+            logger.error("Rejected unsafe RSS feed URL for '%s': %s", self.name, exc)
+            return []
+
+        feed = _parse_feed_with_timeout(self.url, headers)
+        if feed is None:
+            return []
         if feed.bozo and not feed.entries:
             logger.error(f"Error parsing RSS feed at {self.url}: {feed.bozo_exception}")
             return []

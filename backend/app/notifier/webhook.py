@@ -9,6 +9,8 @@ try:
 except ImportError:
     httpx = None
 
+from app import security
+
 logger = logging.getLogger("mangatrax.notifier")
 
 class SimpleHttpResponse:
@@ -17,6 +19,13 @@ class SimpleHttpResponse:
         self.text = text
 
 def _post_json(url: str, json_data: dict, timeout: float = 10.0) -> SimpleHttpResponse:
+    # M3 SSRF guard at the outbound transport boundary: rejects non-http(s)
+    # schemes, loopback/RFC1918/link-local/metadata literals and intranet
+    # single-label hostnames.  Structural (non-DNS) validation is used here so
+    # self-hosted Apprise endpoints on the LAN keep working; user-probed URLs
+    # (POST /api/settings/test-webhook) are additionally validated structurally
+    # by the Pydantic schema before reaching this function.
+    security.validate_outbound_url(url)
     if httpx:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(url, json=json_data)

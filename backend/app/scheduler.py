@@ -35,6 +35,15 @@ class MangaScheduler:
         self.is_backfilling = False
         self.stop_backfill_requested = False
 
+    def _log_activity(self, event_type: str, message: str, details: str = ""):
+        """Audit helper for background work: always stamps ``actor='scheduler'``.
+
+        The scheduler thread has no HTTP request context, so without an explicit
+        actor every automated event would be indistinguishable from a user
+        action in the audit trail.
+        """
+        self.db.log_activity(event_type, message, details, actor="scheduler")
+
     def get_notifier(self) -> NotificationService:
         discord = self.db.get_setting("discord_webhook_url", "")
         generic = self.db.get_setting("apprise_url", "") or self.db.get_setting("generic_webhook_url", "")
@@ -93,7 +102,7 @@ class MangaScheduler:
                     # Automated write: the precedence model decides (promotion to
                     # IN_CALIBRE is allowed, a downgrade is not).
                     self.db.update_release_status(item["release_id"], "IN_CALIBRE", enforce_precedence=True)
-                    self.db.log_activity(
+                    self._log_activity(
                         "REQUEST_RESOLVED",
                         f"Resolved: '{item['title']}' is now available in your Calibre library.",
                         item["reason"]
@@ -130,7 +139,7 @@ class MangaScheduler:
 
                 summary = f"Synced {synced_count} manga series from Calibre; auto-resolved {len(resolved)} acquired requests."
                 logger.info(summary)
-                self.db.log_activity("CALIBRE_SYNC", summary)
+                self._log_activity("CALIBRE_SYNC", summary)
                 return {
                     "success": True,
                     "message": summary,
@@ -140,7 +149,7 @@ class MangaScheduler:
             except Exception as e:
                 err = f"Error syncing Calibre library: {e}"
                 logger.error(err)
-                self.db.log_activity("CALIBRE_SYNC_ERROR", err)
+                self._log_activity("CALIBRE_SYNC_ERROR", err)
                 return {"success": False, "message": err, "synced_series": 0, "resolved_requests": 0}
         finally:
             self._calibre_sync_lock.release()
@@ -327,7 +336,7 @@ class MangaScheduler:
                                 if not isinstance(torrent_h, str):
                                     torrent_h = None
                                 self.db.update_download_status(rel_id, "DOWNLOADING", torrent_h)
-                                self.db.log_activity(
+                                self._log_activity(
                                     "AUTO_DOWNLOAD",
                                     f"Sent to downloader: '{rel.title}' (Missing: {missing_vols})",
                                     f"Source: {feed_name}"
@@ -335,7 +344,7 @@ class MangaScheduler:
                                 if torrent_h and rel.is_bundle and missing_vols and len(missing_vols) < len(rel.volumes):
                                     sel_res = qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing_vols])
                                     if sel_res.get("status") == "filtered":
-                                        self.db.log_activity(
+                                        self._log_activity(
                                             "SELECTIVE_DOWNLOAD",
                                             f"Selective download applied for '{rel.title}': skipped {len(sel_res.get('skipped_volumes', []))} owned volumes; downloading {len(sel_res.get('kept_volumes', []))} missing volumes."
                                         )
@@ -345,11 +354,11 @@ class MangaScheduler:
                 err_msg = str(e)
                 logger.error(f"Error checking feed '{feed_name}': {err_msg}")
                 self.db.update_feed_status(feed_id, "ERROR", err_msg)
-                self.db.log_activity("FEED_ERROR", f"Feed error in '{feed_name}': {err_msg}")
+                self._log_activity("FEED_ERROR", f"Feed error in '{feed_name}': {err_msg}")
 
         summary = f"Feeds checked: {total_found} releases found, {total_requested} requested, {total_sent_to_downloader} sent to downloader."
         logger.info(summary)
-        self.db.log_activity("FEED_POLL_COMPLETED", summary)
+        self._log_activity("FEED_POLL_COMPLETED", summary)
         return {
             "success": True,
             "message": summary,
@@ -370,7 +379,7 @@ class MangaScheduler:
         try:
             tagged = auto_tag_staging_cbz_files(staging_dir, series_templates)
             for item in tagged:
-                self.db.log_activity(
+                self._log_activity(
                     "AUTO_TAG_CBZ",
                     f"Injected ComicInfo.xml into '{item['filename']}' for series '{item['series_name']}' Vol {item['volume']}",
                     item["filepath"]
@@ -565,13 +574,15 @@ class MangaScheduler:
             with self.db.get_connection() as conn:
                 cur = conn.cursor()
                 prefix = clean_name[:25].strip()
+                from app.security import like_contains
+                prefix_pattern = like_contains(prefix)
                 cur.execute("""
                     SELECT title, series_name FROM releases 
                     WHERE lower(series_name) = lower(?)
-                       OR lower(series_name) LIKE ?
-                       OR lower(title) LIKE ?
+                       OR lower(series_name) LIKE ? ESCAPE '\\'
+                       OR lower(title) LIKE ? ESCAPE '\\'
                     LIMIT 20;
-                """, (clean_name, f"%{prefix.lower()}%", f"%{prefix.lower()}%"))
+                """, (clean_name, prefix_pattern, prefix_pattern))
                 for row in cur.fetchall():
                     for field in [row["series_name"], row["title"]]:
                         if not field:
@@ -704,7 +715,7 @@ class MangaScheduler:
                             qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing_vols])
 
         summary = f"Backfilled {title_display}: found {total_found} releases ({total_requested} wanted/missing volumes, {total_sent_to_downloader} sent to downloader)."
-        self.db.log_activity("SERIES_BACKFILLED", summary)
+        self._log_activity("SERIES_BACKFILLED", summary)
         return {
             "status": "success",
             "message": summary,
@@ -839,14 +850,14 @@ class MangaScheduler:
             summary = f"Historical backfill complete: crawled up to page {page_num if 'page_num' in locals() else start_p}, processed {total_processed} releases, found {total_discovered} new discoveries."
             self.db.set_setting("backfill_status", "idle")
             self.db.set_setting("backfill_progress", summary)
-            self.db.log_activity("BACKFILL_COMPLETED", summary)
+            self._log_activity("BACKFILL_COMPLETED", summary)
 
         except Exception as e:
             err = f"Backfill error: {e}"
             logger.error(err)
             self.db.set_setting("backfill_status", "error")
             self.db.set_setting("backfill_progress", err)
-            self.db.log_activity("BACKFILL_ERROR", err)
+            self._log_activity("BACKFILL_ERROR", err)
         finally:
             self.is_backfilling = False
 
@@ -906,7 +917,7 @@ class MangaScheduler:
             if res.get("status") == "filtered":
                 filtered_count += 1
                 skipped_vols = res.get("skipped_volumes", [])
-                self.db.log_activity(
+                self._log_activity(
                     "SELECTIVE_DOWNLOAD",
                     f"Optimized torrent for '{r['title']}': downloading {len(res.get('kept_volumes', []))} missing volumes; skipped {len(skipped_vols)} volumes already in Calibre ({skipped_vols}).",
                     f"Torrent Hash: {h[:10]}..."

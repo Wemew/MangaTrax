@@ -8,7 +8,32 @@ from typing import List, Dict, Any, Optional, Tuple, Set
 
 import logging
 
+from app.security import escape_like
+
 logger = logging.getLogger("mangatrax.database")
+
+DEFAULT_AUDIT_ACTOR = "system"
+
+
+def _resolve_audit_actor(explicit: Optional[str] = None) -> str:
+    """Resolve the audit actor: explicit value, else the request ContextVar.
+
+    Imported lazily to avoid an import cycle (``app.auth`` never imports the
+    database module, but the database is imported very early by tests/CLI tools).
+    """
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip()
+    try:
+        from app.auth import get_current_actor
+
+        return get_current_actor()
+    except Exception:  # pragma: no cover - auth module always importable
+        return DEFAULT_AUDIT_ACTOR
+
+
+def _like_contains(term: str) -> str:
+    """LIKE pattern with SQL wildcards escaped (clauses must add ESCAPE '\\')."""
+    return f"%{escape_like(str(term).lower())}%"
 
 # ---------------------------------------------------------------------------
 # Release status precedence model
@@ -315,16 +340,42 @@ class MangaDatabase:
                 );
             """)
 
-            # Activity logs
+            # Activity logs (+ audit actor column for "which user triggered this")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS activity_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_type TEXT NOT NULL,
                     message TEXT NOT NULL,
                     details TEXT,
+                    actor TEXT DEFAULT 'system',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+
+            # Upgrade path: add the actor column to pre-M3 databases.
+            cur.execute("PRAGMA table_info(activity_logs);")
+            log_cols = [r["name"] for r in cur.fetchall()]
+            if "actor" not in log_cols:
+                cur.execute("ALTER TABLE activity_logs ADD COLUMN actor TEXT DEFAULT 'system';")
+            cur.execute(
+                "UPDATE activity_logs SET actor = 'system' "
+                "WHERE actor IS NULL OR trim(actor) = '';"
+            )
+
+            # Known users (JIT-provisioned on first successful OIDC login / Basic use).
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subject TEXT UNIQUE NOT NULL,
+                    username TEXT DEFAULT '',
+                    email TEXT DEFAULT '',
+                    display_name TEXT DEFAULT '',
+                    auth_source TEXT DEFAULT '',
+                    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_subject ON users(subject);")
 
             # Settings
             cur.execute("""
@@ -497,15 +548,20 @@ class MangaDatabase:
             if monitored_only:
                 where_clauses.append("st.is_monitored = 1")
             if search and search.strip():
-                clean_s = f"%{search.strip().lower()}%"
-                where_clauses.append("(lower(st.name) LIKE ? OR lower(COALESCE(st.authors, '')) LIKE ? OR lower(COALESCE(st.publisher, '')) LIKE ?)")
+                clean_s = _like_contains(search.strip())
+                where_clauses.append(
+                    "(lower(st.name) LIKE ? ESCAPE '\\' OR lower(COALESCE(st.authors, '')) LIKE ? ESCAPE '\\' "
+                    "OR lower(COALESCE(st.publisher, '')) LIKE ? ESCAPE '\\')"
+                )
                 params.extend([clean_s, clean_s, clean_s])
 
             where_str = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
             order_str = "ORDER BY st.is_monitored DESC, st.name COLLATE NOCASE ASC"
             limit_str = ""
             if limit is not None:
-                limit_str = f"LIMIT {int(limit)} OFFSET {int(offset)}"
+                # Parameterised LIMIT/OFFSET instead of interpolating integers.
+                limit_str = "LIMIT ? OFFSET ?"
+                params.extend([int(limit), int(offset)])
 
             sql = f"{base_sql} {where_str} {order_str} {limit_str};"
             cur.execute(sql, tuple(params))
@@ -519,8 +575,11 @@ class MangaDatabase:
             if monitored_only:
                 where_clauses.append("is_monitored = 1")
             if search and search.strip():
-                clean_s = f"%{search.strip().lower()}%"
-                where_clauses.append("(lower(name) LIKE ? OR lower(COALESCE(authors, '')) LIKE ? OR lower(COALESCE(publisher, '')) LIKE ?)")
+                clean_s = _like_contains(search.strip())
+                where_clauses.append(
+                    "(lower(name) LIKE ? ESCAPE '\\' OR lower(COALESCE(authors, '')) LIKE ? ESCAPE '\\' "
+                    "OR lower(COALESCE(publisher, '')) LIKE ? ESCAPE '\\')"
+                )
                 params.extend([clean_s, clean_s, clean_s])
             where_str = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
             cur.execute(f"SELECT COUNT(*) FROM series_tracking {where_str};", tuple(params))
@@ -849,8 +908,8 @@ class MangaDatabase:
             search_clause = ""
             params = []
             if search and search.strip():
-                clean_s = f"%{search.strip().lower()}%"
-                search_clause = "AND (lower(r.title) LIKE ? OR lower(r.series_name) LIKE ?)"
+                clean_s = _like_contains(search.strip())
+                search_clause = "AND (lower(r.title) LIKE ? ESCAPE '\\' OR lower(r.series_name) LIKE ? ESCAPE '\\')"
                 params.extend([clean_s, clean_s])
 
             query = f"""
@@ -890,8 +949,8 @@ class MangaDatabase:
             search_clause = ""
             params = []
             if search and search.strip():
-                clean_s = f"%{search.strip().lower()}%"
-                search_clause = "AND (lower(r.title) LIKE ? OR lower(r.series_name) LIKE ?)"
+                clean_s = _like_contains(search.strip())
+                search_clause = "AND (lower(r.title) LIKE ? ESCAPE '\\' OR lower(r.series_name) LIKE ? ESCAPE '\\')"
                 params.extend([clean_s, clean_s])
 
             query = f"""
@@ -1065,16 +1124,77 @@ class MangaDatabase:
             conn.commit()
 
     # --- Activity Logs ---
-    def log_activity(self, event_type: str, message: str, details: str = ""):
+    def log_activity(self, event_type: str, message: str, details: str = "", actor: Optional[str] = None):
+        """Insert an activity log row.
+
+        ``actor`` defaults to the request-scoped ``current_actor`` ContextVar set
+        by the auth middleware (the logged-in user, or ``anonymous`` when auth is
+        disabled).  Background worker threads have no request context and pass
+        ``actor="scheduler"`` explicitly, so automated events remain
+        distinguishable from user-triggered ones.  The explicit keyword argument
+        keeps every pre-existing ``log_activity(type, message, details)`` call
+        site working unchanged.
+        """
+        resolved_actor = _resolve_audit_actor(actor)
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("INSERT INTO activity_logs (event_type, message, details) VALUES (?, ?, ?);", (event_type, message, details))
+            cur.execute(
+                "INSERT INTO activity_logs (event_type, message, details, actor) VALUES (?, ?, ?, ?);",
+                (event_type, message, details, resolved_actor),
+            )
             conn.commit()
 
     def get_logs(self, limit: int = 100) -> List[Dict[str, Any]]:
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("SELECT * FROM activity_logs ORDER BY id DESC LIMIT ?;", (limit,))
+            return [dict(r) for r in cur.fetchall()]
+
+    # --- Users (JIT identity provisioning) ---
+    def upsert_user(
+        self,
+        subject: str,
+        username: str = "",
+        email: str = "",
+        display_name: str = "",
+        auth_source: str = "",
+    ) -> Dict[str, Any]:
+        """Insert or refresh a known user keyed on the stable ``subject`` claim.
+
+        Called on the first successful OIDC login (and on Basic authentication),
+        so the audit trail can map an actor label back to a persistent identity.
+        """
+        clean_subject = str(subject or "").strip()
+        if not clean_subject:
+            raise ValueError("users.subject must not be empty")
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO users (subject, username, email, display_name, auth_source, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(subject) DO UPDATE SET
+                    username = CASE WHEN excluded.username != '' THEN excluded.username ELSE users.username END,
+                    email = CASE WHEN excluded.email != '' THEN excluded.email ELSE users.email END,
+                    display_name = CASE WHEN excluded.display_name != '' THEN excluded.display_name ELSE users.display_name END,
+                    auth_source = CASE WHEN excluded.auth_source != '' THEN excluded.auth_source ELSE users.auth_source END,
+                    last_seen = CURRENT_TIMESTAMP;
+            """, (clean_subject, str(username or ""), str(email or ""), str(display_name or ""), str(auth_source or "")))
+            conn.commit()
+            cur.execute("SELECT * FROM users WHERE subject = ?;", (clean_subject,))
+            row = cur.fetchone()
+            return dict(row) if row else {}
+
+    def get_user(self, subject: str) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM users WHERE subject = ?;", (str(subject or "").strip(),))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def get_all_users(self) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM users ORDER BY last_seen DESC, id DESC;")
             return [dict(r) for r in cur.fetchall()]
 
     # --- Dashboard Summary ---
@@ -1726,8 +1846,8 @@ class MangaDatabase:
 
             # Log system reset
             cur.execute("""
-                INSERT INTO activity_logs (event_type, message, details, created_at)
-                VALUES ('SYSTEM_RESET', 'All application data, releases, and caches have been reset.', NULL, CURRENT_TIMESTAMP);
+                INSERT INTO activity_logs (event_type, message, details, actor, created_at)
+                VALUES ('SYSTEM_RESET', 'All application data, releases, and caches have been reset.', NULL, 'system', CURRENT_TIMESTAMP);
             """)
             conn.commit()
             self._invalidate_grouped_cache()

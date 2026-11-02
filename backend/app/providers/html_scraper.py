@@ -9,6 +9,7 @@ try:
 except ImportError:
     httpx = None
 from bs4 import BeautifulSoup
+from app import security
 from app.providers.base import BaseFeedProvider, ReleaseItem
 from app.parser import extract_manga_bundle_and_volumes, is_chapter_only, is_light_novel
 
@@ -72,6 +73,13 @@ class HtmlScraperProvider(BaseFeedProvider):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
+        # M3 SSRF guard: reject non-http(s) schemes and literal loopback/private/
+        # metadata/intranet hosts before initiating the crawl.
+        try:
+            security.validate_outbound_url(self.url)
+        except security.UnsafeURLError as exc:
+            logger.error("Rejected unsafe HTML scraper URL for '%s': %s", self.name, exc)
+            return []
         results = []
         seen_links = set()
         current_url = self.url

@@ -147,6 +147,15 @@
 
                 <!-- Quick Action Buttons -->
                 <div class="flex items-center space-x-2">
+                    {% if auth_mode and auth_mode != 'none' %}
+                    <span class="hidden md:inline-flex items-center px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 text-[11px] text-slate-300" title="Signed in ({{ auth_mode }})">
+                        <i data-lucide="user" class="w-3 h-3 mr-1 text-brand-400"></i>{{ auth_actor() }}
+                    </span>
+                    <a href="/auth/logout" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-medium flex items-center gap-1.5 transition-colors" title="Sign out">
+                        <i data-lucide="log-out" class="w-3.5 h-3.5"></i>
+                        <span class="hidden lg:inline">Sign out</span>
+                    </a>
+                    {% endif %}
                     <button onclick="triggerCalibreSync()" id="btn-sync-calibre" title="Scan Calibre library for manga series & owned volumes" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm active:scale-95">
                         <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-brand-400" id="icon-calibre-sync"></i>
                         <span class="hidden lg:inline">Sync Calibre</span>

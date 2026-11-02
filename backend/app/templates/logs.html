@@ -27,10 +27,14 @@
     <div class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
         <div class="divide-y divide-slate-800/60" id="logs-container">
             {% for log in logs %}
-            <div class="p-4 flex items-start justify-between gap-4 text-xs log-item" data-text="{{ log.message|lower }} {{ (log.details or '')|lower }} {{ log.event_type|lower }}">
+            <div class="p-4 flex items-start justify-between gap-4 text-xs log-item" data-text="{{ log.message|lower }} {{ (log.details or '')|lower }} {{ log.event_type|lower }} {{ (log.actor or 'system')|lower }}">
                 <div class="flex items-start gap-3">
                     <span class="px-2 py-0.5 rounded-full font-semibold text-[10px] mt-0.5 shrink-0 {% if 'ERROR' in log.event_type %}bg-rose-500/10 text-rose-400 border border-rose-500/20{% elif 'AUTO_TAG' in log.event_type %}bg-cyan-500/10 text-cyan-400 border border-cyan-500/20{% elif 'DOWNLOAD' in log.event_type %}bg-emerald-500/10 text-emerald-400 border border-emerald-500/20{% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
                         {{ log.event_type }}
+                    </span>
+                    {% set actor_label = log.actor or 'system' %}
+                    <span class="px-2 py-0.5 rounded-full font-semibold text-[10px] mt-0.5 shrink-0 {% if actor_label == 'scheduler' %}bg-indigo-500/10 text-indigo-300 border border-indigo-500/20{% elif actor_label == 'system' %}bg-slate-800 text-slate-400 border border-slate-700{% else %}bg-emerald-500/10 text-emerald-300 border border-emerald-500/20{% endif %}" title="Actor / user that triggered this event">
+                        {{ actor_label }}
                     </span>
                     <div class="space-y-0.5">
                         <p class="text-slate-100 font-medium">{{ log.message }}</p>

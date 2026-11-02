@@ -262,7 +262,8 @@
             </div>
         </div>
 
-        <!-- Maintenance & Diagnostics -->
+        <!-- Maintenance & Diagnostics (opt-in: MANGATRAX_DEBUG_ACTIONS=1) -->
+        {% if debug_actions_enabled %}
         <div class="bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
             <h3 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
                 <i data-lucide="wrench" class="w-4 h-4 text-amber-400"></i>
@@ -313,6 +314,7 @@
                 </div>
             </div>
         </div>
+        {% endif %}
 
         <!-- Submit Button -->
         <div class="flex justify-end">

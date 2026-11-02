@@ -14,7 +14,7 @@
                 <div class="font-bold text-slate-100 text-sm flex items-center gap-1.5 break-words-anywhere">
                     <span>{{ s.name }}</span>
                     {% if s.website_url %}
-                    <a href="{{ s.website_url }}" target="_blank" rel="noopener noreferrer" title="Open series webpage" class="text-slate-500 hover:text-brand-400 transition-colors inline-flex">
+                    <a href="{{ s.website_url|safe_url }}" target="_blank" rel="noopener noreferrer" title="Open series webpage" class="text-slate-500 hover:text-brand-400 transition-colors inline-flex">
                         <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
                     </a>
                     {% endif %}

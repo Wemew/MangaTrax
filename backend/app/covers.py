@@ -10,6 +10,8 @@ try:
 except ImportError:
     httpx = None
 
+from app import security
+
 logger = logging.getLogger("mangatrax.covers")
 
 HEADERS = {
@@ -24,41 +26,20 @@ MAX_REDIRECTS = 3
 
 def is_safe_public_url(url: str) -> bool:
     """
-    Prevents Server-Side Request Forgery (SSRF).
-    Ensures that the URL targets a public HTTP/HTTPS host,
-    and explicitly blocks private, loopback, link-local, and reserved IP ranges.
+    Prevents Server-Side Request Forgery (SSRF) for cover fetches.
+
+    Delegates to the centralized :func:`app.security.validate_public_url` strict
+    check (scheme + hostname + DNS resolution re-validation of every resolved
+    address), which also defeats DNS-rebinding payloads.  Kept as a thin wrapper
+    because this name is part of the pre-M3 cover-cache API.
     """
     if not url or not isinstance(url, str):
         return False
-
     try:
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return False
-
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-
-        # Disallow localhost by name
-        if hostname.lower() in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
-            return False
-
-        # Resolve DNS addresses
-        addr_info = socket.getaddrinfo(hostname, None)
-        for family, _, _, _, sockaddr in addr_info:
-            ip_str = sockaddr[0]
-            ip = ipaddress.ip_address(ip_str)
-
-            # Block private, loopback, cloud metadata (169.254.x.x), multicast, or reserved IPs
-            if (ip.is_private or ip.is_loopback or ip.is_link_local 
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-                logger.warning(f"SSRF Protection blocked request to private/internal IP: {ip_str} ({url})")
-                return False
-
+        security.validate_public_url(url)
         return True
-    except Exception as e:
-        logger.debug(f"SSRF check failed/blocked for URL {url}: {e}")
+    except security.UnsafeURLError as exc:
+        logger.warning(f"SSRF Protection blocked cover URL {url}: {exc}")
         return False
 
 def detect_valid_image(data: bytes) -> Optional[str]:

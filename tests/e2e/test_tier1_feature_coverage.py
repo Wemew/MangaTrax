@@ -156,12 +156,12 @@ class TestTier1FeatureCoverage(unittest.TestCase):
             save_res = ctx.client.post("/api/settings", json_data={
                 "app_timezone": "Europe/Copenhagen",
                 "staging_dir": "/custom/staging",
-                "auto_download_enabled": "true"
+                "auto_download": "true"
             })
             self.assertEqual(save_res.status_code, 200)
             self.assertEqual(ctx.db.get_setting("app_timezone"), "Europe/Copenhagen")
             self.assertEqual(ctx.db.get_setting("staging_dir"), "/custom/staging")
-            self.assertEqual(ctx.db.get_setting("auto_download_enabled"), "true")
+            self.assertEqual(ctx.db.get_setting("auto_download"), "true")
 
     def test_endpoint_feeds_crud_and_test(self):
         """Feature 1.6: Verify feed creation, deletion, and test endpoint."""
