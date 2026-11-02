@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 import typing
-from typing import Any, Dict, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from app import security
 
@@ -48,6 +48,8 @@ __all__ = [
     "WebhookTestRequest",
     "BackfillStartRequest",
     "DebugActionRequest",
+    "ManualTagRequest",
+    "SeriesRepairRequest",
     "validate",
     "validation_error_messages",
 ]
@@ -348,6 +350,9 @@ SETTINGS_KEYS = (
     "app_timezone",
     "discord_webhook_url",
     "apprise_url",
+    # Behaviour flags that must be settable from the settings page rather than
+    # only through ``MANGATRAX_*`` environment variables.
+    "discard_unmarked_chapters",
 )
 
 
@@ -357,6 +362,61 @@ def _clean_text(value: str) -> str:
     cleaned = value.strip()
     if not cleaned:
         raise ValueError("must not be blank")
+    return cleaned
+
+
+# Characters that must never appear in a filename or in ComicInfo metadata: they
+# are either path-terminal (NUL) or invisible control bytes that would corrupt the
+# archive name / XML document.
+_FORBIDDEN_TEXT_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
+
+
+def _clean_cbz_filename(value: str) -> str:
+    """Validate a staging-relative .cbz filename supplied by a client.
+
+    The value is only ever used as a lookup key into the staging scan (it is never
+    joined into a filesystem path), so this check is defence in depth: it rejects
+    control bytes, ``..`` traversal segments and absolute/drive-rooted paths
+    outright instead of letting them reach the scan lookup.
+    """
+    if not isinstance(value, str):
+        raise ValueError("must be a string")
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("filename must not be blank")
+    if len(cleaned) > 512:
+        raise ValueError("filename exceeds the 512 character limit")
+    if _FORBIDDEN_TEXT_RE.search(cleaned):
+        raise ValueError("filename contains control characters")
+    parts = [part for part in re.split(r"[\\/]+", cleaned) if part]
+    if any(part == ".." for part in parts):
+        raise ValueError("filename must not contain '..' traversal segments")
+    if cleaned.startswith(("/", "\\")) or _DRIVE_PREFIX_RE.match(cleaned):
+        raise ValueError("filename must be relative to the staging directory")
+    return cleaned
+
+
+def _clean_metadata_text(value: Optional[str], field_name: str, *, required: bool = False) -> Optional[str]:
+    """Trim and validate one user-supplied ComicInfo metadata value.
+
+    XML escaping is handled by the tagger's ElementTree serializer; this check
+    only rejects values that cannot be represented in ComicInfo.xml (control
+    bytes) and enforces non-blank required fields.
+    """
+    if value is None:
+        if required:
+            raise ValueError(f"{field_name} is required")
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    cleaned = value.strip()
+    if not cleaned:
+        if required:
+            raise ValueError(f"{field_name} must not be blank")
+        return None
+    if _FORBIDDEN_TEXT_RE.search(cleaned):
+        raise ValueError(f"{field_name} contains control characters")
     return cleaned
 
 
@@ -567,6 +627,10 @@ class SettingsUpdateRequest(BaseModel):
     app_timezone: Optional[str] = Field(default=None, max_length=100)
     discord_webhook_url: Optional[str] = Field(default=None, max_length=security.MAX_URL_LENGTH)
     apprise_url: Optional[str] = Field(default=None, max_length=security.MAX_URL_LENGTH)
+    # Context-guarded discard of marker-less chapter releases (default true).
+    # Previously env-var only (MANGATRAX_DISCARD_UNMARKED_CHAPTERS); exposing it
+    # here makes the documented behaviour toggleable from POST /api/settings.
+    discard_unmarked_chapters: Optional[str] = Field(default=None, max_length=20)
 
     @field_validator("calibre_path")
     @classmethod
@@ -657,3 +721,75 @@ class DebugActionRequest(BaseModel):
         "normalize-english-titles",
         "reset-all-data",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Tagger models (M2 feature 16: preview / manual tagging; M2 CBZ Series repair)
+# ---------------------------------------------------------------------------
+class ManualTagRequest(BaseModel):
+    """User-supplied ComicInfo metadata for one staged .cbz archive.
+
+    ``filename`` is a staging-relative name taken from the staging scan; the
+    endpoint resolves it only through that scan (never by joining user input into
+    a path).  ``series`` is required because the Series value is the Calibre
+    matching key; every other field is optional and only written when supplied.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(min_length=1, max_length=512)
+    series: str = Field(min_length=1, max_length=500)
+    volume: Optional[str] = Field(default=None, max_length=50)
+    title: Optional[str] = Field(default=None, max_length=500)
+    writer: Optional[str] = Field(default=None, max_length=500)
+    publisher: Optional[str] = Field(default=None, max_length=500)
+    genre: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("filename")
+    @classmethod
+    def _validate_filename(cls, value):
+        return _clean_cbz_filename(value)
+
+    @field_validator("series")
+    @classmethod
+    def _validate_series(cls, value):
+        return _clean_metadata_text(value, "series", required=True)
+
+    @field_validator("volume", "title", "writer", "publisher", "genre")
+    @classmethod
+    def _validate_optional_text(cls, value):
+        return _clean_metadata_text(value, "metadata value", required=False)
+
+
+class SeriesRepairRequest(BaseModel):
+    """Explicit selection of staged .cbz files whose ComicInfo Series is repaired.
+
+    There is deliberately no "all files" / wildcard mode: the only way to modify
+    an archive is to name it in ``files``.  The server re-runs the audit before
+    writing and only rewrites files it can prove are safely repairable, so a
+    client-supplied list can never widen the blast radius beyond files the user
+    selected by name.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    files: List[str] = Field(min_length=1, max_length=200)
+    repair_writer: bool = True
+    repair_publisher: bool = True
+
+    @field_validator("files")
+    @classmethod
+    def _validate_files(cls, value):
+        if not isinstance(value, list):
+            raise ValueError("files must be a list of staging-relative filenames")
+        if not value:
+            raise ValueError("files must name at least one staged .cbz archive")
+        if len(value) > 200:
+            raise ValueError("at most 200 files may be repaired in one request")
+        cleaned = []
+        for item in value:
+            name = _clean_cbz_filename(item)
+            if name not in cleaned:
+                cleaned.append(name)
+        return cleaned
+

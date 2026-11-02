@@ -191,6 +191,7 @@
                             <th class="py-3 px-4">Size</th>
                             <th class="py-3 px-4">ComicInfo.xml Tag</th>
                             <th class="py-3 px-4 text-right">Status</th>
+                            <th class="py-3 px-4 text-right">Metadata</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-800/60">
@@ -216,10 +217,15 @@
                             <td class="py-3 px-4 text-right">
                                 <span class="text-slate-400 text-[11px]">Ready for ingestion</span>
                             </td>
+                            <td class="py-3 px-4 text-right">
+                                <button type="button" data-filename="{{ f.name }}" onclick="openTagModal(this.dataset.filename)" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-semibold text-cyan-300 inline-flex items-center gap-1 transition-colors">
+                                    <i data-lucide="tag" class="w-3 h-3"></i> Preview / Tag
+                                </button>
+                            </td>
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="4" class="py-10 text-center text-slate-500">
+                            <td colspan="5" class="py-10 text-center text-slate-500">
                                 Staging directory is empty. Completed downloads will appear here.
                             </td>
                         </tr>
@@ -230,6 +236,111 @@
         </div>
     </div>
 
+    <!-- CBZ Series Tag Audit: the old rename bug wrote AniList display titles into
+         ComicInfo.xml <Series>, which breaks Calibre matching.  The audit is
+         read-only; only explicitly selected files are rewritten. -->
+    <div class="space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+                <h2 class="text-lg font-bold text-white tracking-tight flex items-center gap-2">
+                    <i data-lucide="search-check" class="w-5 h-5 text-amber-400"></i>
+                    ComicInfo &lt;Series&gt; Audit &amp; Repair
+                </h2>
+                <p class="text-xs text-slate-400 mt-0.5">
+                    Finds staged CBZ files whose <code class="text-amber-300">&lt;Series&gt;</code> no longer matches a tracked/Calibre series name (e.g. an AniList display title written by the old rename bug). Repairs are per-file and only run for the files you select.
+                </p>
+            </div>
+            <div class="flex items-center gap-2">
+                <button type="button" onclick="auditSeriesTags()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition-colors">
+                    <i data-lucide="scan-search" class="w-3.5 h-3.5 text-amber-400"></i>
+                    Audit Series Tags
+                </button>
+                <button type="button" id="repair-selected-btn" onclick="repairSelectedSeries()" disabled class="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold flex items-center gap-1.5 transition-all shadow-md shadow-amber-600/20 active:scale-95">
+                    <i data-lucide="wrench" class="w-3.5 h-3.5"></i>
+                    Repair Selected (<span id="repair-selected-count">0</span>)
+                </button>
+            </div>
+        </div>
+
+        <div id="audit-summary" class="text-xs text-slate-400"></div>
+
+        <div class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse text-xs">
+                    <thead>
+                        <tr class="bg-slate-900 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
+                            <th class="py-3 px-4 w-10"></th>
+                            <th class="py-3 px-4">File</th>
+                            <th class="py-3 px-4">Current &lt;Series&gt;</th>
+                            <th class="py-3 px-4">Suggested</th>
+                            <th class="py-3 px-4">Status</th>
+                            <th class="py-3 px-4">Why</th>
+                        </tr>
+                    </thead>
+                    <tbody id="audit-rows" class="divide-y divide-slate-800/60">
+                        <tr>
+                            <td colspan="6" class="py-8 text-center text-slate-500">
+                                Not audited yet. Click "Audit Series Tags" to scan the staging directory (read-only).
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<!-- Preview / manual tag modal -->
+<div id="tag-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm items-center justify-center p-4">
+    <div class="bg-darkcard border border-slate-700 rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-4">
+        <div class="flex items-start justify-between gap-3">
+            <div>
+                <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                    <i data-lucide="tag" class="w-4 h-4 text-cyan-400"></i>
+                    Preview &amp; Manual Tag
+                </h3>
+                <p id="tag-modal-file" class="text-[11px] text-slate-400 font-mono mt-0.5 break-all"></p>
+            </div>
+            <button type="button" onclick="closeTagModal()" class="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300">
+                <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+        </div>
+        <div id="tag-modal-current" class="text-[11px] text-slate-400 bg-slate-900/60 border border-slate-800 rounded-xl p-3 font-mono whitespace-pre-wrap max-h-32 overflow-y-auto">Loading current ComicInfo.xml...</div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div class="sm:col-span-2">
+                <label class="block text-xs font-semibold text-slate-300 mb-1">Series (Calibre matching key)</label>
+                <input type="text" id="tag-field-series" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+            </div>
+            <div>
+                <label class="block text-xs font-semibold text-slate-300 mb-1">Volume</label>
+                <input type="text" id="tag-field-volume" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+            </div>
+            <div>
+                <label class="block text-xs font-semibold text-slate-300 mb-1">Title</label>
+                <input type="text" id="tag-field-title" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+            </div>
+            <div>
+                <label class="block text-xs font-semibold text-slate-300 mb-1">Writer</label>
+                <input type="text" id="tag-field-writer" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+            </div>
+            <div>
+                <label class="block text-xs font-semibold text-slate-300 mb-1">Publisher</label>
+                <input type="text" id="tag-field-publisher" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+            </div>
+            <div class="sm:col-span-2">
+                <label class="block text-xs font-semibold text-slate-300 mb-1">Genre</label>
+                <input type="text" id="tag-field-genre" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+            </div>
+        </div>
+        <div class="flex items-center justify-end gap-2 pt-1">
+            <button type="button" onclick="closeTagModal()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold">Cancel</button>
+            <button type="button" onclick="saveManualTag()" class="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95">
+                <i data-lucide="save" class="w-3.5 h-3.5"></i>
+                Save ComicInfo.xml
+            </button>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -307,6 +418,192 @@ async function deleteTorrent(hash) {
         await fetch(`/api/downloader/delete/${hash}`, { method: 'DELETE' });
         showToast('Torrent removed', 'success');
         setTimeout(() => location.reload(), 800);
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+
+// --- ComicInfo <Series> audit & explicit repair (M2 data repair) ---
+let _selectedAuditFiles = new Set();
+let _tagModalFile = null;
+
+function escapeHtml(value) {
+    const div = document.createElement('div');
+    div.textContent = value === null || value === undefined ? '' : String(value);
+    return div.innerHTML;
+}
+
+function auditStatusBadge(row) {
+    const colors = {
+        ok: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+        repairable: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+        ambiguous: 'bg-rose-500/10 text-rose-400 border-rose-500/20',
+        unknown_series: 'bg-rose-500/10 text-rose-400 border-rose-500/20',
+        missing_series: 'bg-slate-700/40 text-slate-300 border-slate-600',
+        untagged: 'bg-slate-700/40 text-slate-300 border-slate-600',
+        invalid_comicinfo: 'bg-rose-500/10 text-rose-400 border-rose-500/20',
+        unreadable: 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+    };
+    const cls = colors[row.status] || 'bg-slate-700/40 text-slate-300 border-slate-600';
+    return `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${cls}">${escapeHtml(row.status)}</span>`;
+}
+
+function updateRepairButton() {
+    const btn = document.getElementById('repair-selected-btn');
+    const count = document.getElementById('repair-selected-count');
+    if (!btn || !count) return;
+    count.textContent = String(_selectedAuditFiles.size);
+    btn.disabled = _selectedAuditFiles.size === 0;
+}
+
+function renderAudit(data) {
+    const tbody = document.getElementById('audit-rows');
+    const summaryEl = document.getElementById('audit-summary');
+    _selectedAuditFiles = new Set();
+    updateRepairButton();
+    const files = (data && data.files) || [];
+    const summary = (data && data.summary) || {};
+    if (!files.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="py-8 text-center text-slate-500">No .cbz files found in the staging directory.</td></tr>';
+        summaryEl.textContent = '';
+        return;
+    }
+    summaryEl.innerHTML =
+        `Scanned <strong class="text-slate-200">${summary.scanned || 0}</strong> file(s): ` +
+        `<span class="text-emerald-400">${summary.ok || 0} correct</span>, ` +
+        `<span class="text-amber-400">${summary.repairable || 0} repairable</span>, ` +
+        `<span class="text-rose-400">${(summary.ambiguous || 0) + (summary.unknown_series || 0)} ambiguous/unknown</span>, ` +
+        `<span class="text-slate-400">${(summary.untagged || 0) + (summary.invalid_comicinfo || 0) + (summary.unreadable || 0)} not auditable</span>. ` +
+        `Repairs never run unless you select the files.`;
+    tbody.innerHTML = files.map(function (row, index) {
+        const selectable = !!row.safe_to_repair;
+        const checkbox = selectable
+            ? `<input type="checkbox" data-audit-index="${index}" onchange="toggleAuditSelection(this)" class="rounded border-slate-700 bg-slate-900 text-amber-500 focus:ring-0">`
+            : '<span class="text-slate-600">&mdash;</span>';
+        return `<tr class="hover:bg-slate-850/50 transition-colors">
+            <td class="py-3 px-4">${checkbox}</td>
+            <td class="py-3 px-4 font-mono text-slate-200 break-all">${escapeHtml(row.file)}</td>
+            <td class="py-3 px-4 text-slate-300 font-mono break-all">${escapeHtml(row.current_series || '-')}</td>
+            <td class="py-3 px-4 text-amber-300 font-mono break-all">${escapeHtml(row.suggested_series || '-')}</td>
+            <td class="py-3 px-4">${auditStatusBadge(row)}${(row.changes && row.changes.length) ? ` <span class="text-[10px] text-slate-400">(${escapeHtml(row.changes.join(', '))})</span>` : ''}</td>
+            <td class="py-3 px-4 text-slate-400 text-[11px] max-w-md">${escapeHtml(row.reason || '')}</td>
+        </tr>`;
+    }).join('');
+    window._auditData = files;
+}
+
+function toggleAuditSelection(checkbox) {
+    const index = parseInt(checkbox.getAttribute('data-audit-index'), 10);
+    const files = window._auditData || [];
+    const row = files[index];
+    if (!row) return;
+    if (checkbox.checked) {
+        _selectedAuditFiles.add(row.file);
+    } else {
+        _selectedAuditFiles.delete(row.file);
+    }
+    updateRepairButton();
+}
+
+async function auditSeriesTags() {
+    const tbody = document.getElementById('audit-rows');
+    tbody.innerHTML = '<tr><td colspan="6" class="py-8 text-center text-slate-500">Auditing staging directory (read-only)...</td></tr>';
+    try {
+        const res = await fetch('/api/tagger/audit');
+        const data = await res.json();
+        if (res.ok && data.status === 'success') {
+            renderAudit(data);
+        } else {
+            tbody.innerHTML = `<tr><td colspan="6" class="py-8 text-center text-rose-400">${escapeHtml(data.detail || 'Audit failed')}</td></tr>`;
+        }
+    } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="6" class="py-8 text-center text-rose-400">Audit failed: ${escapeHtml(String(err))}</td></tr>`;
+    }
+}
+
+async function repairSelectedSeries() {
+    const files = Array.from(_selectedAuditFiles);
+    if (!files.length) return;
+    if (!confirm(`Rewrite ComicInfo.xml metadata for ${files.length} selected file(s)? Image entries are left untouched.`)) return;
+    try {
+        const res = await fetch('/api/tagger/repair-series', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ files: files })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            showToast(`Repaired ${data.repaired} file(s); ${data.unchanged} already correct, ${data.skipped} skipped.`, data.failed ? 'warning' : 'success');
+            await auditSeriesTags();
+        } else {
+            showToast(data.detail || 'Repair failed', 'error');
+        }
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+
+async function openTagModal(filename) {
+    _tagModalFile = filename;
+    const modal = document.getElementById('tag-modal');
+    document.getElementById('tag-modal-file').textContent = filename;
+    document.getElementById('tag-modal-current').textContent = 'Loading current ComicInfo.xml...';
+    ['series', 'volume', 'title', 'writer', 'publisher', 'genre'].forEach(function (field) {
+        document.getElementById('tag-field-' + field).value = '';
+    });
+    modal.style.display = 'flex';
+    try {
+        const res = await fetch('/api/tagger/preview?filename=' + encodeURIComponent(filename));
+        const data = await res.json();
+        const info = data.comicinfo || {};
+        document.getElementById('tag-field-series').value = info.Series || (data.parsed && data.parsed.series_name) || '';
+        document.getElementById('tag-field-volume').value = info.Volume || info.Number || '';
+        document.getElementById('tag-field-title').value = info.Title || '';
+        document.getElementById('tag-field-writer').value = info.Writer || '';
+        document.getElementById('tag-field-publisher').value = info.Publisher || '';
+        document.getElementById('tag-field-genre').value = info.Genre || '';
+        document.getElementById('tag-modal-current').textContent = data.has_comicinfo
+            ? JSON.stringify(info, null, 2)
+            : 'No ComicInfo.xml yet. Saving will create one.';
+    } catch (err) {
+        document.getElementById('tag-modal-current').textContent = 'Could not load preview: ' + err;
+    }
+}
+
+function closeTagModal() {
+    document.getElementById('tag-modal').style.display = 'none';
+    _tagModalFile = null;
+}
+
+async function saveManualTag() {
+    if (!_tagModalFile) return;
+    const payload = {
+        filename: _tagModalFile,
+        series: document.getElementById('tag-field-series').value.trim(),
+        volume: document.getElementById('tag-field-volume').value.trim(),
+        title: document.getElementById('tag-field-title').value.trim(),
+        writer: document.getElementById('tag-field-writer').value.trim(),
+        publisher: document.getElementById('tag-field-publisher').value.trim(),
+        genre: document.getElementById('tag-field-genre').value.trim()
+    };
+    if (!payload.series) {
+        showToast('Series is required (it is the Calibre matching key).', 'error');
+        return;
+    }
+    try {
+        const res = await fetch('/api/tagger/manual-tag', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (res.ok && data.status === 'success') {
+            showToast('ComicInfo.xml saved.', 'success');
+            closeTagModal();
+            setTimeout(() => location.reload(), 700);
+        } else {
+            showToast(data.detail || 'Tagging failed', 'error');
+        }
     } catch (err) {
         showToast('Error: ' + err, 'error');
     }

@@ -17,11 +17,14 @@ from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
+from app.tagger import cbz_tagger, series_audit
 from app.tagger.cbz_tagger import has_comicinfo
 from app.metadata.mangaupdates import MangaUpdatesService
+from app.parser import extract_manga_bundle_and_volumes
 from app import auth as auth_module
 from app import schemas
 from app import security
+from app import search as search_module
 
 # Setup Logging
 logging.basicConfig(
@@ -176,6 +179,266 @@ def _operator_allowed_path_roots():
     return [part.strip() for part in raw.split(os.pathsep) if part.strip()]
 
 
+# ---------------------------------------------------------------------------
+# Shared staging-directory helpers (M2 features 16 + CBZ <Series> repair)
+# ---------------------------------------------------------------------------
+# The tagger endpoints accept a *staging-relative filename* from the client.  The
+# value is only ever used as a lookup key into the staging scan -- it is never
+# joined into a filesystem path -- so ``..``/absolute/drive-rooted payloads cannot
+# escape the staging directory even before the defence-in-depth checks below.
+# The resolved real path is then re-validated for containment, symlink escape and
+# the ``.cbz`` suffix before any read or write.
+
+_STAGING_FILENAME_MAX_LENGTH = 512
+
+
+def _staging_dir_setting() -> str:
+    return db.get_setting("staging_dir", "/staging")
+
+
+def _staging_cbz_entries() -> list:
+    """Enumerate staged ``.cbz`` files (read-only; the 'existing staging scan')."""
+    return cbz_tagger.scan_staging_cbz_files(_staging_dir_setting())
+
+
+def _resolve_staging_cbz(filename: str) -> dict:
+    """Resolve a client-supplied filename to a validated staged ``.cbz`` entry.
+
+    Security rules (all enforced here, before any file is opened):
+      * the value must be a plain staging-relative name (no ``..``, no absolute or
+        drive-rooted paths, no control bytes);
+      * it must match exactly one entry of the staging scan, either by its
+        staging-relative path or by its basename -- free-form paths are rejected;
+      * the real path must stay inside ``staging_dir`` (symlink escapes included);
+      * symlinked archives are rejected and the file must still be a regular
+        ``.cbz`` that exists.
+    """
+    staging_dir = _staging_dir_setting()
+    if not staging_dir or not os.path.isdir(staging_dir):
+        raise HTTPException(status_code=400, detail="staging_dir is not configured or does not exist")
+
+    if not isinstance(filename, str) or not filename.strip():
+        raise HTTPException(status_code=400, detail="filename is required")
+
+    candidate = filename.strip().replace("\\", "/")
+    if not candidate or len(candidate) > _STAGING_FILENAME_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail="filename is required")
+    parts = [part for part in candidate.split("/") if part]
+    if any(part == ".." for part in parts):
+        raise HTTPException(status_code=400, detail="filename must not contain '..' traversal segments")
+    if candidate.startswith("/") or (len(candidate) > 1 and candidate[1] == ":"):
+        raise HTTPException(status_code=400, detail="filename must be relative to the staging directory")
+
+    entries = _staging_cbz_entries()
+    matches = [entry for entry in entries if entry["relative"] == candidate]
+    if not matches:
+        matches = [entry for entry in entries if entry["name"] == candidate]
+    if not matches:
+        raise HTTPException(
+            status_code=404,
+            detail=f"'{candidate}' is not a .cbz file present in the staging scan",
+        )
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"'{candidate}' matches {len(matches)} staged files; pass the "
+                "staging-relative path instead of the bare filename"
+            ),
+        )
+
+    entry = matches[0]
+    resolved = entry["path"]
+    if not str(resolved).lower().endswith(".cbz"):
+        raise HTTPException(status_code=400, detail="only .cbz archives can be previewed or tagged")
+    if os.path.islink(resolved):
+        raise HTTPException(status_code=403, detail="symlinked archives are not accepted")
+    try:
+        safe_path = security.ensure_path_within_roots(resolved, [staging_dir])
+    except security.UnsafePathError as exc:
+        raise HTTPException(status_code=403, detail=f"Rejected staging path: {exc}") from exc
+    if not os.path.isfile(safe_path):
+        raise HTTPException(status_code=404, detail="the staged archive no longer exists")
+
+    resolved_entry = dict(entry)
+    resolved_entry["path"] = safe_path
+    return resolved_entry
+
+
+# ---------------------------------------------------------------------------
+# Downloader status (M2 feature 15 / PROJECT.md feature 15)
+# ---------------------------------------------------------------------------
+# The live progress API must never make a page render block on an unreachable or
+# hung downloader: every call uses an explicit short socket timeout and any
+# failure degrades to a valid, empty payload (the page still renders).
+
+_DEFAULT_DOWNLOADER_STATUS_TIMEOUT = 1.5
+_MAX_DOWNLOADER_STATUS_TIMEOUT = 5.0
+_QBIT_ACTIVE_STATES = frozenset({
+    "downloading", "metadl", "stalldl", "forceddl", "queueddl", "checkingdl",
+    "allocating", "checkingresumedata",
+})
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or isinstance(value, bool):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _torrent_status_view(torrent: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize one qBittorrent torrent row for the status API."""
+    state = str(torrent.get("state") or "").strip()
+    progress = max(0.0, min(1.0, _as_float(torrent.get("progress"))))
+    eta_raw = torrent.get("eta")
+    eta_seconds: Optional[int]
+    if eta_raw is None:
+        eta_seconds = None
+    else:
+        eta_value = int(_as_float(eta_raw, 0))
+        # qBittorrent reports 8640000 for "unknown / infinite".
+        eta_seconds = eta_value if 0 < eta_value < 8640000 else None
+    active = state.lower() in _QBIT_ACTIVE_STATES
+    size_bytes = int(_as_float(torrent.get("size")))
+    downloaded_bytes = int(_as_float(torrent.get("downloaded")))
+    download_speed = int(_as_float(torrent.get("dlspeed")))
+    upload_speed = int(_as_float(torrent.get("upspeed")))
+    return {
+        "hash": str(torrent.get("hash") or ""),
+        "name": str(torrent.get("name") or ""),
+        "state": state,
+        "category": str(torrent.get("category") or ""),
+        "progress": round(progress, 4),
+        "progress_percent": round(progress * 100.0, 1),
+        "size_bytes": size_bytes,
+        "downloaded_bytes": downloaded_bytes,
+        "download_speed": download_speed,
+        "upload_speed": upload_speed,
+        "eta_seconds": eta_seconds,
+        "ratio": round(_as_float(torrent.get("ratio")), 3),
+        "seeds": int(_as_float(torrent.get("num_seeds"))),
+        "peers": int(_as_float(torrent.get("num_leechs"))),
+        "is_active": active,
+        # qBittorrent-native keys kept for the existing downloads template, so the
+        # HTML view and the JSON API share one normalized snapshot.
+        "size": size_bytes,
+        "downloaded": downloaded_bytes,
+        "dlspeed": download_speed,
+        "upspeed": upload_speed,
+        "eta": int(eta_seconds) if eta_seconds is not None else 0,
+        "num_seeds": int(_as_float(torrent.get("num_seeds"))),
+        "num_leechs": int(_as_float(torrent.get("num_leechs"))),
+    }
+
+
+def _build_downloader_status(timeout: Optional[float] = None) -> Dict[str, Any]:
+    """Build the ``/api/downloads/status`` payload without ever raising.
+
+    ``timeout`` is clamped to a short range (default 1.5s, max 5s) and passed to
+    every downloader call, so an unreachable/hung qBittorrent costs at most one
+    timeout and always yields a valid, degraded payload instead of a 500 or a
+    stalled page render.
+    """
+    effective_timeout = _as_float(timeout, _DEFAULT_DOWNLOADER_STATUS_TIMEOUT)
+    if effective_timeout <= 0:
+        effective_timeout = _DEFAULT_DOWNLOADER_STATUS_TIMEOUT
+    effective_timeout = min(effective_timeout, _MAX_DOWNLOADER_STATUS_TIMEOUT)
+
+    payload: Dict[str, Any] = {
+        "status": "degraded",
+        "degraded": True,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "timeout_seconds": round(effective_timeout, 2),
+        "downloader": {
+            "enabled": False,
+            "connected": False,
+            "version": "",
+            "message": "Downloader status is currently unavailable.",
+        },
+        "torrents": [],
+        "active": [],
+        "count": 0,
+        "totals": {
+            "download_speed": 0,
+            "upload_speed": 0,
+            "progress": 0.0,
+            "eta_seconds": None,
+        },
+    }
+
+    try:
+        qbit = scheduler.get_qbit_client()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not build downloader client for status API: %s", exc)
+        return payload
+
+    payload["downloader"]["enabled"] = bool(getattr(qbit, "enabled", False))
+    if not payload["downloader"]["enabled"]:
+        payload["status"] = "disabled"
+        payload["degraded"] = False
+        payload["downloader"]["message"] = "Downloader is disabled in MangaTrax settings."
+        return payload
+
+    try:
+        connection = qbit.test_connection(timeout=effective_timeout) or {}
+    except Exception as exc:
+        connection = {"success": False, "message": f"Connection error: {exc}", "version": ""}
+
+    connected = bool(connection.get("success"))
+    payload["downloader"]["connected"] = connected
+    payload["downloader"]["version"] = str(connection.get("version") or "")
+    payload["downloader"]["message"] = str(connection.get("message") or "")
+    if not connected:
+        return payload
+
+    try:
+        category = db.get_setting("qbit_category", "manga") or "manga"
+        raw_torrents = qbit.get_torrents(category=category, timeout=effective_timeout)
+    except Exception as exc:
+        payload["degraded"] = True
+        payload["downloader"]["message"] = f"Connected, but the torrent list failed: {exc}"
+        return payload
+
+    torrents = [_torrent_status_view(torrent) for torrent in (raw_torrents or []) if isinstance(torrent, dict)]
+    active = [torrent for torrent in torrents if torrent["is_active"]]
+    total_size = sum(torrent["size_bytes"] for torrent in active)
+    downloaded = sum(torrent["downloaded_bytes"] for torrent in active)
+
+    payload.update({
+        "status": "success",
+        "degraded": False,
+        "torrents": torrents,
+        "active": active,
+        "count": len(torrents),
+        "totals": {
+            "download_speed": sum(torrent["download_speed"] for torrent in active),
+            "upload_speed": sum(torrent["upload_speed"] for torrent in active),
+            "progress": round(downloaded / total_size, 4) if total_size else 0.0,
+            "eta_seconds": _aggregate_eta(active),
+        },
+    })
+    return payload
+
+
+def _aggregate_eta(active_torrents: list) -> Optional[int]:
+    """Overall remaining seconds across active torrents (None when unknown)."""
+    remaining_bytes = 0
+    speed = 0
+    for torrent in active_torrents:
+        remaining = max(0, torrent["size_bytes"] - torrent["downloaded_bytes"])
+        remaining_bytes += remaining
+        speed += torrent["download_speed"]
+    if remaining_bytes <= 0:
+        return 0
+    if speed <= 0:
+        return None
+    return int(remaining_bytes / speed)
+
+
+
 # --- Authentication & health endpoints (exempt from the auth gate) ---
 
 @app.get("/health")
@@ -270,9 +533,10 @@ async def dashboard_view(request: Request):
     pending_requests = db.get_pending_requests(limit=10)
     recent_logs = db.get_logs(limit=10)
 
-    # Get active qBit torrents with fast timeout to prevent UI stall
-    qbit = scheduler.get_qbit_client()
-    torrents = qbit.get_torrents(category="manga") if qbit.test_connection(timeout=1.5).get("success") else []
+    # Live downloader snapshot behind a short timeout, off the event loop, so a
+    # hung/unreachable qBittorrent can never stall the dashboard render.
+    download_status = await asyncio.to_thread(_build_downloader_status, 1.0)
+    torrents = download_status.get("torrents") or []
 
     return templates.TemplateResponse(
         request=request,
@@ -488,23 +752,27 @@ async def discovery_view(
 
 @app.get("/downloads", response_class=HTMLResponse)
 async def downloads_view(request: Request):
-    qbit = scheduler.get_qbit_client()
-    qbit_status = qbit.test_connection(timeout=2.0)
-    torrents = qbit.get_torrents(category="manga") if qbit_status.get("success") else []
+    # Short, explicit timeout + graceful degradation: an unreachable downloader
+    # renders the page with a "degraded" banner instead of blocking on sockets.
+    download_status = await asyncio.to_thread(_build_downloader_status, 1.2)
+    qbit_status = {
+        "success": download_status["downloader"]["connected"],
+        "message": download_status["downloader"]["message"],
+        "version": download_status["downloader"]["version"],
+        "degraded": download_status.get("degraded", False),
+    }
+    torrents = download_status.get("torrents") or []
 
     # Check files in staging directory
-    staging_dir = db.get_setting("staging_dir", "/staging")
+    staging_dir = _staging_dir_setting()
     staging_files = []
     if os.path.isdir(staging_dir):
-        for root, _, files in os.walk(staging_dir):
-            for f in sorted(files):
-                if f.lower().endswith(".cbz"):
-                    full_p = os.path.join(root, f)
-                    staging_files.append({
-                        "name": f,
-                        "size_mb": round(os.path.getsize(full_p) / (1024 * 1024), 2),
-                        "has_comicinfo": has_comicinfo(full_p)
-                    })
+        for entry in cbz_tagger.scan_staging_cbz_files(staging_dir):
+            staging_files.append({
+                "name": entry["relative"],
+                "size_mb": entry["size_mb"],
+                "has_comicinfo": has_comicinfo(entry["path"]),
+            })
 
     return templates.TemplateResponse(
         request=request,
@@ -658,6 +926,310 @@ async def api_staging_tag():
     """Trigger ComicInfo.xml tagging on .cbz files in staging folder using inherited series metadata."""
     res = scheduler.tag_staging_files()
     return JSONResponse(res)
+
+
+# --- Live downloader progress (PROJECT.md feature 15) ---
+
+@app.get("/api/downloads/status")
+async def api_downloads_status(timeout: float = Query(default=_DEFAULT_DOWNLOADER_STATUS_TIMEOUT, ge=0.2, le=_MAX_DOWNLOADER_STATUS_TIMEOUT)):
+    """Active torrent states, progress, speeds and ETA with graceful degradation.
+
+    Always returns HTTP 200 with a valid payload: when the downloader is disabled
+    or unreachable the response is ``{"status": "disabled"|"degraded", ...}`` with
+    empty torrent lists, so callers can render the page synchronously.  The socket
+    timeout is short and clamped (default 1.5s, max 5s) and the blocking client
+    runs in a worker thread, so a hung downloader cannot stall the event loop.
+    """
+    payload = await asyncio.to_thread(_build_downloader_status, timeout)
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+# --- Tagger: preview / manual tagging (PROJECT.md feature 16) ---
+
+def _preview_staging_cbz(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Read a staged CBZ's current ComicInfo (read-only; safe to poll)."""
+    parsed = extract_manga_bundle_and_volumes(entry["name"])
+    result: Dict[str, Any] = {
+        "status": "success",
+        "file": entry["relative"],
+        "name": entry["name"],
+        "size_mb": entry["size_mb"],
+        "has_comicinfo": False,
+        "comicinfo": None,
+        "parsed": {
+            "series_name": parsed.get("series_name") or "",
+            "volume_start": parsed.get("volume_start"),
+            "volume_end": parsed.get("volume_end"),
+            "volumes": parsed.get("volumes") or [],
+            "is_bundle": bool(parsed.get("is_bundle")),
+        },
+        "warning": None,
+    }
+    try:
+        fields = cbz_tagger.read_comicinfo(entry["path"])
+    except cbz_tagger.UnreadableArchiveError as exc:
+        raise HTTPException(status_code=422, detail=f"Unreadable .cbz archive: {exc}") from exc
+    except cbz_tagger.MalformedComicInfoError as exc:
+        result["status"] = "invalid_comicinfo"
+        result["has_comicinfo"] = True
+        result["warning"] = str(exc)
+        return result
+
+    if fields is None:
+        return result
+    result["has_comicinfo"] = True
+    result["comicinfo"] = fields
+    return result
+
+
+def _format_volume_value(volume: Optional[str]) -> Optional[str]:
+    text = (volume or "").strip()
+    if not text:
+        return None
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    return str(int(number)) if number == int(number) else str(number)
+
+
+def _manual_tag_updates(model) -> Dict[str, Any]:
+    updates: Dict[str, Any] = {"Series": model.series}
+    volume = _format_volume_value(model.volume)
+    if volume:
+        updates["Number"] = volume
+        updates["Volume"] = volume
+    if model.title:
+        updates["Title"] = model.title
+    if model.writer:
+        updates["Writer"] = model.writer
+        updates["Penciller"] = model.writer
+    if model.publisher:
+        updates["Publisher"] = model.publisher
+    if model.genre:
+        updates["Genre"] = model.genre
+    return updates
+
+
+def _manual_tag_staging_cbz(entry: Dict[str, Any], model) -> Dict[str, Any]:
+    """Write user-supplied ComicInfo metadata into one staged CBZ (explicit action)."""
+    via_fallback = False
+    try:
+        existing_xml = cbz_tagger.read_comicinfo_xml(entry["path"])
+    except cbz_tagger.ComicInfoError as exc:
+        raise HTTPException(status_code=422, detail=f"Unreadable .cbz archive: {exc}") from exc
+
+    updates = _manual_tag_updates(model)
+    volume = updates.get("Volume")
+    defaults = {
+        "Title": f"{model.series} Vol. {volume}" if volume else model.series,
+        "Manga": "YesAndRightToLeft",
+    }
+
+    def _with_defaults(base: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(defaults)
+        merged.update(base)
+        return merged
+
+    try:
+        xml = cbz_tagger.build_comicinfo_xml(
+            existing_xml, updates if existing_xml else _with_defaults(updates)
+        )
+    except cbz_tagger.MalformedComicInfoError:
+        # An explicit manual tag is the supported way to replace a corrupt
+        # ComicInfo.xml, so fall back to a fresh document built from the request.
+        via_fallback = True
+        xml = cbz_tagger.build_comicinfo_xml(None, _with_defaults(updates))
+
+    if not cbz_tagger.rewrite_comicinfo(entry["path"], xml):
+        raise HTTPException(status_code=500, detail="Failed to rewrite ComicInfo.xml")
+
+    db.log_activity(
+        "MANUAL_TAG_CBZ",
+        f"Manually tagged '{entry['relative']}' as series '{model.series}'",
+        f"Volume: {volume or '-'}; writer: {model.writer or '-'}; publisher: {model.publisher or '-'}",
+    )
+    return {
+        "status": "success",
+        "file": entry["relative"],
+        "name": entry["name"],
+        "replaced_invalid_comicinfo": via_fallback,
+        "comicinfo": cbz_tagger.read_comicinfo(entry["path"]) or {},
+    }
+
+
+@app.get("/api/tagger/preview")
+async def api_tagger_preview(filename: str = Query(..., min_length=1, max_length=_STAGING_FILENAME_MAX_LENGTH)):
+    """Return one staged CBZ's current ComicInfo.xml without modifying it.
+
+    ``filename`` must be a file returned by the staging scan; traversal payloads,
+    symlinks and free-form paths are rejected by ``_resolve_staging_cbz``.
+    """
+    entry = await asyncio.to_thread(_resolve_staging_cbz, filename)
+    return JSONResponse(await asyncio.to_thread(_preview_staging_cbz, entry))
+
+
+@app.post("/api/tagger/manual-tag")
+async def api_tagger_manual_tag(payload: Dict[str, Any]):
+    """Write user-supplied metadata into one staged CBZ (feature 16 workflow).
+
+    This is how a brand-new series is hand-tagged before Calibre knows it: the
+    user supplies the series name (the matching key) plus any known volume/title/
+    writer/publisher/genre.  Only fields present in the request are written; the
+    existing ComicInfo.xml is updated in place (no duplicate entries) and image
+    entries are copied untouched.
+    """
+    model = _validated_payload(schemas.ManualTagRequest, payload)
+    entry = await asyncio.to_thread(_resolve_staging_cbz, model.filename)
+    result = await asyncio.to_thread(_manual_tag_staging_cbz, entry, model)
+    return JSONResponse(result)
+
+
+# --- CBZ <Series> audit / explicit repair (the old rename-bug data repair) ---
+
+def _calibre_series_snapshot() -> Optional[list]:
+    """Live Calibre series list when the library is reachable (else ``None``)."""
+    try:
+        scanner = CalibreMangaScanner(db.get_setting("calibre_path", CALIBRE_DIR))
+        if scanner.is_available():
+            return scanner.get_all_series()
+    except Exception as exc:  # pragma: no cover - audit falls back to synced rows
+        logger.debug("Calibre snapshot unavailable for the CBZ audit: %s", exc)
+    return None
+
+
+def _run_staging_cbz_audit() -> Dict[str, Any]:
+    return series_audit.audit_staging_cbz_files(
+        db, _staging_dir_setting(), calibre_series=_calibre_series_snapshot()
+    )
+
+
+@app.get("/api/tagger/audit")
+async def api_tagger_audit():
+    """Read-only audit of staged CBZ ``<Series>`` values (never modifies a file).
+
+    Reports per file the current ``<Series>``, the suggested corrected name, why
+    the file is/ isn't safe to repair, and a summary.  Run this before
+    ``POST /api/tagger/repair-series`` and let the user select the files.
+    """
+    return JSONResponse(await asyncio.to_thread(_run_staging_cbz_audit))
+
+
+def _repair_staging_cbz_series(
+    filenames: list,
+    repair_writer: bool = True,
+    repair_publisher: bool = True,
+) -> Dict[str, Any]:
+    """Repair ``<Series>``/Writer/Publisher for the explicitly selected files only.
+
+    Every selection is resolved through the staging scan first; if any filename is
+    invalid the whole request is rejected before a single write (so a typo cannot
+    half-apply a selection).  For each resolved file the audit is re-run and only
+    provably safe changes are written.  All writes are audit-logged through the
+    request's authenticated actor.
+    """
+    resolved = [_resolve_staging_cbz(name) for name in filenames]
+    reference = series_audit.build_series_reference(db, calibre_series=_calibre_series_snapshot())
+
+    counts = {"requested": len(resolved), "repaired": 0, "unchanged": 0, "skipped": 0, "failed": 0}
+    results: list = []
+
+    for entry in resolved:
+        record = series_audit.audit_entry(entry, reference)
+        plan = series_audit.plan_repair(
+            record, repair_writer=repair_writer, repair_publisher=repair_publisher
+        )
+        item: Dict[str, Any] = {
+            "file": record["file"],
+            "name": record["name"],
+            "status": record["status"],
+            "outcome": "skipped",
+            "changes": [],
+            "suggested_series": record.get("suggested_series"),
+            "reason": plan.get("skipped_reason") or record.get("reason") or "",
+        }
+
+        if not plan["updates"]:
+            if record["status"] == series_audit.STATUS_OK and not record.get("changes"):
+                item["outcome"] = "unchanged"
+                item["reason"] = "already correct; nothing to rewrite (idempotent)"
+                counts["unchanged"] += 1
+            else:
+                counts["skipped"] += 1
+            results.append(item)
+            continue
+
+        try:
+            existing_xml = cbz_tagger.read_comicinfo_xml(entry["path"])
+            xml = cbz_tagger.build_comicinfo_xml(existing_xml, plan["updates"])
+            written = cbz_tagger.rewrite_comicinfo(entry["path"], xml)
+        except Exception as exc:  # noqa: BLE001 - per-file failure must not abort the batch
+            item.update(outcome="failed", reason=f"rewrite failed: {exc}")
+            counts["failed"] += 1
+            results.append(item)
+            continue
+
+        if not written:
+            item.update(outcome="failed", reason="rewrite failed (archive left untouched)")
+            counts["failed"] += 1
+            results.append(item)
+            continue
+
+        item["outcome"] = "repaired"
+        item["changes"] = plan["changes"]
+        counts["repaired"] += 1
+        db.log_activity(
+            "CBZ_SERIES_REPAIRED",
+            f"Repaired ComicInfo.xml in '{record['file']}' ({', '.join(plan['changes'])})",
+            f"Series -> '{plan['updates'].get('Series', record.get('current_series')) or ''}'; "
+            f"changes: {', '.join(plan['changes'])}",
+        )
+        results.append(item)
+
+    return {
+        "status": "success" if counts["failed"] == 0 else "partial",
+        **counts,
+        "results": results,
+    }
+
+
+@app.post("/api/tagger/repair-series")
+async def api_tagger_repair_series(payload: Dict[str, Any]):
+    """Explicitly repair the ``<Series>`` value of user-selected staged CBZ files.
+
+    There is no bulk/"all files" mode: ``files`` must name every archive to touch
+    (max 200 per request).  Only files the audit proves to belong to exactly one
+    known series are rewritten; ``ambiguous``/``unknown_series``/``untagged``
+    files are reported and skipped, never guessed at.  The destructive half sits
+    behind the normal auth middleware, and every rewrite is logged with the
+    authenticated actor.
+    """
+    model = _validated_payload(schemas.SeriesRepairRequest, payload)
+    result = await asyncio.to_thread(
+        _repair_staging_cbz_series, model.files, model.repair_writer, model.repair_publisher
+    )
+    return JSONResponse(result)
+
+
+# --- Unified search with AniList alias resolution (PROJECT.md feature 17) ---
+
+@app.get("/api/search")
+async def api_unified_search(
+    q: str = Query(default="", max_length=200),
+    limit: int = Query(default=20, ge=1, le=50),
+):
+    """Search series, their AniList alternate titles, and releases in one call.
+
+    A query matches either the stable matching key or an authoritative AniList
+    canonical/romaji alias, so either spelling finds the series.  Every series hit
+    returns the stable key (``stable_name``) plus the cosmetic ``display_title``,
+    and ``match``/``matched_alias`` explain why it matched.
+    """
+    query = (q or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="q is required and must not be blank")
+    result = await asyncio.to_thread(search_module.unified_search, db, query, limit)
+    return JSONResponse(result)
 
 @app.post("/api/downloader/test")
 async def api_downloader_test(payload: Optional[Dict[str, Any]] = None):

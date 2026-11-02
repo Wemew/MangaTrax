@@ -1,6 +1,8 @@
 import os
+import re
 import zipfile
 import logging
+import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 from typing import Dict, Any, Optional, List
 from app.parser import extract_manga_bundle_and_volumes, normalize_text
@@ -8,6 +10,196 @@ from app.parser import extract_manga_bundle_and_volumes, normalize_text
 logger = logging.getLogger("mangatrax.tagger")
 
 _COMICINFO_CACHE: Dict[Any, bool] = {}
+
+# ComicRack / Calibre / Komga / Kavita all read ComicInfo.xml from the archive
+# root.  The comparison is case-insensitive (some taggers emit "comicinfo.xml").
+COMICINFO_FILENAME = "ComicInfo.xml"
+
+_NAMESPACE_RE = re.compile(r"\{[^}]*\}")
+
+
+class ComicInfoError(Exception):
+    """Base class for a ComicInfo.xml that could not be read."""
+
+
+class UnreadableArchiveError(ComicInfoError):
+    """The .cbz is not a readable ZIP archive."""
+
+
+class MalformedComicInfoError(ComicInfoError):
+    """The archive carries a ComicInfo.xml that is not well-formed XML."""
+
+
+def _local_tag(tag: str) -> str:
+    """Strip an XML namespace from a tag name (``{ns}Series`` -> ``Series``)."""
+    return _NAMESPACE_RE.sub("", tag or "")
+
+
+def _comicinfo_entry_names(names: List[str]) -> List[str]:
+    return [name for name in names if name.lower() == COMICINFO_FILENAME.lower()]
+
+
+def _read_raw_comicinfo(cbz_path: str) -> Optional[bytes]:
+    """Return the raw ComicInfo.xml bytes, ``None`` when absent, raise when unreadable."""
+    try:
+        with zipfile.ZipFile(cbz_path, "r") as archive:
+            names = _comicinfo_entry_names(archive.namelist())
+            if not names:
+                return None
+            return archive.read(names[0])
+    except (zipfile.BadZipFile, OSError, RuntimeError) as exc:
+        raise UnreadableArchiveError(f"unreadable .cbz archive: {exc}") from exc
+
+
+def read_comicinfo_xml(cbz_path: str) -> Optional[str]:
+    """Return the raw ``ComicInfo.xml`` text stored in *cbz_path*.
+
+    ``None`` means the archive simply has no ComicInfo.xml.  A missing/corrupt
+    archive raises :class:`UnreadableArchiveError`; an unparseable document is
+    left to :func:`read_comicinfo` / :func:`build_comicinfo_xml`.
+    """
+    raw = _read_raw_comicinfo(cbz_path)
+    if raw is None:
+        return None
+    return raw.decode("utf-8", errors="replace")
+
+
+def read_comicinfo(cbz_path: str) -> Optional[Dict[str, str]]:
+    """Parse a CBZ's ``ComicInfo.xml`` into ``{element: text}``.
+
+    Read-only: the archive is never modified.  Returns ``None`` when the file has
+    no ComicInfo.xml; raises :class:`UnreadableArchiveError` for a broken archive
+    and :class:`MalformedComicInfoError` for broken XML.
+    """
+    raw = _read_raw_comicinfo(cbz_path)
+    if raw is None:
+        return None
+
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise MalformedComicInfoError(f"malformed ComicInfo.xml: {exc}") from exc
+
+    fields: Dict[str, str] = {}
+    for child in list(root):
+        if not isinstance(child.tag, str):
+            continue  # comments / processing instructions
+        fields[_local_tag(child.tag)] = (child.text or "").strip()
+    return fields
+
+
+def build_comicinfo_xml(existing_xml: Optional[str], updates: Dict[str, Any]) -> str:
+    """Return a ComicInfo.xml document with *updates* applied element-wise.
+
+    Only the named elements are replaced/added; every other element, its order and
+    its value are preserved.  Passing ``existing_xml=None`` builds a fresh
+    document containing just the supplied elements (plus nothing else, so callers
+    decide the defaults).  Raises :class:`MalformedComicInfoError` when the
+    existing document cannot be parsed instead of silently discarding its fields.
+    """
+    if existing_xml and existing_xml.strip():
+        try:
+            root = ET.fromstring(existing_xml.encode("utf-8"))
+        except ET.ParseError as exc:
+            raise MalformedComicInfoError(f"malformed ComicInfo.xml: {exc}") from exc
+    else:
+        root = ET.Element("ComicInfo")
+
+    for field_name, value in updates.items():
+        if value is None:
+            continue
+        text = str(value)
+        nodes = [child for child in list(root) if isinstance(child.tag, str) and _local_tag(child.tag) == field_name]
+        if nodes:
+            nodes[0].text = text
+            for duplicate in nodes[1:]:
+                root.remove(duplicate)
+        else:
+            ET.SubElement(root, field_name).text = text
+
+    body = ET.tostring(root, encoding="unicode")
+    return '<?xml version="1.0" encoding="utf-8"?>\n' + body
+
+
+def rewrite_comicinfo(cbz_path: str, xml_content: str) -> bool:
+    """Replace a CBZ's ``ComicInfo.xml`` without touching its image entries.
+
+    ZIP has no in-place entry update, so the container is rebuilt in a temporary
+    file next to the archive and atomically swapped in.  Every non-ComicInfo
+    entry is copied with its original :class:`zipfile.ZipInfo` (name, timestamp,
+    CRC and ``compress_type`` preserved), therefore:
+      * image/archive payloads are never decoded, resized or re-encoded;
+      * ``STORED`` entries stay byte-identical, and ``DEFLATED`` entries keep
+        their original compression method;
+      * duplicate ComicInfo.xml entries emitted by older appends are collapsed to
+        exactly one entry, which is what makes the repair idempotent.
+    Returns ``False`` (and leaves the original untouched) on any failure.
+    """
+    if not os.path.isfile(cbz_path):
+        return False
+
+    temp_path = f"{cbz_path}.mangatrax-rewrite-tmp"
+    try:
+        with zipfile.ZipFile(cbz_path, "r") as source:
+            infos = [
+                info for info in source.infolist()
+                if info.filename.lower() != COMICINFO_FILENAME.lower()
+            ]
+            with zipfile.ZipFile(temp_path, "w") as destination:
+                for info in infos:
+                    destination.writestr(info, source.read(info))
+                destination.writestr(COMICINFO_FILENAME, xml_content.encode("utf-8"))
+        os.replace(temp_path, cbz_path)
+        # The cache is keyed on (path, mtime); the rewritten file has a new mtime,
+        # but drop everything anyway so no stale entry can survive a race.
+        _COMICINFO_CACHE.clear()
+        logger.info("Rewrote %s ComicInfo.xml in %s", COMICINFO_FILENAME, os.path.basename(cbz_path))
+        return True
+    except Exception as exc:  # noqa: BLE001 - a failed rewrite must never raise upward
+        logger.error("Failed to rewrite ComicInfo.xml in %s: %s", cbz_path, exc)
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        return False
+
+
+def scan_staging_cbz_files(staging_dir: str) -> List[Dict[str, Any]]:
+    """Enumerate the ``.cbz`` archives under *staging_dir* (read-only).
+
+    Returns a deterministic list of ``{"name", "relative", "path", "size_bytes",
+    "size_mb"}`` records.  ``name`` is the basename and ``relative`` is the
+    staging-relative POSIX path — callers accept a client filename ONLY by
+    matching it against this list, never by joining it into a filesystem path.
+    Symlinked archives are deliberately listed (the resolver rejects them with a
+    clear error instead of silently hiding a file the user can see on disk).
+    """
+    if not staging_dir or not os.path.isdir(staging_dir):
+        return []
+
+    entries: List[Dict[str, Any]] = []
+    for root, dirs, files in os.walk(staging_dir):
+        dirs.sort()
+        for filename in sorted(files):
+            if not filename.lower().endswith(".cbz"):
+                continue
+            full_path = os.path.join(root, filename)
+            relative = os.path.relpath(full_path, staging_dir).replace(os.sep, "/")
+            try:
+                size_bytes = os.path.getsize(full_path)
+            except OSError:
+                size_bytes = 0
+            entries.append({
+                "name": filename,
+                "relative": relative,
+                "path": full_path,
+                "size_bytes": size_bytes,
+                "size_mb": round(size_bytes / (1024 * 1024), 2),
+            })
+    entries.sort(key=lambda entry: entry["relative"].lower())
+    return entries
+
 
 def generate_comicinfo_xml(metadata: Dict[str, Any]) -> str:
     """

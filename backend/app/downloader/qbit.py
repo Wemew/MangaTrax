@@ -68,9 +68,9 @@ class QBitClient:
             logger.error(f"Error connecting to qBittorrent at {login_url}: {e}")
             return False
 
-    def _ensure_auth(self) -> bool:
+    def _ensure_auth(self, timeout: float = 3.0) -> bool:
         if not self.authenticated:
-            return self.login()
+            return self.login(timeout=timeout)
         return True
 
     def test_connection(self, timeout: float = 3.0, force: bool = False, max_age: float = 8.0) -> Dict[str, Any]:
@@ -188,9 +188,13 @@ class QBitClient:
             logger.error(f"Error calling downloader add_torrent: {e}")
             return False
 
-    def get_torrents(self, category: str = "manga", filter_status: str = "all") -> List[Dict[str, Any]]:
-        """Retrieves list of active torrents."""
-        if not self.enabled or not self._ensure_auth():
+    def get_torrents(self, category: str = "manga", filter_status: str = "all", timeout: float = 10.0) -> List[Dict[str, Any]]:
+        """Retrieves list of active torrents.
+
+        ``timeout`` is explicit so latency-sensitive callers (the live status API
+        and page renders) can use a short deadline instead of the historical 10s.
+        """
+        if not self.enabled or not self._ensure_auth(timeout=min(timeout, 3.0)):
             return []
 
         params = {"filter": filter_status}
@@ -204,7 +208,7 @@ class QBitClient:
         )
 
         try:
-            with self.opener.open(req, timeout=10.0) as resp:
+            with self.opener.open(req, timeout=timeout) as resp:
                 if resp.status == 200:
                     data = resp.read().decode("utf-8", errors="replace")
                     return json.loads(data)

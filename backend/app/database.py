@@ -949,6 +949,51 @@ class MangaDatabase:
                     r["display_series_name"] = s_name
             return rows
 
+    def search_releases(self, query: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Literal (LIKE-escaped) search over release titles and series names.
+
+        Used by the unified search endpoint (M2 feature 17).  LIKE wildcards in the
+        user's query are escaped so ``%``/``_`` are matched literally (M3 feature
+        22); ordering prefers title matches, then series-name matches, then
+        anything else, newest first.
+        """
+        term = (query or "").strip()
+        if not term:
+            return []
+        contains = _like_contains(term)
+        prefix = f"{escape_like(term.lower())}%"
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT * FROM releases
+                WHERE lower(title) LIKE ? ESCAPE '\\'
+                   OR lower(COALESCE(series_name, '')) LIKE ? ESCAPE '\\'
+                ORDER BY
+                    CASE
+                        WHEN lower(title) LIKE ? ESCAPE '\\' THEN 0
+                        WHEN lower(COALESCE(series_name, '')) LIKE ? ESCAPE '\\' THEN 1
+                        ELSE 2
+                    END,
+                    updated_at DESC,
+                    id DESC
+                LIMIT ?;
+            """, (contains, contains, prefix, prefix, int(limit)))
+            rows = [dict(r) for r in cur.fetchall()]
+
+            cur.execute("SELECT * FROM manga_metadata_cache;")
+            meta_cache = {row["search_term"].lower(): dict(row) for row in cur.fetchall()}
+
+        from app.parser import is_complete_series_release
+
+        for row in rows:
+            row["volumes"] = json.loads(row.get("volumes_json") or "[]")
+            row["missing_volumes"] = json.loads(row.get("missing_vols_json") or "[]")
+            row["is_complete"] = bool(row.get("is_complete", 0) or is_complete_series_release(row.get("title", "")))
+            stable = (row.get("series_name") or "").strip()
+            meta = meta_cache.get(stable.lower()) if stable else None
+            row["display_series_name"] = (display_title_from_meta(stable, meta) or stable) if stable else ""
+        return rows
+
     def get_pending_requests(self, limit: int = 1000) -> List[Dict[str, Any]]:
         return self.get_releases(status="REQUESTED", limit=limit)
 

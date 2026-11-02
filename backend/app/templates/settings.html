@@ -130,6 +130,14 @@
                         <p class="text-[11px] text-slate-400">Automatically inject ComicInfo.xml metadata into completed files in staging.</p>
                     </div>
                 </div>
+
+                <div class="flex items-start gap-2.5">
+                    <input type="checkbox" id="setting-discard-unmarked-chapters" {% if settings.discard_unmarked_chapters != 'false' %}checked{% endif %} class="mt-0.5 rounded border-slate-700 bg-slate-900 text-brand-500 focus:ring-0">
+                    <div>
+                        <label for="setting-discard-unmarked-chapters" class="text-xs font-semibold text-white">Discard Marker-less Chapter Releases</label>
+                        <p class="text-[11px] text-slate-400">Skip "Series 180"-style chapter releases that carry no volume marker, when the title without the number names a tracked series. Default: on.</p>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -453,6 +461,7 @@ async function saveSettings(e) {
         staging_dir: document.getElementById('setting-staging-dir').value.trim(),
         auto_download: document.getElementById('setting-auto-download').checked ? 'true' : 'false',
         auto_tag: document.getElementById('setting-auto-tag').checked ? 'true' : 'false',
+        discard_unmarked_chapters: document.getElementById('setting-discard-unmarked-chapters').checked ? 'true' : 'false',
         calibre_sync_interval_minutes: document.getElementById('setting-calibre-interval').value,
         feed_check_interval_minutes: document.getElementById('setting-feed-interval').value,
         backfill_max_pages: document.getElementById('setting-backfill-pages').value,
