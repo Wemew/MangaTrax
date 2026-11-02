@@ -176,6 +176,8 @@ class RSSFeedProvider(BaseFeedProvider):
                 download_url=download_url,
                 series_name=parsed["series_name"],
                 release_group=parsed.get("release_group"),
+                    revision=parsed.get("revision"),
+                    publisher=parsed.get("publisher"),
                 is_bundle=parsed["is_bundle"],
                 volume_start=parsed["volume_start"],
                 volume_end=parsed["volume_end"],

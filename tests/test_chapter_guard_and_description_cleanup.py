@@ -215,10 +215,15 @@ def test_parser_is_chapter_only_is_left_context_free():
     assert is_chapter_only("Chainsaw Man v180") is False
     assert is_chapter_only("Chainsaw Man (complete)") is False
 
-    # The defect path: "Chainsaw Man 180" parses as a volume-less release whose
-    # series name is the whole title -- exactly the junk row the guard removes.
+    # The defect path: "Chainsaw Man 180" parses as a volume-less chapter release.
+    # The chapter number is exposed as data and stripped from the series key (so
+    # chapters group under the series); the scheduler's context guard then decides
+    # whether to discard it.
     parsed = extract_manga_bundle_and_volumes("Chainsaw Man 180")
-    assert parsed["series_name"] == "Chainsaw Man 180", parsed
+    assert parsed["series_name"] == "Chainsaw Man", parsed
+    assert parsed["numbered_series_name"] == "Chainsaw Man 180", parsed
+    assert parsed["is_chapter"] is True, parsed
+    assert parsed["chapter_number"] == 180.0, parsed
     assert parsed["volumes"] == [], parsed
     assert parsed["volume_start"] is None, parsed
     print("    [PASSED] parser classification unchanged; bare-number titles stay unclassified there.")
@@ -310,13 +315,18 @@ def test_bare_number_title_not_discarded_without_library_context():
     ctx = _IngestContext({})
     try:
         # Nothing known: the guard cannot prove "Chainsaw Man 180" is a chapter, so
-        # it must fall through to the previous behaviour (junk release is ingested).
-        result = ctx.poll(_release("Chainsaw Man 180", "guard-3001"))
-        assert result["releases_found"] == 1, result
+        # the release is retained -- and (task-9 third item) it is grouped under the
+        # clean series key "Chainsaw Man", not one bogus series per chapter.
+        result = ctx.poll(
+            _release("Chainsaw Man 180", "guard-3001"),
+            _release("Chainsaw Man 181", "guard-3002"),
+        )
+        assert result["releases_found"] == 2, result
         stored = ctx.releases()
-        assert len(stored) == 1 and stored[0]["series_name"] == "Chainsaw Man 180", stored
+        assert len(stored) == 2, stored
+        assert {row["series_name"] for row in stored} == {"Chainsaw Man"}, stored
         assert ctx.discards() == [], ctx.discards()
-        print("    [PASSED] no known series -> no discard (guard never guesses).")
+        print("    [PASSED] no known series -> no discard, grouped under the clean key.")
     finally:
         ctx.close()
 

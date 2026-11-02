@@ -226,6 +226,8 @@ class NyaaMangaProvider(BaseFeedProvider):
                     download_url=download_url,
                     series_name=parsed["series_name"],
                     release_group=parsed.get("release_group"),
+                    revision=parsed.get("revision"),
+                    publisher=parsed.get("publisher"),
                     is_bundle=parsed["is_bundle"],
                     is_complete=parsed.get("is_complete", False),
                     volume_start=parsed["volume_start"],

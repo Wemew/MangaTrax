@@ -173,9 +173,29 @@ _EXPLICIT_CHAPTER_NUMBER_RE = re.compile(
     r"|\bc(\d{1,4}(?:\.\d+)?)\b"
     r"|#\s*(\d{1,4}(?:\.\d+)?))"
 )
+# Re-release / fix revision marker: "(f)" = 1, "(f2)" = second, "(f10)" = tenth.
+# Case-insensitive; bracket style accepted both ways.  It is metadata, never a
+# series/volume/group signal.
+_REVISION_RE = re.compile(r"[\(\[]\s*f\s*(\d{0,3})\s*[\)\]]", re.IGNORECASE)
 # A title ending in a bare number: "... 250", "... - 250", "[250]".
 _TRAILING_BARE_NUMBER_RE = re.compile(
     r"(?i)(?:[\s\-–—:(\[])(\d{1,4}(?:\.\d+)?)\s*[\]\)]?\s*$"
+)
+# A title ending in a bare chapter RANGE: "... 001-009", "... - 01-02".
+_TRAILING_CHAPTER_RANGE_RE = re.compile(
+    r"^(?P<series>.+?)[\s\-–—:|]+(?P<start>\d{1,4}(?:\.\d+)?)\s*[-–—~]\s*(?P<end>\d{1,4}(?:\.\d+)?)$"
+)
+# Composite "+ tail" segments (after a parsed volume range):
+#   explicit volume continuation: "+ v10-12", "+ Vol 10", ", v11"
+_VOLUME_TAIL_SEGMENT_RE = re.compile(
+    r"(?:^|[+&,])\s*(?:\b(?:volumes?|vols?|books?|v)\.?)\s*(\d{1,3}(?:\.\d+)?)"
+    r"(?:\s*[-–—~]\s*(?:\b(?:volumes?|vols?|books?|v)\.?\s*)?(\d{1,3}(?:\.\d+)?))?",
+    re.IGNORECASE,
+)
+#   bare/zero-padded numeric continuation: "+ 047-051" -> chapter data only
+_BARE_TAIL_RANGE_RE = re.compile(
+    r"(?:^|[+&,])\s*(\d{1,4}(?:\.\d+)?)\s*[-–—~]\s*(\d{1,4}(?:\.\d+)?)\b",
+    re.IGNORECASE,
 )
 # A volume keyword anywhere in a title legitimises the number that follows it.
 _VOLUME_KEYWORD_RE = re.compile(
@@ -190,8 +210,13 @@ def _looks_like_chapter_title(raw_title: str) -> bool:
 
     * the existing title-only chapter classifier fires (explicit Chapter/Ch./c/#/
       zero-padded/bracket-number/chapter-range markers); or
-    * the title ends in a bare SINGLE number with no volume keyword anywhere (spec
-      Pattern 2, e.g. "Dandadan 250"), and that number is not an edition year.
+    * the CLEANED title ends in a bare SINGLE number with no volume keyword
+      anywhere (spec Pattern 2, e.g. "Dandadan 250"), and that number is not an
+      edition year.
+
+    The trailing test runs on ``clean_manga_title()`` output, not the raw title:
+    virtually every real release ends in metadata ("Dandadan 250 (Digital)
+    (1r0n)"), which would otherwise defeat the check.
 
     MangaTrax's discard policy is unchanged: the scheduler's context-guarded
     chapter discard still decides whether a bare-number release is dropped (only
@@ -206,11 +231,14 @@ def _looks_like_chapter_title(raw_title: str) -> bool:
         return False
     if _VOLUME_KEYWORD_RE.search(raw_title):
         return False
+    cleaned = clean_manga_title(raw_title)
+    if _VOLUME_KEYWORD_RE.search(cleaned):
+        return False
     # A bare numeric range that passes the bundle guards is a volume bundle, and a
     # volume bundle is never a chapter (spec §5 Pattern 1b).
-    if _parse_bare_volume_range(clean_manga_title(raw_title)):
+    if _parse_bare_volume_range(cleaned):
         return False
-    m = _TRAILING_BARE_NUMBER_RE.search(raw_title.strip())
+    m = _TRAILING_BARE_NUMBER_RE.search(cleaned.strip())
     if not m:
         return False
     try:
@@ -236,6 +264,48 @@ def _expand_volume_span(start: float, end: float) -> List[float]:
     if steps <= 0:
         return [start]
     return [start + i for i in range(steps + 1)]
+
+
+def _parse_composite_tail(tail: str) -> Tuple[List[float], List[List[float]]]:
+    """Parse the ``+ ...`` continuation of a volume-range release.
+
+    * an EXACT volume continuation ("... v01-09 + v10-12", "+ Vol 10", ", v11")
+      extends the volume set -- the release really does continue past volume 9;
+    * a bare/zero-padded numeric range ("... + 047-051") is CHAPTER data only and
+      must never become volumes (same rule as a bare numeric range on its own).
+
+    Returns ``(volumes, chapter_ranges)``.
+    """
+    if not tail:
+        return [], []
+    volumes: List[float] = []
+    chapter_ranges: List[List[float]] = []
+    for match in _VOLUME_TAIL_SEGMENT_RE.finditer(tail):
+        try:
+            start = float(match.group(1))
+            end = float(match.group(2)) if match.group(2) else start
+        except (TypeError, ValueError):
+            continue
+        if start > end:
+            start, end = end, start
+        if not (0 < start <= 300) or not (0 < end <= 300) or (end - start) > 100:
+            continue
+        for volume in _expand_volume_span(start, end):
+            if volume not in volumes:
+                volumes.append(volume)
+    for match in _BARE_TAIL_RANGE_RE.finditer(tail):
+        try:
+            start = float(match.group(1))
+            end = float(match.group(2))
+        except (TypeError, ValueError):
+            continue
+        if start > end:
+            start, end = end, start
+        # An edition-year range ("(2023-2026)") is not chapter data.
+        if 1900 <= start <= 2099 and 1900 <= end <= 2099:
+            continue
+        chapter_ranges.append([start, end])
+    return volumes, chapter_ranges
 
 
 def _parse_bare_volume_range(title: str) -> Optional[Dict[str, Any]]:
@@ -342,6 +412,50 @@ def _chapter_number_from_title(raw_title: str) -> Optional[float]:
     return None
 
 
+def extract_revision(raw_title: str) -> Optional[int]:
+    """Return the re-release/fix revision encoded in the title, or ``None``.
+
+    ``(f)`` is the first re-release of a collection (revision 1), ``(f2)`` the
+    second (2), ``(f10)`` the tenth.  Case-insensitive, ``[f2]`` accepted too.
+    A revision is metadata: it never influences series, volume or group parsing.
+    """
+    if not raw_title:
+        return None
+    m = _REVISION_RE.search(raw_title)
+    if not m:
+        return None
+    digits = (m.group(1) or "").strip()
+    if not digits:
+        return 1
+    try:
+        value = int(digits)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _is_known_publisher(name: str) -> bool:
+    return bool(name) and name.strip().lower() in KNOWN_PUBLISHERS
+
+
+def extract_publisher(raw_title: str) -> Optional[str]:
+    """Return the publisher named in a bracket/paren block, or ``None``.
+
+    Publishers are not scanlation groups: they are recognised separately from the
+    known-publisher list (``[Square Enix]``, ``(Yen Press)``, ...) and normalised
+    by bracket style (either ``[]`` or ``()`` works; the bracket text is
+    returned).  A publisher is a quality signal (official release), so it is
+    surfaced on the parse result / release row rather than used for filtering.
+    """
+    if not raw_title:
+        return None
+    for candidate in re.findall(r"[\(\[]([^\)\]]+)[\)\]]", raw_title):
+        candidate = candidate.strip()
+        if candidate and candidate.lower() in KNOWN_PUBLISHERS:
+            return candidate
+    return None
+
+
 def _volume_result(
     base: Dict[str, Any],
     series_name: str,
@@ -364,9 +478,69 @@ def _volume_result(
     })
     return out
 
+
+def _apply_chapter_series_strip(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Move a bare chapter number out of ``series_name`` into the chapter data.
+
+    A chapter-only release parses as "<Series> <chapter>" (or "<Series> - <chapter>").
+    Keeping the number in the series key pollutes the series identity: every
+    chapter of an untracked series would become its own series ("Dandadan 250",
+    "Dandadan 251", ...).  The explicit-marker path already returns the clean
+    series ("Dandadan" + chapter 250), so the bare-number path is aligned here.
+
+    ``numbered_series_name`` preserves the pre-strip title: the scheduler uses it
+    to protect real numbered series names ("Mob Psycho 100") from being split.
+    Volumes/bundles are never stripped.
+    """
+    if not result.get("is_chapter"):
+        return result
+    if result.get("volumes") or result.get("is_bundle"):
+        return result
+    cleaned = (result.get("series_name") or "").strip()
+    if not cleaned:
+        return result
+    # A trailing chapter RANGE ("Series 001-009") keeps the whole range as chapter
+    # data and strips it as one unit, so the series key is not mangled into
+    # "Series 001".
+    range_match = _TRAILING_CHAPTER_RANGE_RE.match(cleaned)
+    if range_match:
+        stripped = range_match.group("series").strip(" -–—:,|.")
+        if not stripped:
+            return result
+        result["numbered_series_name"] = cleaned
+        result["series_name"] = stripped
+        try:
+            start = float(range_match.group("start"))
+            end = float(range_match.group("end"))
+        except (TypeError, ValueError):
+            return result
+        chapter_range = [min(start, end), max(start, end)]
+        if chapter_range not in result.get("chapter_ranges", []):
+            result["chapter_ranges"] = list(result.get("chapter_ranges") or []) + [chapter_range]
+            result["chapter_start"] = min(r[0] for r in result["chapter_ranges"])
+            result["chapter_end"] = max(r[1] for r in result["chapter_ranges"])
+        return result
+    match = _TRAILING_BARE_NUMBER_RE.search(cleaned)
+    if not match:
+        return result
+    stripped = cleaned[: match.start()].strip(" -–—:,|.")
+    if not stripped:
+        return result
+    result["numbered_series_name"] = cleaned
+    result["series_name"] = stripped
+    if result.get("chapter_number") is None:
+        try:
+            result["chapter_number"] = float(match.group(1))
+        except (TypeError, ValueError):
+            pass
+    return result
+
 def is_valid_group_candidate(clean: str) -> bool:
     clean = clean.strip()
     if not clean or len(clean) < 2 or len(clean) > 40:
+        return False
+    # Re-release/fix revision markers ("f", "f2", "f10") are metadata, never groups.
+    if re.match(r"^f\s*\d{0,3}$", clean, re.IGNORECASE):
         return False
     # If it's a year or year range like 2020 or 2012-2018
     if re.match(r"^(?:19|20)\d{2}(?:\s*[-–—~to/]\s*(?:19|20)\d{2})?$", clean):
@@ -409,33 +583,37 @@ def extract_release_group(raw_title: str, known_groups: Optional[Iterable[str]] 
             all_candidates.append(cand)
 
     if all_candidates:
-        # Match against known groups first
-        for cand in all_candidates:
+        # A publisher is NEVER a release group, on every path: drop publisher
+        # candidates before matching, so "(Square Enix)" alone yields None instead
+        # of being accepted just because no real group is present.
+        group_candidates = [c for c in all_candidates if not _is_known_publisher(c)]
+
+        # Match known groups first (publishers already excluded).
+        for cand in group_candidates:
             for kg in groups_to_check:
-                if cand.lower() == kg.lower():
+                if cand.lower() == kg.lower() and not _is_known_publisher(kg):
                     return cand
 
-        # Separate into non-publishers vs publishers
-        non_publishers = [c for c in all_candidates if c.lower() not in KNOWN_PUBLISHERS]
-        publishers = [c for c in all_candidates if c.lower() in KNOWN_PUBLISHERS]
-
-        if non_publishers:
-            if len(non_publishers) > 1 and all_candidates[0].lower() in KNOWN_PUBLISHERS:
-                return non_publishers[-1]
-            return non_publishers[0]
-        if publishers:
-            return publishers[0]
+        # Non-publisher candidates only; if the brackets held only publishers the
+        # remaining paths (scene-style, known-group substring) may still find a
+        # real group, and otherwise the answer is "no group".
+        if group_candidates:
+            if len(group_candidates) > 1 and all_candidates[0].lower() in KNOWN_PUBLISHERS:
+                return group_candidates[-1]
+            return group_candidates[0]
 
     # 2. Scene release group pattern: -GROUP before trailing brackets or end of string
     # e.g., Manga.Million.SiteRip.1600p.AVIF.2026-TenmaLand (Multi)
     m_scene = re.search(r'[-–—]([A-Za-z0-9_]{2,30})(?:\s*[\(\[]|\s*$)', raw_title)
     if m_scene:
         cand = m_scene.group(1).strip()
-        if is_valid_group_candidate(cand) and cand.lower() not in KNOWN_PUBLISHERS:
+        if is_valid_group_candidate(cand) and not _is_known_publisher(cand):
             return cand
 
-    # 3. Known groups substring search
+    # 3. Known groups substring search (publishers are not groups)
     for kg in groups_to_check:
+        if _is_known_publisher(kg):
+            continue
         escaped = re.escape(kg)
         if re.search(r'(?:^|[\s_.\-\(\[])' + escaped + r'(?:$|[\s_.\-\)\]])', raw_title, re.IGNORECASE):
             return kg
@@ -718,11 +896,17 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
         cleaned = re.sub(r'(?i)(?:[-–—]\s*)?' + re.escape(release_group) + r'\b', ' ', cleaned)
         cleaned = " ".join(cleaned.split()).strip(" -–—:,|.")
 
+    revision = extract_revision(raw_title)
     result = {
         "raw_title": raw_title,
         "clean_title": cleaned,
         "series_name": cleaned,
         "release_group": release_group,
+        # Publisher is a quality signal (official release), surfaced not filtered.
+        "publisher": extract_publisher(raw_title),
+        # "(f)" / "(f2)" re-release/fix markers: metadata only, never pollution.
+        "revision": revision,
+        "is_rerelease": revision is not None,
         "is_light_novel": is_light_novel(raw_title),
         "is_bundle": is_comp,
         "is_complete": is_comp,
@@ -737,6 +921,9 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
         "chapter_ranges": [],
         "chapter_start": None,
         "chapter_end": None,
+        # Pre-strip title for bare-number chapters (e.g. "Mob Psycho 100"); the
+        # scheduler uses it to keep a real numbered series name from being split.
+        "numbered_series_name": "",
     }
     if chapter_meta:
         result["chapter_ranges"] = [list(r) for r in chapter_meta["chapter_ranges"]]
@@ -745,7 +932,7 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
     else:
         result["chapter_number"] = _chapter_number_from_title(raw_title)
         if result["chapter_number"] is None and result["is_chapter"]:
-            trailing = _TRAILING_BARE_NUMBER_RE.search((raw_title or "").strip())
+            trailing = _TRAILING_BARE_NUMBER_RE.search(cleaned.strip())
             if trailing:
                 try:
                     result["chapter_number"] = float(trailing.group(1))
@@ -768,7 +955,7 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
         )
 
     if not cleaned or is_chapter_only(raw_title):
-        return result
+        return _apply_chapter_series_strip(result)
 
     # Pattern 1: Multi-volume bundle range (plural-aware: Vol/Vols/Volume/Volumes/Book):
     bundle_pattern = re.compile(
@@ -776,7 +963,7 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
         r"(?:\b(?:volumes?|vols?|books?|book)\b\.?|\bv\.?)\s*(?P<start>\d+(?:\.\d+)?)"
         r"\s*[-–—~to]+\s*"
         r"(?:(?:volumes?|vols?|books?|book)\b\.?|\bv\.?)?\s*(?P<end>\d+(?:\.\d+)?)"
-        r"(?:\s*(?:[:\-–—]|\b).*)?$",
+        r"(?:\s*(?:[:\-–—]|\b)(?P<tail>.*))?$",
         re.IGNORECASE
     )
     m_bundle = bundle_pattern.match(cleaned)
@@ -800,10 +987,26 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
                 vols.append(float(curr))
                 curr += 1
 
-            return _volume_result(
+            # Composite tail: an explicit volume continuation extends the volumes;
+            # a bare numeric range is chapter data only.
+            extra_volumes, tail_chapters = _parse_composite_tail(m_bundle.group("tail") or "")
+            if extra_volumes:
+                vols = sorted(set(vols) | set(extra_volumes))
+                end_vol = max(end_vol, max(extra_volumes))
+
+            out = _volume_result(
                 result, series, is_bundle=True, volume_start=start_vol,
                 volume_end=end_vol, volumes=vols, confidence=0.95,
             )
+            if tail_chapters:
+                ranges = list(out.get("chapter_ranges") or [])
+                for chapter_range in tail_chapters:
+                    if chapter_range not in ranges:
+                        ranges.append(chapter_range)
+                out["chapter_ranges"] = ranges
+                out["chapter_start"] = min(r[0] for r in ranges)
+                out["chapter_end"] = max(r[1] for r in ranges)
+            return out
         except ValueError:
             pass
 
@@ -861,7 +1064,10 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
             confidence=0.85,
         )
 
-    return result
+    # Bare-number chapter ("Dandadan 250", "Dandadan 250 (Digital) (1r0n)"): align
+    # with the explicit-marker path by moving the chapter number out of the series
+    # key and into the chapter data, so chapters group under the series.
+    return _apply_chapter_series_strip(result)
 
 def match_manga_series_in_calibre(extracted_series: str, calibre_series_list: list, threshold: float = 0.80) -> Optional[dict]:
     """

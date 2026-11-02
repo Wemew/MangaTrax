@@ -329,6 +329,8 @@ class MangaDatabase:
                     download_status TEXT DEFAULT 'IDLE',
                     torrent_hash TEXT,
                     media_type TEXT DEFAULT 'unknown',
+                    revision INTEGER,
+                    publisher TEXT DEFAULT '',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
@@ -350,6 +352,12 @@ class MangaDatabase:
             # out and 'unknown' deliberately stays visible (inconclusive means kept).
             if "media_type" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN media_type TEXT DEFAULT 'unknown';")
+            # Re-release/fix revision ("(f)" = 1, "(f2)" = 2) and the publisher of an
+            # official release (a quality signal, surfaced not filtered).
+            if "revision" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN revision INTEGER;")
+            if "publisher" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN publisher TEXT DEFAULT '';")
 
             # Backfill is_complete for existing releases matching complete indicators (local SQL/regex only, NO network calls)
             try:
@@ -897,6 +905,12 @@ class MangaDatabase:
         missing_json = json.dumps(rel.get("missing_volumes") or [])
         from app.parser import is_complete_series_release
         is_comp_val = 1 if (rel.get("is_complete") or is_complete_series_release(rel.get("title", ""))) else 0
+        revision = rel.get("revision")
+        try:
+            revision = int(revision) if revision not in (None, "") else None
+        except (TypeError, ValueError):
+            revision = None
+        publisher = (rel.get("publisher") or "").strip()
 
         with self.get_connection() as conn:
             cur = conn.cursor()
@@ -926,6 +940,8 @@ class MangaDatabase:
                         download_url = ?,
                         link = ?,
                         cover_url = ?,
+                        revision = CASE WHEN COALESCE(?, 0) > COALESCE(revision, 0) THEN ? ELSE revision END,
+                        publisher = CASE WHEN ? != '' THEN ? ELSE publisher END,
                         status = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?;
@@ -948,6 +964,10 @@ class MangaDatabase:
                     rel.get("download_url"),
                     rel.get("link"),
                     rel.get("cover_url"),
+                    revision,
+                    revision,
+                    publisher,
+                    publisher,
                     resolved_status,
                     rel_id
                 ))
@@ -959,8 +979,9 @@ class MangaDatabase:
                     INSERT INTO releases (
                         guid, title, series_name, release_group, description, mangaupdates_url,
                         is_bundle, is_complete, volume_start, volume_end, volumes_json, missing_vols_json,
-                        download_url, link, cover_url, source_feed_name, status, download_status, torrent_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        download_url, link, cover_url, source_feed_name, status, download_status, torrent_hash,
+                        revision, publisher
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     guid,
                     rel["title"],
@@ -980,7 +1001,9 @@ class MangaDatabase:
                     rel.get("source_feed_name"),
                     resolve_status(None, rel.get("status")) or "REQUESTED",
                     rel.get("download_status", "IDLE"),
-                    rel.get("torrent_hash")
+                    rel.get("torrent_hash"),
+                    revision,
+                    publisher,
                 ))
                 rel_id = cur.lastrowid
                 conn.commit()
@@ -1094,6 +1117,7 @@ class MangaDatabase:
                 r["is_complete"] = bool(r.get("is_complete", 0) or is_complete_series_release(r.get("title", "")))
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
                 r["missing_volumes"] = json.loads(r["missing_vols_json"] or "[]")
+                r["is_rerelease"] = bool(r.get("revision"))
                 r_group = (r.get("release_group") or "").strip().lower()
                 r["is_prioritized"] = r_group in p_groups if r_group else False
 
@@ -2316,8 +2340,18 @@ class MangaDatabase:
                                 except Exception:
                                     pass
 
-                # Deduplicate releases in group: same guid or (download_url, volume set, group)
-                sig = rel.get("guid") or (rel.get("download_url") or rel.get("link") or rel.get("title"), tuple(sorted(rel.get("volumes", []))), (rel.get("release_group") or "").lower())
+                # Deduplicate releases in group: same guid or (download_url, volume set,
+                # group).  The re-release revision is part of the identity so a "(f2)"
+                # fix is never silently collapsed into the original; the supersede
+                # pass below keeps the higher revision visible where they do coincide.
+                sig = rel.get("guid") or (
+                    rel.get("download_url") or rel.get("link") or rel.get("title"),
+                    tuple(sorted(rel.get("volumes", []))),
+                    (rel.get("release_group") or "").lower(),
+                    rel.get("revision") or 0,
+                )
+                rel["is_superseded"] = False
+                rel["is_rerelease"] = bool(rel.get("revision"))
                 if sig not in group["seen_release_sigs"]:
                     group["seen_release_sigs"].add(sig)
                     group["releases"].append(rel)
@@ -2342,6 +2376,28 @@ class MangaDatabase:
 
             result_groups = []
             for group in groups_dict.values():
+                # Re-release supersede: releases sharing series+volumes+group are the
+                # same collection at different revisions ("(f)", "(f2)", ...).  The
+                # highest revision wins and older revisions are flagged -- never
+                # deleted, never status-rewritten.
+                by_identity: Dict[Any, List[Dict[str, Any]]] = {}
+                for rel_row in group["releases"]:
+                    identity = (
+                        tuple(sorted(rel_row.get("volumes") or [])),
+                        (rel_row.get("release_group") or "").lower(),
+                    )
+                    by_identity.setdefault(identity, []).append(rel_row)
+                for candidates in by_identity.values():
+                    if len(candidates) < 2:
+                        continue
+                    highest_revision = max((c.get("revision") or 0) for c in candidates)
+                    if highest_revision <= 0:
+                        continue
+                    for cand in candidates:
+                        cand["is_superseded"] = (cand.get("revision") or 0) < highest_revision
+                group["releases"].sort(
+                    key=lambda r: (bool(r.get("is_superseded")), -(r.get("revision") or 0))
+                )
                 group["all_volumes"] = sorted(list(group["all_volumes_set"]))
                 group["missing_volumes"] = sorted(list(group["missing_volumes_set"]))
                 group["releases_count"] = len(group["releases"])

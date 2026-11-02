@@ -101,6 +101,16 @@
                             </button>
                             {% endif %}
                             {% endif %}
+                            {% if item.publisher %}
+                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-violet-500/20 border border-violet-500/40 text-violet-300 text-[10px] font-bold shrink-0" title="Official publisher (quality signal): {{ item.publisher }}">
+                                <i data-lucide="badge-check" class="w-2.5 h-2.5"></i> {{ item.publisher }}
+                            </span>
+                            {% endif %}
+                            {% if item.revision %}
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-md bg-sky-500/20 border border-sky-500/40 text-sky-300 text-[10px] font-bold shrink-0" title="Re-release / fix revision f{{ item.revision }} (supersedes earlier revisions)">
+                                f{{ item.revision }}
+                            </span>
+                            {% endif %}
                             <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold shrink-0 {% if item.is_complete %}bg-teal-500/15 text-teal-300 border border-teal-500/30{% elif item.volume_start == 1.0 %}bg-brand-500/15 text-brand-300 border border-brand-500/30{% else %}bg-slate-800 text-slate-300 border border-slate-700{% endif %}">
                                 {% if item.is_complete %}Complete ({{ item.volumes|length }} vols){% elif item.is_bundle and item.volume_start is not none and item.volume_end is not none %}Vol. {{ item.volume_start|int }}-{{ item.volume_end|int }}{% elif item.volume_start is not none %}Vol. {{ item.volume_start|int }}{% else %}Standalone{% endif %}
                             </span>

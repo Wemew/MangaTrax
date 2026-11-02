@@ -39,7 +39,9 @@ for _path in (BACKEND_DIR, BASE_DIR):
 from app.parser import (
     clean_manga_title,
     extract_manga_bundle_and_volumes,
+    extract_publisher,
     extract_release_group,
+    extract_revision,
     is_chapter_only,
     is_light_novel,
     is_valid_group_candidate,
@@ -101,12 +103,14 @@ SPEC_VECTORS = [
      "Skeleton Knight in Another World", [float(v) for v in range(1, 10)], True, False),
     ("The Apothecary Diaries v01-02 [Audiobook] [Tantor Media]",
      "The Apothecary Diaries", [1.0, 2.0], True, False),
-    # A bare single number is chapter data (MangaTrax keeps it in the series name so
-    # the scheduler's context guard can see it; the spec's parser strips it).
-    ("Dandadan 250", "Dandadan 250", [], False, True),
-    ("One Piece 1197", "One Piece 1197", [], False, True),
-    ("Kaguya-sama 271", "Kaguya-sama 271", [], False, True),
-    ("Dandadan - 251", "Dandadan - 251", [], False, True),
+    # A bare single number is chapter data: the parser strips the chapter number
+    # out of the series key (same contract as the explicit-marker path) so chapters
+    # group under the series; `numbered_series_name` keeps the full title for the
+    # scheduler's "numbered series name is itself known" protection.
+    ("Dandadan 250", "Dandadan", [], False, True),
+    ("One Piece 1197", "One Piece", [], False, True),
+    ("Kaguya-sama 271", "Kaguya-sama", [], False, True),
+    ("Dandadan - 251", "Dandadan", [], False, True),
     ("Solo Leveling Ch. 179", "Solo Leveling", [], False, True),
     ("Berserk c374", "Berserk", [], False, True),
     ("DanMachi Vols 01-18", "DanMachi", [float(v) for v in range(1, 19)], True, False),
@@ -303,7 +307,12 @@ def test_chapter_range_as_volume_mapping():
     assert no_chapter_range["chapter_ranges"] == [], "no chapter range -> not the idiom"
     assert no_chapter_range["is_chapter"] is False, no_chapter_range
     assert no_chapter_range["volumes"] == [1.0], no_chapter_range["volumes"]
-    assert _parsed("Some Series 001-009")["series_name"] == "Some Series 001-009"
+    # A bare chapter range with no volume mapping stays chapter data, and the range
+    # is stripped from the series key as one unit (no invented volumes).
+    unmapped_suffix = _parsed("Some Series 001-009")
+    assert unmapped_suffix["series_name"] == "Some Series", unmapped_suffix["series_name"]
+    assert unmapped_suffix["chapter_ranges"] == [[1.0, 9.0]], unmapped_suffix["chapter_ranges"]
+    assert unmapped_suffix["volumes"] == [], unmapped_suffix["volumes"]
     print("    [PASSED] chapter ranges map onto the volume range only when explicitly stated.")
 
 
@@ -464,41 +473,310 @@ def test_light_novel_paren_bracket_convention():
 
 
 # ===========================================================================
-# 12. The scheduler's context-guarded chapter discard is intact
+# 12. The scheduler's context-guarded discard + clean series keys
 # ===========================================================================
-def test_scheduler_chapter_guard_still_intact():
-    print("--> Testing scheduler context-guarded chapter discard is intact...")
+def test_scheduler_chapter_guard_and_series_keys():
+    print("--> Testing scheduler context-guarded discard with clean chapter series keys...")
+    from unittest.mock import MagicMock
+
     from app.covers import CoverCache
     from app.database import MangaDatabase
     from app.providers.base import ReleaseItem
     from app.scheduler import MangaScheduler
 
-    tmpdir = tempfile.mkdtemp(prefix="mangatrax_d3_sched_")
-    try:
+    def _make_scheduler(tmpdir):
         db = MangaDatabase(os.path.join(tmpdir, "db.sqlite"))
         scheduler = MangaScheduler(db, CoverCache(os.path.join(tmpdir, "covers")))
+        scheduler.anilist.resolve_manga_series = MagicMock(
+            side_effect=lambda raw: {"canonical_title": raw, "romaji_title": raw}
+        )
+        scheduler.mangaupdates.get_series_info = MagicMock(return_value=None)
+        scheduler.cover_cache.cache_sync = MagicMock()
+        return db, scheduler
+
+    def _process(db, scheduler, title):
+        parsed = _parsed(title)
+        release = ReleaseItem(
+            title=title,
+            link="https://nyaa.si/view/1",
+            series_name=parsed["series_name"],
+            volumes=parsed["volumes"],
+            volume_start=parsed["volume_start"],
+            volume_end=parsed["volume_end"],
+            is_bundle=parsed["is_bundle"],
+        )
+        _, matcher = scheduler._build_calibre_context()
+        return scheduler._process_release(release, "Nyaa", matcher)
+
+    base = tempfile.mkdtemp(prefix="mangatrax_d3_sched_")
+    try:
+        # --- Known base series: every bare-number chapter variant is discarded ---
+        db, scheduler = _make_scheduler(os.path.join(base, "known"))
         assert scheduler._discard_unmarked_chapters_enabled() is True
-        assert db.track_discovered_series("Chainsaw Man") is True
-        known = scheduler._known_series_keys(None)
+        assert db.track_discovered_series("Dandadan") is True
+        for title in [
+            "Dandadan 250",
+            "Dandadan 250 (Digital) (1r0n)",
+            "Dandadan 250 (2024-2026) (Digital) (Stick)",
+            "Dandadan 250.5",           # fractional chapter
+            "Dandadan Ch. 250",         # explicit-marker path (unchanged)
+        ]:
+            status = _process(db, scheduler, title)[1]
+            assert status == "CHAPTER_ONLY", (title, status)
+        discards = [row for row in db.get_logs(limit=200) if row["event_type"] == "CHAPTER_DISCARDED"]
+        assert discards, "chapter discards must stay auditable"
+        assert all(row["actor"] == "scheduler" for row in discards), discards
+        assert any("Dandadan" in row["details"] for row in discards), discards
+        # A volume release is never discarded.
+        assert _process(db, scheduler, "Dandadan Vol. 12")[1] != "CHAPTER_ONLY"
 
-        def _rel(title):
-            parsed = _parsed(title)
-            return ReleaseItem(
-                title=title,
-                link="https://nyaa.si/view/1",
-                series_name=parsed["series_name"],
-                volumes=parsed["volumes"],
-                volume_start=parsed["volume_start"],
-            )
+        # --- Numbered series name: protected, and kept as the matching key -------
+        db_mps, scheduler_mps = _make_scheduler(os.path.join(base, "mob"))
+        assert db_mps.track_discovered_series("Mob Psycho 100") is True
+        assert _process(db_mps, scheduler_mps, "Mob Psycho 100")[1] != "CHAPTER_ONLY"
+        stored = {row["series_name"] for row in db_mps.get_releases()}
+        assert stored == {"Mob Psycho 100"}, stored
 
-        # Known base series + bare trailing single number -> discarded as a chapter.
-        assert scheduler._unmarked_chapter_reason(_rel("Chainsaw Man 180"), known) != ""
-        # Numbered series name is never discarded (the P3b user-confirmed behaviour).
-        assert scheduler._unmarked_chapter_reason(_rel("Mob Psycho 100"), known) == ""
-        # A bare numeric range is now a volume bundle, so the chapter guard must not
-        # fire on it (the D3 port and the context guard compose).
-        assert scheduler._unmarked_chapter_reason(_rel("Chainsaw Man 1-4"), known) == ""
-        print("    [PASSED] context-guarded discard still only fires for marker-less chapters.")
+        # --- Unknown series: retained under the CLEAN series key ----------------
+        db_unknown, scheduler_unknown = _make_scheduler(os.path.join(base, "unknown"))
+        for title in ["Dandadan 250 (Digital) (1r0n)", "Dandadan 251"]:
+            assert _process(db_unknown, scheduler_unknown, title)[1] != "CHAPTER_ONLY"
+        rows = db_unknown.get_releases()
+        assert len(rows) == 2, rows
+        assert {row["series_name"] for row in rows} == {"Dandadan"}, rows
+        assert not [r for r in db_unknown.get_logs(limit=200) if r["event_type"] == "CHAPTER_DISCARDED"]
+        print("    [PASSED] chapters discard only when known; retained under the clean series key.")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+# ===========================================================================
+# 13. Chapter flag with trailing metadata + clean series key (Gap 1 & 2)
+# ===========================================================================
+def test_chapter_flag_with_trailing_metadata():
+    print("--> Testing chapter flag survives trailing metadata; clean series key...")
+    # The normal feed form: metadata follows the chapter number.
+    for title in [
+        "Dandadan 250",
+        "Dandadan 250 (Digital) (1r0n)",
+        "Dandadan 250 (2024-2026) (Digital) (Stick)",
+    ]:
+        parsed = _parsed(title)
+        assert parsed["is_chapter"] is True, (title, parsed["is_chapter"])
+        assert parsed["chapter_number"] == 250.0, (title, parsed["chapter_number"])
+        assert parsed["series_name"] == "Dandadan", (title, parsed["series_name"])
+        assert parsed["numbered_series_name"] == "Dandadan 250", parsed["numbered_series_name"]
+        assert parsed["volumes"] == [], parsed["volumes"]
+    fractional = _parsed("Dandadan 250.5")
+    assert fractional["is_chapter"] is True and fractional["chapter_number"] == 250.5
+    assert fractional["series_name"] == "Dandadan"
+    # Explicit-marker path is unchanged.
+    explicit = _parsed("Dandadan Ch. 250")
+    assert explicit["is_chapter"] is True and explicit["chapter_number"] == 250.0
+    assert explicit["series_name"] == "Dandadan"
+    # A trailing chapter RANGE is chapter data and is stripped as one unit.
+    ranged = _parsed("Series 001-009")
+    assert ranged["is_chapter"] is True
+    assert ranged["series_name"] == "Series", ranged["series_name"]
+    assert ranged["chapter_ranges"] == [[1.0, 9.0]], ranged["chapter_ranges"]
+    assert ranged["volumes"] == [], ranged["volumes"]
+    # Controls: numbered series name (protection lives in the scheduler) and volumes.
+    mob = _parsed("Mob Psycho 100")
+    assert mob["is_chapter"] is True and mob["chapter_number"] == 100.0
+    assert mob["series_name"] == "Mob Psycho" and mob["numbered_series_name"] == "Mob Psycho 100"
+    volume = _parsed("Dandadan Vol. 12")
+    assert volume["is_chapter"] is False and volume["volumes"] == [12.0]
+    assert volume["series_name"] == "Dandadan", volume["series_name"]
+    print("    [PASSED] 'Dandadan 250 (Digital) (1r0n)' flagged; series key cleaned.")
+
+
+# ===========================================================================
+# 14. Composite "+ tail": chapter data vs explicit volume continuation
+# ===========================================================================
+def test_composite_plus_tail():
+    print("--> Testing composite '+ tail' handling...")
+    full = (
+        "The Summer Hikaru Died v01-09 + 047-051 (2023-2026) "
+        "(Digital + Digital-Compilation) (1r0n, Rillant) [Completed]"
+    )
+    parsed = _parsed(full)
+    assert parsed["series_name"] == "The Summer Hikaru Died", parsed["series_name"]
+    assert parsed["volumes"] == [float(v) for v in range(1, 10)], parsed["volumes"]
+    assert parsed["is_bundle"] is True and parsed["is_complete"] is True
+    assert parsed["is_chapter"] is False and parsed["is_light_novel"] is False
+    # Gap A: the "+ 047-051" chapter tail is captured as chapter data, not volumes.
+    assert parsed["chapter_ranges"] == [[47.0, 51.0]], parsed["chapter_ranges"]
+    assert parsed["chapter_start"] == 47.0 and parsed["chapter_end"] == 51.0, parsed
+    # The format-tag-with-plus block is not a group; the real group wins.
+    assert parsed["release_group"] == "1r0n, Rillant", parsed["release_group"]
+    assert "Digital" not in (parsed["release_group"] or "")
+    assert "Digital-Compilation" not in (parsed["release_group"] or "")
+
+    # Gap B: an explicit volume tail continues the volume set.
+    continued = _parsed("The Summer Hikaru Died v01-09 + v10-12")
+    assert continued["volumes"] == [float(v) for v in range(1, 13)], continued["volumes"]
+    assert continued["volume_end"] == 12.0, continued
+    assert continued["is_bundle"] is True and continued["chapter_ranges"] == []
+    single_tail = _parsed("The Summer Hikaru Died v01-09 + Vol 10")
+    assert single_tail["volumes"] == [float(v) for v in range(1, 11)], single_tail["volumes"]
+
+    # Regression: a bare/unpadded "+ 47-51" tail must NOT become volumes.
+    bare_tail = _parsed("The Summer Hikaru Died v01-09 + 47-51")
+    assert bare_tail["volumes"] == [float(v) for v in range(1, 10)], bare_tail["volumes"]
+    assert bare_tail["chapter_ranges"] == [[47.0, 51.0]], bare_tail["chapter_ranges"]
+    # Regression: the plain range is unchanged.
+    plain = _parsed("The Summer Hikaru Died v01-09")
+    assert plain["volumes"] == [float(v) for v in range(1, 10)], plain["volumes"]
+    assert plain["chapter_ranges"] == [], plain["chapter_ranges"]
+
+    # [Completed] is metadata/status only: the explicit volume list stays
+    # authoritative, and a later complete-series expansion (task-10) only applies
+    # to releases with NO explicit volumes.
+    assert parsed["is_complete"] is True
+    assert parsed["volumes"] == [float(v) for v in range(1, 10)]
+    assert (parsed["is_complete"] and not parsed["volumes"]) is False
+    # A trailing explicit volume tail with metadata keeps parsing too.
+    with_meta = _parsed("The Summer Hikaru Died v01-09 + v10 (Digital) (Oak)")
+    assert with_meta["volumes"] == [float(v) for v in range(1, 11)], with_meta["volumes"]
+    assert with_meta["release_group"] == "Oak", with_meta["release_group"]
+    print("    [PASSED] chapter tails are data; explicit volume tails extend the set.")
+
+
+# ===========================================================================
+# 15. Re-release markers "(f)"/"(fN)" and publisher extraction
+# ===========================================================================
+HERO_TITLE = (
+    "The Hero and the Sage, Reincarnated and Engaged 001-039 as v01-08 "
+    "(Digital-Compilation) (Square Enix) (DigitalMangaFan)"
+)
+
+
+def test_revision_markers_and_publisher():
+    print("--> Testing '(f)'/'(fN)' re-release markers and publisher extraction...")
+    # The reported title: group is the real group, publisher surfaced, no revision.
+    parsed = _parsed(HERO_TITLE)
+    assert parsed["release_group"] == "DigitalMangaFan", parsed["release_group"]
+    assert parsed["publisher"] == "Square Enix", parsed["publisher"]
+    assert parsed["revision"] is None and parsed["is_rerelease"] is False, parsed
+    assert parsed["series_name"] == "The Hero and the Sage, Reincarnated and Engaged"
+    assert parsed["volumes"] == [float(v) for v in range(1, 9)], parsed["volumes"]
+    assert parsed["chapter_ranges"] == [[1.0, 39.0]], parsed["chapter_ranges"]
+    assert parsed["is_light_novel"] is False and parsed["is_chapter"] is False
+
+    # Revision markers: never a group, never affecting series/volumes/group.
+    revisions = {
+        HERO_TITLE + " (f)": 1,
+        HERO_TITLE + " (F)": 1,
+        HERO_TITLE + " (f2)": 2,
+        HERO_TITLE + " (f10)": 10,
+        HERO_TITLE.replace("(DigitalMangaFan)", "(DigitalMangaFan) (f2)"): 2,
+    }
+    for title, expected_revision in revisions.items():
+        variant = _parsed(title)
+        assert variant["revision"] == expected_revision, (title, variant["revision"])
+        assert variant["is_rerelease"] is True, title
+        assert variant["series_name"] == parsed["series_name"], title
+        assert variant["volumes"] == parsed["volumes"], title
+        assert variant["chapter_ranges"] == parsed["chapter_ranges"], title
+        assert variant["release_group"] == "DigitalMangaFan", (title, variant["release_group"])
+        assert variant["publisher"] == "Square Enix", (title, variant["publisher"])
+
+    # Revision alone (or first) never becomes the group.
+    assert extract_release_group("(f2)") is None
+    assert extract_release_group("(f10)") is None
+    assert extract_release_group("(f)") is None
+    assert extract_release_group("(f2) (DigitalMangaFan)") == "DigitalMangaFan"
+    assert extract_release_group("(DigitalMangaFan) (f2)") == "DigitalMangaFan"
+    assert is_valid_group_candidate("f2") is False and is_valid_group_candidate("f10") is False
+    # Revision parser edges.
+    assert extract_revision("(f)") == 1 and extract_revision("(F)") == 1
+    assert extract_revision("(f2)") == 2 and extract_revision("(f10)") == 10
+    assert extract_revision("[f3]") == 3
+    assert extract_revision("Hero Vol. 1") is None
+
+    # Publisher is never a group, even when it is the only bracket.
+    assert extract_release_group("(Square Enix)") is None
+    assert extract_release_group("[Square Enix]") is None
+    assert extract_release_group("[Yen Press] Overlord, Vol. 16 [Digital]") is None
+    assert extract_publisher("(Square Enix)") == "Square Enix"
+    assert extract_publisher("[Square Enix]") == "Square Enix"
+    assert extract_publisher("(Yen Press) Overlord Vol. 1") == "Yen Press"
+    assert extract_publisher("(DigitalMangaFan)") is None
+    assert _parsed("(Square Enix)")["release_group"] is None
+    assert _parsed("(Square Enix)")["publisher"] == "Square Enix"
+
+    # Existing real groups still resolve (no publisher-filter overreach).
+    assert extract_release_group("[danke-Empire] Bleach v01-v20 [Digital]") == "danke-Empire"
+    assert extract_release_group("[Lu自主规制] Chainsaw Man Vol. 01-11") == "Lu自主规制"
+    assert extract_release_group(
+        "Anemone wa Netsu o Obiru v01-03 (2025-2026) (Digital) (1r0n, Anon)"
+    ) == "1r0n, Anon"
+    assert extract_release_group("(DigitalMangaFan)") == "DigitalMangaFan"
+    print("    [PASSED] revisions parsed as data; publishers never masquerade as groups.")
+
+
+# ===========================================================================
+# 16. Publisher/revision persistence + re-release supersede
+# ===========================================================================
+def test_publisher_and_revision_persistence():
+    print("--> Testing publisher/revision persistence and '(f2)' supersede...")
+    from app.database import MangaDatabase
+    from app.notifier.webhook import NotificationService
+
+    tmpdir = tempfile.mkdtemp(prefix="mangatrax_d3_meta_")
+    try:
+        db = MangaDatabase(os.path.join(tmpdir, "db.sqlite"))
+        base = {
+            "series_name": "Hero",
+            "volumes": [1.0, 2.0],
+            "volume_start": 1.0,
+            "volume_end": 2.0,
+            "release_group": "DigitalMangaFan",
+            "publisher": "Square Enix",
+            "status": "REQUESTED",
+        }
+        _, original_id = db.upsert_release({**base, "guid": "rev-orig", "title": "Hero v01-02"})
+        _, fix_id = db.upsert_release({**base, "guid": "rev-f2", "title": "Hero v01-02 (f2)", "revision": 2})
+        original = db.get_release_by_id(original_id)
+        fix = db.get_release_by_id(fix_id)
+        assert original["revision"] is None and original["publisher"] == "Square Enix", original
+        assert fix["revision"] == 2 and fix["publisher"] == "Square Enix", fix
+        # A later re-poll cannot downgrade the stored revision.
+        db.upsert_release({**base, "guid": "rev-f2", "title": "Hero v01-02 (f2) re-poll", "revision": 2})
+        assert db.get_release_by_id(fix_id)["revision"] == 2
+        db.upsert_release({**base, "guid": "rev-f2", "title": "Hero v01-02 (f2)", "revision": None})
+        assert db.get_release_by_id(fix_id)["revision"] == 2
+
+        # Flat view exposes the new fields.
+        flat = {row["guid"]: row for row in db.get_releases()}
+        assert flat["rev-f2"]["revision"] == 2 and flat["rev-f2"]["is_rerelease"] is True
+        assert flat["rev-orig"]["is_rerelease"] is False
+        assert flat["rev-orig"]["publisher"] == "Square Enix"
+
+        # Grouped view: same series+volumes+group -> higher revision supersedes,
+        # original retained (never collapsed or deleted).
+        groups = db.get_releases_grouped_by_series()
+        releases = [r for g in groups for r in g["releases"]]
+        assert len(releases) == 2, releases
+        first = releases[0]
+        assert first["guid"] == "rev-f2" and not first["is_superseded"], first
+        superseded = [r for r in releases if r["guid"] == "rev-orig"][0]
+        assert superseded["is_superseded"] is True, superseded
+        assert db.get_release_by_id(original_id) is not None
+
+        # Webhook payload exposes publisher + revision.
+        captured = {}
+        notifier = NotificationService(discord_webhook="https://discord.example/webhook")
+        notifier._send_discord = lambda **kwargs: captured.update(kwargs)
+        notifier._send_generic = lambda payload: None
+        notifier.notify_new_request(
+            {**base, "revision": 2, "title": "Hero v01-02 (f2)", "link": "https://example.com"}
+        )
+        field_names = [field["name"] for field in captured.get("fields", [])]
+        assert "Publisher" in field_names and "Revision" in field_names, field_names
+        values = {field["name"]: field["value"] for field in captured["fields"]}
+        assert values["Publisher"] == "Square Enix" and values["Revision"] == "f2", values
+        print("    [PASSED] revision/publisher persisted and surfaced; f2 supersedes the original.")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -519,7 +797,11 @@ def main():
         test_calibre_bracket_delimiter_guard,
         test_chapter_diagnostics_exposed,
         test_light_novel_paren_bracket_convention,
-        test_scheduler_chapter_guard_still_intact,
+        test_scheduler_chapter_guard_and_series_keys,
+        test_chapter_flag_with_trailing_metadata,
+        test_composite_plus_tail,
+        test_revision_markers_and_publisher,
+        test_publisher_and_revision_persistence,
     ]
     failures = 0
     for test in tests:

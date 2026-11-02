@@ -21,6 +21,8 @@ class ReleaseItem:
         guid: Optional[str] = None,
         source_feed_name: Optional[str] = None,
         release_group: Optional[str] = None,
+        revision: Optional[int] = None,
+        publisher: Optional[str] = None,
         raw_data: Optional[Dict[str, Any]] = None
     ):
         self.title = title.strip()
@@ -28,6 +30,9 @@ class ReleaseItem:
         self.download_url = download_url.strip() if download_url else self.link
         self.series_name = series_name
         self.release_group = release_group
+        # "(f)"/"(f2)" re-release marker and the publisher (official-release signal).
+        self.revision = revision
+        self.publisher = publisher
         self.is_bundle = is_bundle
         self.is_complete = is_complete
         self.volume_start = volume_start
@@ -54,6 +59,8 @@ class ReleaseItem:
             "download_url": self.download_url,
             "series_name": self.series_name,
             "release_group": self.release_group,
+            "revision": self.revision,
+            "publisher": self.publisher,
             "is_bundle": self.is_bundle,
             "is_complete": self.is_complete,
             "volume_start": self.volume_start,

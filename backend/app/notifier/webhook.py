@@ -51,6 +51,8 @@ class NotificationService:
         cover = release.get("cover_url")
         feed = release.get("source_feed_name", "")
         group = release.get("release_group", "")
+        revision = release.get("revision")
+        publisher = (release.get("publisher") or "").strip()
 
         if is_bundle and v_start is not None and v_end is not None:
             vol_str = f"Bundle (Vol {int(v_start) if v_start == int(v_start) else v_start}-{int(v_end) if v_end == int(v_end) else v_end})"
@@ -65,6 +67,12 @@ class NotificationService:
         ]
         if group:
             fields.append({"name": "Group", "value": group, "inline": True})
+        if publisher:
+            # Publisher = official-release quality signal.
+            fields.append({"name": "Publisher", "value": publisher, "inline": True})
+        if revision:
+            # "(f)"/"(f2)" re-release or fix revision.
+            fields.append({"name": "Revision", "value": f"f{revision}", "inline": True})
         if feed:
             fields.append({"name": "Feed", "value": feed, "inline": True})
 
