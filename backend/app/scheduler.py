@@ -6,7 +6,12 @@ import json
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
-from app.database import MangaDatabase, resolve_status
+from app.database import (
+    MangaDatabase,
+    resolve_status,
+    display_title_from_meta,
+    is_authoritative_metadata,
+)
 from app.covers import CoverCache
 from app.calibre.scanner import CalibreMangaScanner
 from app.calibre.matcher import MangaCalibreMatcher
@@ -16,7 +21,7 @@ from app.providers.registry import create_provider
 from app.providers.nyaa import NyaaMangaProvider
 from app.metadata.anilist import AniListMetadataService
 from app.metadata.mangaupdates import MangaUpdatesService
-from app.parser import is_chapter_only, is_light_novel, is_complete_series_release
+from app.parser import is_chapter_only, is_light_novel, is_complete_series_release, normalize_text, match_manga_series_in_calibre
 from app.notifier.webhook import NotificationService
 
 logger = logging.getLogger("mangatrax.scheduler")
@@ -43,6 +48,215 @@ class MangaScheduler:
         action in the audit trail.
         """
         self.db.log_activity(event_type, message, details, actor="scheduler")
+
+    # --- Naming model: STABLE MATCHING KEY vs. DISPLAY TITLE ---
+    #
+    # The stable key (``series_tracking.name`` / ``releases.series_name``) is the
+    # Calibre library name when the series exists in Calibre, otherwise the user's
+    # typed name.  AniList metadata NEVER rewrites it.  The AniList canonical
+    # English title is only the cosmetic display title, resolved at render time
+    # (see database.display_title_from_meta) and cached for later display.
+    #
+    # Matching builds candidate identities in this priority order and uses the
+    # first hit:
+    #   (1) Calibre-tracked name           (direct Calibre library match)
+    #   (2) user-typed tracked name
+    #   (3) AniList canonical English      (as a lookup bridge only)
+    #   (4) AniList romaji                 (as a lookup bridge only)
+    # A Calibre hit always wins over an AniList-derived one, and the AniList
+    # titles are never persisted as the matching key.
+
+    @staticmethod
+    def _name_variants(raw_name: str) -> List[str]:
+        """Candidate spellings of a parsed series name (raw, delimiter parts, parens)."""
+        raw = (raw_name or "").strip()
+        variants: List[str] = []
+        seen = set()
+
+        def _add(value: str):
+            value = (value or "").strip(" -–—:,|./")
+            if not value:
+                return
+            norm = normalize_text(value)
+            if not norm or norm in seen:
+                return
+            seen.add(norm)
+            variants.append(value)
+
+        if not raw:
+            return variants
+        _add(raw)
+        parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+|//|;", raw) if p.strip()]
+        if len(parts) > 1:
+            for part in parts:
+                _add(part)
+        if "(" in raw and ")" in raw:
+            base = re.sub(r"\(.*?\)", "", raw).strip()
+            _add(base)
+            for part in re.findall(r"\((.*?)\)", raw):
+                _add(part)
+        return variants
+
+    def _build_calibre_context(self):
+        """Load the Calibre library (or the synced tracking rows) + matcher."""
+        calibre_path = self.db.get_setting("calibre_path", "/calibre")
+        scanner = CalibreMangaScanner(calibre_path)
+        if scanner.is_available():
+            series_list = scanner.get_all_series()
+            volumes_map = scanner.get_all_volumes_per_series()
+        else:
+            # Calibre not mounted here: the DB still knows the library names from the
+            # last successful sync (plus user-typed tracked series).
+            series_list = self.db.get_all_series()
+            volumes_map = {}
+        matcher = MangaCalibreMatcher(
+            series_list, volumes_map, self.db.get_all_manga_metadata_cache()
+        )
+        return series_list, matcher
+
+    def resolve_series_identity(
+        self,
+        raw_series_name: str,
+        matcher: Optional[MangaCalibreMatcher] = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Resolve a release's STABLE matching key and cosmetic DISPLAY title.
+
+        Returns a dict with ``raw_name``, ``stable_name``, ``display_name``,
+        ``source`` (which priority step matched), ``meta`` (AniList metadata, if
+        any), ``alt_names`` (aliases for the Calibre matcher) and
+        ``calibre_match``.  The AniList canonical/romaji titles are used only as
+        lookup bridges; the fallback stable key is always the parsed name.
+        """
+        raw = (raw_series_name or "").strip()
+        if not raw:
+            return {
+                "raw_name": raw, "stable_name": raw, "display_name": raw,
+                "source": "empty", "meta": meta or {}, "alt_names": [],
+                "calibre_match": None,
+            }
+
+        if matcher is None:
+            _, matcher = self._build_calibre_context()
+        calibre_series = list(getattr(matcher, "calibre_series", []) or [])
+        variants = self._name_variants(raw)
+
+        # Metadata is resolved up-front (and cached) exactly as before: it still
+        # drives covers / volume counts / display, it just never drives the key.
+        if meta is None:
+            try:
+                meta = self.anilist.resolve_manga_series(raw)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("Metadata lookup failed for '%s': %s", raw, exc)
+                meta = {}
+        meta = meta or {}
+        authoritative = is_authoritative_metadata(meta)
+        canonical = (meta.get("canonical_title") or "").strip() if authoritative else ""
+        romaji = (meta.get("romaji_title") or "").strip()
+
+        tracked_rows = self.db.get_all_series()
+        calibre_tracked: Dict[str, str] = {}  # normalized -> tracked name (Calibre-origin)
+        typed_tracked: Dict[str, str] = {}    # normalized -> user-typed tracked name
+        for row in tracked_rows:
+            name = (row.get("name") or "").strip()
+            key = normalize_text(name)
+            if not name or not key:
+                continue
+            if row.get("calibre_series_id") is not None:
+                calibre_tracked.setdefault(key, name)
+            else:
+                typed_tracked.setdefault(key, name)
+
+        def _match_calibre(name: str) -> str:
+            if not calibre_series:
+                return ""
+            hit = match_manga_series_in_calibre(name, calibre_series)
+            if not hit:
+                return ""
+            return (hit.get("series_name") or hit.get("name") or "").strip()
+
+        def _make(stable: str, source: str) -> Dict[str, Any]:
+            stable = (stable or "").strip() or raw
+            display = display_title_from_meta(stable, meta if authoritative else None) or stable
+            alt_names: List[str] = []
+            seen = {normalize_text(stable)}
+            for value in list(variants) + ([canonical] if canonical else []) + ([romaji] if romaji else []):
+                norm = normalize_text(value)
+                if norm and norm not in seen:
+                    seen.add(norm)
+                    alt_names.append(value)
+            return {
+                "raw_name": raw,
+                "stable_name": stable,
+                "display_name": display,
+                "source": source,
+                "meta": meta,
+                "alt_names": alt_names,
+                "calibre_match": None,
+            }
+
+        # (1) Calibre-tracked name: the parsed name directly names a Calibre series.
+        for candidate in variants:
+            hit = _match_calibre(candidate)
+            if hit:
+                return _make(hit, "calibre")
+
+        # (1b) Calibre-origin tracked rows: covers deployments where the scanner is
+        #      temporarily unavailable but the library was already synced to the DB.
+        for candidate in variants:
+            hit = calibre_tracked.get(normalize_text(candidate))
+            if hit:
+                return _make(hit, "calibre_db")
+
+        # (2) user-typed tracked name.
+        for candidate in variants:
+            hit = typed_tracked.get(normalize_text(candidate))
+            if hit:
+                return _make(hit, "typed")
+
+        # (3) AniList canonical English, then (4) AniList romaji, as lookup bridges.
+        variant_norms = {normalize_text(v) for v in variants}
+        for bridge_source, bridge in (("anilist_canonical", canonical), ("anilist_romaji", romaji)):
+            if not bridge or normalize_text(bridge) in variant_norms:
+                continue  # same spelling as the raw name: already tried above
+            hit = _match_calibre(bridge)
+            if hit:
+                return _make(hit, bridge_source)
+            hit = calibre_tracked.get(normalize_text(bridge))
+            if hit:
+                return _make(hit, bridge_source)
+            hit = typed_tracked.get(normalize_text(bridge))
+            if hit:
+                return _make(hit, bridge_source)
+
+        # (5) Reverse alias resolution: the raw name may itself be an AniList alias
+        #     of an already tracked series (romaji feed title, English tracker).
+        alias_claims = self.db.get_authoritative_alias_index()
+        for candidate in variants:
+            claims = alias_claims.get(normalize_text(candidate)) or set()
+            if not claims:
+                continue
+            calibre_claims = [c for c in claims if normalize_text(c) in calibre_tracked]
+            if len(calibre_claims) == 1:
+                return _make(calibre_claims[0], "anilist_alias_calibre")
+            typed_claims = [c for c in claims if c not in calibre_claims]
+            if len(typed_claims) == 1:
+                return _make(typed_claims[0], "anilist_alias_typed")
+            logger.debug(
+                "Ambiguous AniList alias '%s' claimed by %s; keeping the parsed name as the key.",
+                candidate, sorted(claims),
+            )
+
+        # (6) Unknown series: the parsed name IS the stable key (never the AniList title).
+        return _make(raw, "raw")
+
+    def repair_series_matching_keys(self, actor: Optional[str] = "scheduler") -> int:
+        """Run the guarded, idempotent legacy re-key repair (safe on every startup)."""
+        try:
+            return self.db.repair_rekeyed_series_names(actor=actor)
+        except Exception as exc:  # pragma: no cover - repair must never block startup
+            logger.error("Series key repair failed: %s", exc)
+            return 0
 
     def get_notifier(self) -> NotificationService:
         discord = self.db.get_setting("discord_webhook_url", "")
@@ -201,58 +415,36 @@ class MangaScheduler:
 
                     rel_group = getattr(rel, "release_group", None) or rel.to_dict().get("release_group")
 
-                    # Canonical English series metadata & cover resolution
-                    canonical_series = rel.series_name
-                    cover_url = rel.cover_url
-                    alt_names = []
-                    if rel.series_name:
-                        # Convert any Romaji title to official English equivalent via AniList
-                        meta = self.anilist.resolve_manga_series(rel.series_name)
-                        english_title = (meta.get("canonical_title") or meta.get("english_title") or "").strip()
-                        if english_title:
-                            canonical_series = english_title
-                        if not cover_url and meta.get("cover_url"):
-                            cover_url = meta["cover_url"]
-
-                        romaji = (meta.get("romaji_title") or "").strip()
-                        if romaji and romaji.lower() != canonical_series.lower():
-                            alt_names.append(romaji)
-                        if rel.series_name.lower() != canonical_series.lower():
-                            alt_names.append(rel.series_name)
-
-                        # Extract sub-title candidates if dual-title (e.g. Romaji | English)
-                        dual_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+", rel.series_name) if p.strip()]
-                        if len(dual_parts) > 1:
-                            alt_names.extend(dual_parts)
-
-                        # Match against Calibre
-                        calibre_match = matcher.find_series(canonical_series, alt_names=alt_names)
-                        if calibre_match and not english_title:
-                            calibre_match_name = calibre_match.get("series_name") or calibre_match.get("name", "")
-                            if calibre_match_name:
-                                canonical_series = calibre_match_name
+                    # Resolve the STABLE matching key (Calibre name / typed name) and
+                    # the cosmetic AniList display title.  The AniList title is never
+                    # persisted as the series key.
+                    identity = self.resolve_series_identity(rel.series_name, matcher=matcher)
+                    series_key = identity["stable_name"]
+                    meta = identity.get("meta") or {}
+                    cover_url = rel.cover_url or meta.get("cover_url") or ""
+                    alt_names = identity["alt_names"]
 
                     # SSRF safe sync cover caching
                     if cover_url:
                         self.cover_cache.cache_sync(cover_url)
 
-                    # Check blacklist
-                    test_name = canonical_series or rel.series_name
+                    # Check blacklist against the stable key
+                    test_name = series_key or rel.series_name
                     if test_name and self.db.is_series_blacklisted(test_name):
                         status = "BLACKLISTED"
                         missing_vols = []
                     else:
                         match_payload = rel.to_dict()
-                        match_payload["series_name"] = canonical_series
+                        match_payload["series_name"] = series_key
                         match_result = matcher.check_release(match_payload, alt_series_names=alt_names)
                         status = match_result["status"]
                         missing_vols = match_result.get("missing_volumes", [])
 
                     desc = ""
                     mu_url = ""
-                    if status == "DISCOVERY" and canonical_series:
+                    if status == "DISCOVERY" and series_key:
                         try:
-                            mu_info = self.mangaupdates.get_series_info(canonical_series)
+                            mu_info = self.mangaupdates.get_series_info(series_key)
                             if mu_info:
                                 desc = mu_info.get("description", "")
                                 mu_url = mu_info.get("url", "")
@@ -260,12 +452,12 @@ class MangaScheduler:
                                     cover_url = mu_info["cover_url"]
                                     self.cover_cache.cache_sync(cover_url)
                         except Exception as e:
-                            logger.debug(f"Failed to fetch MangaUpdates info for '{canonical_series}': {e}")
+                            logger.debug(f"Failed to fetch MangaUpdates info for '{series_key}': {e}")
 
                     rel_dict = {
                         "guid": rel.guid,
                         "title": rel.title,
-                        "series_name": canonical_series,
+                        "series_name": series_key,
                         "release_group": rel_group,
                         "is_bundle": rel.is_bundle,
                         "volume_start": rel.volume_start,
@@ -414,9 +606,11 @@ class MangaScheduler:
 
     def _process_release(self, rel, feed_name: str, matcher: MangaCalibreMatcher) -> tuple:
         """
-        Normalizes Romaji to canonical English title, checks Calibre matcher with aliases,
-        pulls MangaUpdates synopsis if Discovery, and upserts release into SQLite.
-        Returns (is_new, status, missing_volumes, rel_id, canonical_series).
+        Resolves the STABLE matching key (Calibre name / typed name) while keeping
+        AniList's canonical English title as display-only metadata, checks the
+        Calibre matcher with aliases, pulls MangaUpdates synopsis if Discovery,
+        and upserts release into SQLite.
+        Returns (is_new, status, missing_volumes, rel_id, stable_series).
         """
         if is_chapter_only(rel.title):
             return (False, "CHAPTER_ONLY", [], None, None)
@@ -429,36 +623,14 @@ class MangaScheduler:
             rel.is_complete = True
             rel.is_bundle = True
 
-        # 1. Canonical English series metadata & cover resolution
-        canonical_series = rel.series_name
-        cover_url = rel.cover_url
-        alt_names = []
-        meta = None
-        if rel.series_name:
-            meta = self.anilist.resolve_manga_series(rel.series_name)
-            english_title = ""
-            if meta and meta.get("source") not in ("fallback", "cleaned"):
-                english_title = (meta.get("canonical_title") or meta.get("english_title") or "").strip()
-            if english_title:
-                canonical_series = english_title
-            if not cover_url and meta and meta.get("cover_url"):
-                cover_url = meta["cover_url"]
-
-            romaji = (meta.get("romaji_title") or "").strip()
-            if romaji and romaji.lower() != canonical_series.lower():
-                alt_names.append(romaji)
-            if rel.series_name.lower() != canonical_series.lower():
-                alt_names.append(rel.series_name)
-
-            dual_parts = [p.strip() for p in re.split(r"\s*[|/–—]\s*|\s+-\s+", rel.series_name) if p.strip()]
-            if len(dual_parts) > 1:
-                alt_names.extend(dual_parts)
-
-            calibre_match = matcher.find_series(canonical_series, alt_names=alt_names)
-            if calibre_match and not english_title:
-                calibre_match_name = calibre_match.get("series_name") or calibre_match.get("name", "")
-                if calibre_match_name:
-                    canonical_series = calibre_match_name
+        # 1. Resolve the stable matching key + cosmetic display title.
+        identity = self.resolve_series_identity(
+            rel.series_name, matcher=matcher, meta=getattr(rel, "meta", None)
+        )
+        series_key = identity["stable_name"]
+        meta = identity.get("meta") or {}
+        cover_url = rel.cover_url or meta.get("cover_url") or ""
+        alt_names = identity["alt_names"]
 
         # If release is marked (complete) and has no volume labels, fetch total volume count from external sources
         if is_comp and not rel.volumes:
@@ -473,32 +645,32 @@ class MangaScheduler:
                             meta = alt_meta
                         break
             # If still not resolved, query MangaUpdates
-            if not total_vols and canonical_series:
+            if not total_vols and series_key:
                 try:
-                    mu_info = self.mangaupdates.get_series_info(canonical_series)
+                    mu_info = self.mangaupdates.get_series_info(series_key)
                     if mu_info and mu_info.get("total_volumes"):
                         total_vols = mu_info["total_volumes"]
                 except Exception as e:
-                    logger.debug(f"MangaUpdates volume count lookup failed for '{canonical_series}': {e}")
+                    logger.debug(f"MangaUpdates volume count lookup failed for '{series_key}': {e}")
 
             if total_vols and int(total_vols) > 0:
                 v_count = int(total_vols)
                 rel.volume_start = 1.0
                 rel.volume_end = float(v_count)
                 rel.volumes = [float(v) for v in range(1, v_count + 1)]
-                logger.info(f"Resolved complete series '{canonical_series}' to {v_count} volumes from external metadata.")
+                logger.info(f"Resolved complete series '{series_key}' to {v_count} volumes from external metadata.")
 
         if cover_url:
             self.cover_cache.cache_sync(cover_url)
 
-        # 2. Blacklist check
-        test_name = canonical_series or rel.series_name
+        # 2. Blacklist check against the stable key
+        test_name = series_key or rel.series_name
         if test_name and self.db.is_series_blacklisted(test_name):
             status = "BLACKLISTED"
             missing_vols = []
         else:
             match_payload = rel.to_dict()
-            match_payload["series_name"] = canonical_series
+            match_payload["series_name"] = series_key
             match_payload["is_complete"] = is_comp
             match_res = matcher.check_release(match_payload, alt_series_names=alt_names)
             status = match_res["status"]
@@ -506,9 +678,9 @@ class MangaScheduler:
 
         desc = getattr(rel, "description", "") or ""
         mu_url = ""
-        if status == "DISCOVERY" and canonical_series:
+        if status == "DISCOVERY" and series_key:
             try:
-                mu_info = self.mangaupdates.get_series_info(canonical_series)
+                mu_info = self.mangaupdates.get_series_info(series_key)
                 if mu_info:
                     if mu_info.get("description"):
                         desc = mu_info["description"]
@@ -517,12 +689,12 @@ class MangaScheduler:
                         cover_url = mu_info["cover_url"]
                         self.cover_cache.cache_sync(cover_url)
             except Exception as e:
-                logger.debug(f"Backfill MangaUpdates fetch failed for '{canonical_series}': {e}")
+                logger.debug(f"Backfill MangaUpdates fetch failed for '{series_key}': {e}")
 
         rel_dict = {
             "guid": rel.guid,
             "title": rel.title,
-            "series_name": canonical_series,
+            "series_name": series_key,
             "release_group": rel_group,
             "is_bundle": rel.is_bundle,
             "is_complete": 1 if is_comp else 0,
@@ -541,7 +713,7 @@ class MangaScheduler:
         }
 
         is_new, rel_id = self.db.upsert_release(rel_dict)
-        return (is_new, status, missing_vols, rel_id, canonical_series)
+        return (is_new, status, missing_vols, rel_id, series_key)
 
     def detect_series_titles(self, series_name: str) -> List[str]:
         """
@@ -1030,8 +1202,10 @@ class MangaScheduler:
                 v_json = json.dumps(vols)
 
                 # Match against Calibre
+                # Matching payload: the stored series_name is the STABLE key; the
+                # AniList canonical/romaji titles are passed as matcher aliases only.
                 payload = {
-                    "series_name": (resolved_meta.get("canonical_title") if resolved_meta else None) or s_name,
+                    "series_name": s_name,
                     "title": title,
                     "is_bundle": True,
                     "is_complete": True,
@@ -1122,6 +1296,11 @@ class MangaScheduler:
         logger.info("MangaTrax background worker loop stopped.")
 
     def start(self):
+        # Legacy repair before serving traffic: older versions stored some releases
+        # under AniList's canonical English title instead of the tracked series'
+        # stable matching key.  The repair is guarded and idempotent, so running it
+        # on every startup is safe (and a no-op once the data is clean).
+        self.repair_series_matching_keys(actor="scheduler")
         with self._lock:
             if self.running:
                 return

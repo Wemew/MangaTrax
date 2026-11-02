@@ -1,6 +1,7 @@
 import os
 import json
 import math
+import asyncio
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
@@ -866,17 +867,33 @@ async def api_get_prioritized_releases(status: Optional[str] = None):
 
 @app.post("/api/discovery/track")
 async def api_discovery_track(payload: Dict[str, Any]):
-    """Track a newly discovered series and request the volume, using canonical English series name."""
+    """Track a newly discovered series under its STABLE matching key.
+
+    The stable key is the Calibre series name when the series exists in Calibre,
+    otherwise the name the user typed.  AniList's canonical English title is
+    display-only metadata and must never be persisted as the series name (that
+    used to break Calibre matching: ``Dungeon Meshi`` -> ``Delicious in Dungeon``).
+    Matching tries, in priority order: Calibre-tracked name -> user-typed name ->
+    AniList canonical English -> AniList romaji (Calibre always wins).
+    """
     model = _validated_payload(schemas.DiscoveryTrackRequest, payload)
-    series_name = model.series_name
+    typed_name = model.series_name
     release_id = model.release_id
 
-    # Prefer canonical English title
-    english_name = scheduler.anilist.resolve_english_title(series_name)
-    target_name = english_name if english_name else series_name
+    # Resolve the stable key (Calibre name first).  This still resolves + caches
+    # AniList metadata (cover / total_volumes / synopsis) -- that part is orthogonal
+    # and wanted; it just no longer decides the stored series name.
+    identity = await asyncio.to_thread(scheduler.resolve_series_identity, typed_name)
+    stable_name = identity.get("stable_name") or typed_name
+    display_name = identity.get("display_name") or stable_name
 
-    db.track_discovered_series(target_name, release_id)
-    db.log_activity("SERIES_TRACKED", f"Started tracking new series: {target_name}")
+    # Re-key the release (and any sibling row still stored under the typed name) so
+    # releases.series_name and series_tracking.name stay one stable key.
+    db.track_discovered_series(stable_name, release_id, legacy_names=[typed_name])
+    tracked_msg = f"Started tracking new series: '{stable_name}'"
+    if display_name and display_name != stable_name:
+        tracked_msg += f" (display title: '{display_name}')"
+    db.log_activity("SERIES_TRACKED", tracked_msg)
     if release_id:
         try:
             rel_item = db.get_release_by_id(release_id)
@@ -884,7 +901,7 @@ async def api_discovery_track(payload: Dict[str, Any]):
                 scheduler.get_notifier().notify_new_request(rel_item)
         except Exception as e:
             logger.debug(f"Webhook notification failed on track: {e}")
-    return JSONResponse({"status": "success", "tracked_name": target_name})
+    return JSONResponse({"status": "success", "tracked_name": stable_name})
 
 @app.post("/api/discovery/blacklist")
 async def api_discovery_blacklist(payload: Dict[str, Any]):
@@ -1008,8 +1025,13 @@ async def api_debug_action(payload: Dict[str, Any]):
         count = cover_cache.clear_cache()
         return JSONResponse({"status": "success", "message": f"Purged {count} cached cover images from disk."})
     elif action == "normalize-english-titles":
-        count = db.normalize_series_titles_to_english(scheduler.anilist)
-        return JSONResponse({"status": "success", "message": f"Normalized {count} manga releases to official English titles."})
+        # The old behaviour renamed matching keys to AniList English titles, which
+        # broke Calibre matching (P3a).  The action is kept for API compatibility but
+        # now performs the guarded, idempotent legacy re-key repair instead: releases
+        # stranded under an AniList display title are re-keyed back to their tracked
+        # series' stable name.
+        count = db.repair_rekeyed_series_names()
+        return JSONResponse({"status": "success", "message": f"Re-keyed {count} release row(s) back to their tracked series' stable matching keys."})
     elif action == "reset-all-data":
         db.reset_all_data()
         cover_cache.clear_cache()

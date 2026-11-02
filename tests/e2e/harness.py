@@ -196,17 +196,17 @@ from app.metadata.mangaupdates import MangaUpdatesService
 # Hermetic isolation of live external metadata services.
 #
 # TEST_INFRA.md promises that the E2E suite runs with "zero external network
-# connectivity".  Without this guard the suite silently depended on live AniList
-# / MangaUpdates responses: `/api/discovery/track` resolves the canonical
-# English title over the network and tracks the series under *that* name, which
-# made tier 3/4 assertions and staging-tagging flows non-deterministic and
-# order-dependent (passing only when AniList happened to be unreachable or
-# returned the unchanged title).
+# connectivity".  Disabling only the two HTTP transports keeps every real code
+# path (DB cache lookup, delimiter candidates, fallback to the raw title) intact
+# while making every scenario deterministic: the services behave exactly as they
+# do in an offline deployment.
 #
-# Disabling only the two HTTP transports keeps every real code path (DB cache
-# lookup, delimiter candidates, fallback to the raw title) intact while making
-# the result deterministic: the services behave exactly as they do in an
-# offline deployment.
+# NOTE (P3a): this stub is a HERMETICITY measure, nothing more.  It is NOT a
+# workaround for the old rename bug.  `/api/discovery/track` no longer rewrites
+# the tracked series name with AniList's canonical English title (the stable
+# matching key is the Calibre/typed name; AniList's title is display-only), so
+# the tests no longer depend on whether metadata resolution returns a translated
+# title.  The offline stub stays because tests must never touch the network.
 # ---------------------------------------------------------------------------
 def _offline_anilist_fetch(self, search_term):
     return None

@@ -783,7 +783,10 @@ def test_romaji_to_english_titles_conversion():
         assert res["matched_series"]["series_name"] == "Attack on Titan"
         assert 4.0 in res["missing_volumes"]
 
-        # 3. Test Database Title Normalization (normalize_series_titles_to_english)
+        # 3. Naming contract (P3a): AniList titles are DISPLAY ONLY and must never
+        #    rewrite the stable matching key. The old `normalize_series_titles_to_english`
+        #    behaviour (rename releases.series_name to AniList English) is gone; the
+        #    function is now a deprecated alias of the guarded legacy re-key repair.
         rel_db = {
             "guid": "guid-test-snk-vol1",
             "title": "[Group] Shingeki no Kyojin Vol. 01",
@@ -796,21 +799,24 @@ def test_romaji_to_english_titles_conversion():
         }
         db.upsert_release(rel_db)
 
-        # Before normalization, discovery sees English via cache
+        # Discovery keeps the STABLE stored name; only the display title is English.
         disc_releases = db.get_discovery_releases()
         assert len(disc_releases) == 1
-        assert disc_releases[0]["series_name"] == "Attack on Titan"
+        assert disc_releases[0]["series_name"] == "Shingeki no Kyojin"
+        assert disc_releases[0]["display_series_name"] == "Attack on Titan"
         assert disc_releases[0]["romaji_name"] == "Shingeki no Kyojin"
 
-        # Run database normalization
+        # The deprecated alias no longer renames matching keys. There is no tracked
+        # series here, so the guarded legacy repair has nothing to re-key.
         updated = db.normalize_series_titles_to_english(anilist)
-        assert updated >= 1
+        assert updated == 0
 
         all_rel = db.get_releases()
         snk_in_db = next(r for r in all_rel if r["guid"] == "guid-test-snk-vol1")
-        assert snk_in_db["series_name"] == "Attack on Titan"
+        assert snk_in_db["series_name"] == "Shingeki no Kyojin"
+        assert snk_in_db["display_series_name"] == "Attack on Titan"
 
-        print("    [PASSED] Romaji titles successfully converted to English and cross-matched against Calibre.")
+        print("    [PASSED] Romaji titles stay the stable key; English canonical is display-only.")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 

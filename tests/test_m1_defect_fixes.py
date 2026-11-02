@@ -380,11 +380,12 @@ def test_feature_9_cache_invalidation_operations():
         db.get_releases_grouped_by_series()
         _check(len(db._grouped_cache) > 0)
 
-        # Test normalize_series_titles_to_english invalidation
+        # Test legacy key repair invalidation (normalize_series_titles_to_english is
+        # now a deprecated alias of the guarded P3a re-key repair).
         mock_anilist = MagicMock()
         mock_anilist.resolve_manga_series.return_value = {}
         db.normalize_series_titles_to_english(mock_anilist)
-        _check(db._grouped_cache == {}, "normalize_series_titles_to_english failed to invalidate _grouped_cache")
+        _check(db._grouped_cache == {}, "legacy key repair failed to invalidate _grouped_cache")
 
         print("    [PASSED] Feature 9: Grouped cache invalidations across all 4 operations verified.")
     finally:

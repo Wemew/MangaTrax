@@ -117,6 +117,56 @@ def resolve_status(existing: Optional[str], incoming: Optional[str]) -> Optional
     return old
 
 
+# ---------------------------------------------------------------------------
+# Naming model: STABLE MATCHING KEY vs. DISPLAY TITLE
+# ---------------------------------------------------------------------------
+# A series has exactly two names, with different jobs:
+#
+# * The STABLE MATCHING KEY lives in ``series_tracking.name`` and
+#   ``releases.series_name``.  It is the Calibre library name when the series
+#   exists in Calibre, otherwise the name the user typed when they tracked the
+#   series.  Matching, grouping, dedupe and ComicInfo tagging key off it, so it
+#   must never be rewritten by external metadata (that was the P3a rename bug:
+#   ``Dungeon Meshi`` was rewritten to ``Delicious in Dungeon`` and Calibre
+#   matching broke).
+#
+# * The DISPLAY TITLE is cosmetic.  It is AniList's canonical English title when
+#   ``manga_metadata_cache`` holds an authoritative entry (``source == 'anilist'``
+#   and a non-empty ``canonical_title``), otherwise it falls back to the stable
+#   key.  It is resolved at render/group time and is NEVER fed back into a
+#   matching lookup.
+AUTHORITATIVE_METADATA_SOURCE = "anilist"
+
+
+def is_authoritative_metadata(meta: Optional[Dict[str, Any]]) -> bool:
+    """True when cached metadata may drive the cosmetic display title.
+
+    Only AniList-sourced rows with a non-empty canonical title qualify.  Fallback
+    / cleaned rows merely echo the raw search term and must not be treated as a
+    translation (they would otherwise make display look authoritative when the
+    service was simply offline).
+    """
+    if not meta:
+        return False
+    return (
+        (meta.get("source") or "") == AUTHORITATIVE_METADATA_SOURCE
+        and bool((meta.get("canonical_title") or "").strip())
+    )
+
+
+def display_title_from_meta(stable_key: str, meta: Optional[Dict[str, Any]]) -> str:
+    """Resolve the cosmetic display title for a stable matching key.
+
+    ``meta`` is the cached metadata row for the series (if any).  Display is the
+    AniList canonical English title when authoritative, else the stable key.
+    This helper must never be used to derive a matching key.
+    """
+    stable = (stable_key or "").strip()
+    if is_authoritative_metadata(meta):
+        return meta["canonical_title"].strip()
+    return stable
+
+
 class MangaDatabase:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -859,7 +909,7 @@ class MangaDatabase:
                 """, (limit, offset))
             rows = [dict(r) for r in cur.fetchall()]
 
-            cur.execute("SELECT search_term, canonical_title, romaji_title, cover_url FROM manga_metadata_cache;")
+            cur.execute("SELECT search_term, canonical_title, romaji_title, cover_url, source FROM manga_metadata_cache;")
             meta_cache = {row["search_term"].lower(): dict(row) for row in cur.fetchall()}
 
             from app.parser import is_complete_series_release
@@ -870,16 +920,22 @@ class MangaDatabase:
                 r_group = (r.get("release_group") or "").strip().lower()
                 r["is_prioritized"] = r_group in p_groups if r_group else False
 
+                # Naming model: releases.series_name stays the STABLE matching key;
+                # the AniList title is exposed separately as the cosmetic display name
+                # (never written back into series_name here).
                 s_name = (r.get("series_name") or "").strip()
                 match = meta_cache.get(s_name.lower()) if s_name else None
                 if match:
-                    if match.get("canonical_title"):
-                        r["canonical_series_name"] = match["canonical_title"]
-                        r["series_name"] = match["canonical_title"]
+                    display = display_title_from_meta(s_name, match) or s_name
+                    r["display_series_name"] = display
+                    if display != s_name:
+                        r["canonical_series_name"] = display
                     if match.get("romaji_title"):
                         r["romaji_name"] = match["romaji_title"]
                     if match.get("cover_url") and not r.get("cover_url"):
                         r["cover_url"] = match["cover_url"]
+                else:
+                    r["display_series_name"] = s_name
             return rows
 
     def get_pending_requests(self, limit: int = 1000) -> List[Dict[str, Any]]:
@@ -996,15 +1052,19 @@ class MangaDatabase:
                     r["description"] = clean_description_text(r["description"])
 
                 if s_name:
-                    # Check AniList cache for canonical English title
+                    # Naming model: series_name stays the STABLE matching key; the
+                    # AniList canonical title is only exposed as the cosmetic
+                    # display name. Nothing here may rewrite series_name.
                     meta_cached = self.get_cached_manga_metadata(s_name.lower())
-                    if meta_cached:
-                        canonical = meta_cached.get("canonical_title")
-                        if canonical and canonical.strip().lower() != s_name.strip().lower():
-                            r["series_name"] = canonical
-                            r["romaji_name"] = meta_cached.get("romaji_title") or s_name
-                        if not r.get("cover_url") and meta_cached.get("cover_url"):
-                            r["cover_url"] = meta_cached["cover_url"]
+                    display_name = display_title_from_meta(s_name, meta_cached) or s_name
+                    r["display_series_name"] = display_name
+                    if display_name != s_name:
+                        r["canonical_series_name"] = display_name
+                        r["romaji_name"] = (meta_cached or {}).get("romaji_title") or s_name
+                    elif meta_cached and meta_cached.get("romaji_title"):
+                        r["romaji_name"] = meta_cached["romaji_title"]
+                    if meta_cached and not r.get("cover_url") and meta_cached.get("cover_url"):
+                        r["cover_url"] = meta_cached["cover_url"]
 
                     # Check MangaUpdates cache
                     if not r.get("description") or not r.get("mangaupdates_url") or not str(r.get("mangaupdates_url", "")).startswith("http"):
@@ -1014,6 +1074,8 @@ class MangaDatabase:
                                 r["description"] = clean_description_text(mu_cached["synopsis"])
                             if mu_cached.get("romaji_title") and str(mu_cached["romaji_title"]).startswith("http"):
                                 r["mangaupdates_url"] = mu_cached["romaji_title"]
+                else:
+                    r["display_series_name"] = ""
 
                 if not r.get("mangaupdates_url") or not str(r.get("mangaupdates_url", "")).startswith("http"):
                     from urllib.parse import quote_plus
@@ -1038,11 +1100,31 @@ class MangaDatabase:
             """, (link, cover_url, description, mangaupdates_url, release_id))
             conn.commit()
 
-    def track_discovered_series(self, series_name: str, release_id: Optional[int] = None) -> bool:
+    def track_discovered_series(
+        self,
+        series_name: str,
+        release_id: Optional[int] = None,
+        legacy_names: Optional[List[str]] = None,
+    ) -> bool:
+        """Start tracking a series under its STABLE matching key.
+
+        ``series_name`` must already be the resolved stable key (Calibre library
+        name when the series is in Calibre, otherwise the user-typed name).
+        ``legacy_names`` are the names the UI/source used before resolution (e.g.
+        the parsed feed title); releases stored under one of them are re-keyed to
+        the stable key so grouping and Calibre matching stay coherent.  This is
+        an explicit user action, so the write is deliberate and never goes
+        through resolve_status().
+        """
         clean = series_name.strip()
         if not clean:
             return False
         from urllib.parse import quote_plus
+        rekey_alias = []
+        for name in (legacy_names or []):
+            alias = (name or "").strip()
+            if alias and alias.lower() != clean.lower() and alias not in rekey_alias:
+                rekey_alias.append(alias)
         with self.get_connection() as conn:
             cur = conn.cursor()
             default_link = f"https://www.mangaupdates.com/series.html?search={quote_plus(clean)}"
@@ -1050,7 +1132,7 @@ class MangaDatabase:
 
             # If release has a valid link or mangaupdates_url, prioritize it
             if release_id:
-                cur.execute("SELECT link, mangaupdates_url, description FROM releases WHERE id = ?;", (release_id,))
+                cur.execute("SELECT link, mangaupdates_url, description, series_name FROM releases WHERE id = ?;", (release_id,))
                 row = cur.fetchone()
                 if row:
                     if row["mangaupdates_url"]:
@@ -1059,6 +1141,9 @@ class MangaDatabase:
                         default_link = row["link"]
                     if row["description"]:
                         description = row["description"]
+                    raw_series = (row["series_name"] or "").strip()
+                    if raw_series and raw_series.lower() != clean.lower() and raw_series not in rekey_alias:
+                        rekey_alias.append(raw_series)
 
             # If description is still empty, check cache
             if not description:
@@ -1076,13 +1161,27 @@ class MangaDatabase:
                     website_url = CASE WHEN series_tracking.website_url = '' OR series_tracking.website_url IS NULL OR series_tracking.website_url LIKE '%search=%' THEN excluded.website_url ELSE series_tracking.website_url END,
                     description = CASE WHEN series_tracking.description = '' OR series_tracking.description IS NULL THEN excluded.description ELSE series_tracking.description END;
             """, (clean, default_link, description))
+
             # Explicit user action (POST /api/discovery/track): the request is written
             # verbatim, bypassing resolve_status().  The following feed polls must not
             # revert it -- that is exactly what resolve_status() now guarantees.
             if release_id:
-                cur.execute("UPDATE releases SET status = 'REQUESTED', updated_at = CURRENT_TIMESTAMP WHERE id = ?;", (release_id,))
+                cur.execute(
+                    "UPDATE releases SET series_name = ?, status = 'REQUESTED', updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                    (clean, release_id),
+                )
             else:
-                cur.execute("UPDATE releases SET status = 'REQUESTED', updated_at = CURRENT_TIMESTAMP WHERE lower(series_name) = lower(?);", (clean,))
+                cur.execute(
+                    "UPDATE releases SET series_name = ?, status = 'REQUESTED', updated_at = CURRENT_TIMESTAMP WHERE lower(trim(series_name)) = lower(trim(?));",
+                    (clean, clean),
+                )
+            # Re-key the releases that carried this series under a legacy/alias name.
+            for alias in rekey_alias:
+                cur.execute(
+                    "UPDATE releases SET series_name = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE lower(trim(series_name)) = lower(trim(?));",
+                    (clean, alias),
+                )
             conn.commit()
             self._invalidate_grouped_cache()
             return True
@@ -1264,6 +1363,7 @@ class MangaDatabase:
             row = cur.fetchone()
             if row:
                 return {
+                    "search_term": row["search_term"],
                     "canonical_title": row["canonical_title"],
                     "romaji_title": row["romaji_title"],
                     "cover_url": row["cover_url"],
@@ -1310,39 +1410,249 @@ class MangaDatabase:
             cur.execute("SELECT * FROM manga_metadata_cache;")
             return {row["search_term"].lower(): dict(row) for row in cur.fetchall()}
 
-    def normalize_series_titles_to_english(self, anilist_service) -> int:
+    def get_display_title(self, stable_key: str) -> str:
+        """Cosmetic display title for a STABLE matching key (never used for matching).
+
+        AniList canonical English when the cache holds an authoritative entry,
+        otherwise the stable key itself.  Dual-title stable keys (e.g.
+        ``"Romaji | English"``) are resolved through their candidate parts, exactly
+        like the grouped builder does at render time.
         """
-        Scans all releases in the database, queries their canonical English titles
-        via metadata/AniList, and updates any Romaji titles to their English equivalents.
+        stable = (stable_key or "").strip()
+        if not stable:
+            return ""
+        meta = self.get_cached_manga_metadata(stable)
+        if not is_authoritative_metadata(meta):
+            parts = [
+                part.strip()
+                for part in re.split(r"\s*[|/–—:]\s*|\s+-\s+", stable)
+                if part.strip()
+            ]
+            for part in parts:
+                if part == stable:
+                    continue
+                candidate = self.get_cached_manga_metadata(part)
+                if is_authoritative_metadata(candidate):
+                    meta = candidate
+                    break
+        return display_title_from_meta(stable, meta) or stable
+
+    def get_authoritative_alias_sets(self) -> Dict[str, Set[str]]:
+        """Map normalized tracked stable name -> normalized names it is known by.
+
+        The set always contains the stable name itself plus, when the cache holds
+        an authoritative entry, AniList's canonical and romaji titles.  This is the
+        evidence used to recognise that a stale tracked row created by the old
+        rename bug and a Calibre-synced row describe the same series.
         """
-        updated_count = 0
+        from app.parser import normalize_text
+
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT DISTINCT series_name FROM releases WHERE series_name IS NOT NULL AND series_name != '';")
-            distinct_series = [row[0] for row in cur.fetchall()]
+            cur.execute("SELECT name FROM series_tracking WHERE name IS NOT NULL AND trim(name) != '';")
+            tracked = [row["name"].strip() for row in cur.fetchall()]
+            cur.execute("SELECT * FROM manga_metadata_cache;")
+            cache_rows = [dict(row) for row in cur.fetchall()]
 
-            for s_name in distinct_series:
-                try:
-                    meta = anilist_service.resolve_manga_series(s_name)
-                    canonical = (meta.get("canonical_title") or meta.get("english_title") or "").strip()
-                    if canonical and canonical.lower() != s_name.strip().lower():
-                        cur.execute("""
-                            UPDATE releases 
-                            SET series_name = ?, updated_at = CURRENT_TIMESTAMP
-                            WHERE lower(series_name) = lower(?);
-                        """, (canonical, s_name))
-                        updated_count += cur.rowcount
-                except Exception as e:
-                    logger.debug(f"Normalization failed for '{s_name}': {e}")
+        cache_by_norm: Dict[str, Dict[str, Any]] = {}
+        for row in cache_rows:
+            if not is_authoritative_metadata(row):
+                continue
+            for field in ("search_term", "canonical_title", "romaji_title"):
+                alias = (row.get(field) or "").strip()
+                alias_norm = normalize_text(alias)
+                if alias_norm:
+                    cache_by_norm.setdefault(alias_norm, row)
 
-            conn.commit()
-            self._invalidate_grouped_cache()
-            if updated_count > 0:
-                self.log_activity(
-                    "TITLES_NORMALIZED",
-                    f"Converted {updated_count} release titles to official English equivalents."
+        alias_sets: Dict[str, Set[str]] = {}
+        for stable in tracked:
+            stable_norm = normalize_text(stable)
+            if not stable_norm:
+                continue
+            names = {stable_norm}
+            meta = cache_by_norm.get(stable_norm)
+            if meta:
+                for field in ("canonical_title", "romaji_title"):
+                    alias_norm = normalize_text(meta.get(field) or "")
+                    if alias_norm:
+                        names.add(alias_norm)
+            alias_sets[stable_norm] = names
+        return alias_sets
+
+    def get_authoritative_alias_index(self) -> Dict[str, Set[str]]:
+        """Map normalized AniList aliases -> tracked stable name(s) claiming them.
+
+        Built from ``series_tracking`` (the stable keys) cross-referenced with
+        authoritative ``manga_metadata_cache`` rows.  Keys are normalized series
+        names; values are the set of stable names that own that alias.  A key
+        claimed by more than one tracked series is ambiguous and must never cause
+        a relabel or a merge -- except for the one provable duplicate case handled
+        by ``_prefer_calibre_duplicate_claim``.
+        """
+        from app.parser import normalize_text
+
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM series_tracking WHERE name IS NOT NULL AND trim(name) != '';")
+            tracked = [row["name"].strip() for row in cur.fetchall()]
+
+        alias_sets = self.get_authoritative_alias_sets()
+        index: Dict[str, Set[str]] = {}
+        for stable in tracked:
+            stable_norm = normalize_text(stable)
+            if not stable_norm:
+                continue
+            for alias_norm in alias_sets.get(stable_norm) or {stable_norm}:
+                index.setdefault(alias_norm, set()).add(stable)
+        return index
+
+    def _get_calibre_origin_names(self) -> Set[str]:
+        """Normalized names of tracked rows that came from the Calibre library sync."""
+        from app.parser import normalize_text
+
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT name FROM series_tracking "
+                "WHERE calibre_series_id IS NOT NULL AND name IS NOT NULL AND trim(name) != '';"
+            )
+            return {normalize_text(row["name"]) for row in cur.fetchall() if normalize_text(row["name"])}
+
+    @staticmethod
+    def _prefer_calibre_duplicate_claim(
+        claims: Set[str],
+        calibre_origin: Set[str],
+        alias_sets: Dict[str, Set[str]],
+    ) -> Optional[str]:
+        """Resolve an ambiguous alias ONLY when it provably repeats one series.
+
+        The old rename bug could leave two ``series_tracking`` rows for the same
+        manga: a stale row created under AniList's title and the real Calibre-synced
+        row.  That is safe to repair only when:
+
+        * exactly one claim is a Calibre-origin tracked series, and
+        * every other claim is a *bidirectional* AniList alias of it (each name is
+          in the other's authoritative canonical+romaji set).
+
+        Anything less certain returns ``None`` so genuinely distinct series are
+        never merged.
+        """
+        from app.parser import normalize_text
+
+        calibre_claims = [claim for claim in claims if normalize_text(claim) in calibre_origin]
+        if len(calibre_claims) != 1:
+            return None
+        target = calibre_claims[0]
+        target_norm = normalize_text(target)
+        target_aliases = alias_sets.get(target_norm) or {target_norm}
+        for other in claims:
+            other_norm = normalize_text(other)
+            if other_norm == target_norm:
+                continue
+            other_aliases = alias_sets.get(other_norm) or {other_norm}
+            if other_norm not in target_aliases or target_norm not in other_aliases:
+                return None
+        return target
+
+    def repair_rekeyed_series_names(self, actor: Optional[str] = None) -> int:
+        """Guarded, idempotent legacy repair for the P3a rename bug.
+
+        Older versions let AniList rewrite ``releases.series_name`` to its
+        canonical English title (``Dungeon Meshi`` -> ``Delicious in Dungeon``).
+        That broke Calibre matching because the stored key no longer matched the
+        user's library name.  This repairs *only* the rows that a tracked series
+        unambiguously claims as one of its AniList aliases, re-keying them back
+        to the tracked STABLE name:
+
+        * a release name claimed by exactly one tracked series is re-keyed;
+        * when the old bug left both a stale tracked row under the AniList title
+          and the real Calibre-synced row, the release is re-keyed to the Calibre
+          name (provable bidirectional-alias duplicate, see
+          ``_prefer_calibre_duplicate_claim``);
+        * any other multi-claim name is skipped with a warning (never silently
+          merge two genuinely distinct series);
+        * rows already stored under the stable key are untouched, so running the
+          repair repeatedly is a no-op after the first pass.
+
+        Safe to call on every startup and from the maintenance endpoint; it logs
+        what it changed and returns the number of re-keyed release rows.
+        """
+        from app.parser import normalize_text
+
+        alias_index = self.get_authoritative_alias_index()
+        alias_sets = self.get_authoritative_alias_sets()
+        calibre_origin = self._get_calibre_origin_names()
+        repaired = 0
+        examples: List[str] = []
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT DISTINCT series_name FROM releases "
+                "WHERE series_name IS NOT NULL AND trim(series_name) != '';"
+            )
+            release_names = [row["series_name"] for row in cur.fetchall()]
+
+            for rel_name in release_names:
+                rel_norm = normalize_text(rel_name)
+                if not rel_norm:
+                    continue
+                claims = alias_index.get(rel_norm) or set()
+                stable: Optional[str] = None
+                if len(claims) == 1:
+                    stable = next(iter(claims))
+                elif len(claims) > 1:
+                    stable = self._prefer_calibre_duplicate_claim(claims, calibre_origin, alias_sets)
+                    if stable is None:
+                        logger.warning(
+                            "Series key repair: '%s' is an AniList alias of multiple tracked series %s; "
+                            "skipping it rather than merging distinct series.",
+                            rel_name, sorted(claims),
+                        )
+                        continue
+                    logger.info(
+                        "Series key repair: '%s' is a pre-fix duplicate of Calibre series '%s' "
+                        "(bidirectional AniList alias evidence); re-keying to it.",
+                        rel_name, stable,
+                    )
+                if not stable:
+                    continue
+                if normalize_text(stable) == rel_norm:
+                    continue  # already the stable matching key
+                cur.execute(
+                    "UPDATE releases SET series_name = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE lower(trim(series_name)) = lower(trim(?));",
+                    (stable, rel_name),
                 )
-        return updated_count
+                if cur.rowcount:
+                    repaired += cur.rowcount
+                    examples.append(f"'{rel_name}' -> '{stable}'")
+            conn.commit()
+
+        self._invalidate_grouped_cache()
+        if repaired:
+            logger.info(
+                "Series key repair: re-keyed %d release row(s) from AniList display titles "
+                "back to their tracked stable matching key.", repaired,
+            )
+            self.log_activity(
+                "SERIES_KEYS_REPAIRED",
+                f"Re-keyed {repaired} release(s) from AniList display titles back to their tracked series' stable matching key.",
+                "; ".join(examples[:10]),
+                actor=actor,
+            )
+        else:
+            logger.debug("Series key repair: no legacy re-keyed releases found.")
+        return repaired
+
+    def normalize_series_titles_to_english(self, anilist_service=None) -> int:
+        """DEPRECATED: the old behaviour renamed matching keys to English (the P3a bug).
+
+        Kept as a thin compatibility wrapper: it now performs the guarded legacy
+        key repair instead, so any caller of the maintenance action can no longer
+        rewrite matching keys with AniList titles.  ``anilist_service`` is
+        accepted and ignored for backwards compatibility.
+        """
+        return self.repair_rekeyed_series_names()
 
     # --- Group Releases by Series ---
     def get_releases_grouped_by_series(
@@ -1461,6 +1771,30 @@ class MangaDatabase:
                     cache_map[rt] = c_row
                     norm_cache_map[normalize_text(rt)] = c_row
 
+            # Alias index: normalized AniList alias -> the tracked STABLE name that
+            # claims it.  Used only to recover an unrepaired legacy row's stable key
+            # at read time (the startup repair persists the same change).  Ambiguous
+            # aliases (claimed by >1 tracked series) never relabel anything.
+            alias_claims: Dict[str, Set[str]] = {}
+            for t_row in tracked_map.values():
+                stable_name = t_row.get("name") or ""
+                stable_norm = normalize_text(stable_name)
+                if not stable_norm:
+                    continue
+                alias_claims.setdefault(stable_norm, set()).add(stable_name)
+                t_meta = norm_cache_map.get(stable_norm) or cache_map.get(stable_name.lower())
+                if not is_authoritative_metadata(t_meta):
+                    continue
+                for field in ("canonical_title", "romaji_title"):
+                    alias_norm = normalize_text(t_meta.get(field) or "")
+                    if alias_norm:
+                        alias_claims.setdefault(alias_norm, set()).add(stable_name)
+            alias_to_stable = {
+                alias: next(iter(stables))
+                for alias, stables in alias_claims.items()
+                if len(stables) == 1
+            }
+
             groups_dict: Dict[str, Dict[str, Any]] = {}
 
             for rel in raw_releases:
@@ -1521,23 +1855,39 @@ class MangaDatabase:
                                 calibre_match = t_row
                                 break
 
-                # Canonical title resolution: preserve original delimiters if metadata is fallback/cleaned
-                if meta_match and meta_match.get("source") not in ("fallback", "cleaned") and meta_match.get("canonical_title"):
-                    canonical_title = meta_match["canonical_title"]
-                elif calibre_match and calibre_match.get("name"):
-                    canonical_title = calibre_match["name"]
-                else:
-                    canonical_title = s_name
-                canonical_key = normalize_text(canonical_title) or "uncategorized"
-                romaji_title = meta_match.get("romaji_title") or (s_name if s_name.lower() != canonical_title.lower() else "")
+                # --- Naming model ---
+                # releases.series_name is the STABLE matching key.  Recover the
+                # tracked stable name when this row still carries a legacy AniList
+                # alias, and prefer a Calibre/tracked hit when one exists.
+                stable_name = alias_to_stable.get(s_norm) or s_name
+                if calibre_match and calibre_match.get("name"):
+                    stable_name = calibre_match["name"]
+
+                # DISPLAY TITLE: cosmetic only, resolved from authoritative metadata
+                # for the series; falls back to the stable key.  Never a matching key.
+                display_meta = None
+                if stable_name:
+                    display_meta = (
+                        norm_cache_map.get(normalize_text(stable_name))
+                        or cache_map.get(stable_name.lower())
+                    )
+                if not is_authoritative_metadata(display_meta):
+                    display_meta = meta_match if is_authoritative_metadata(meta_match) else display_meta
+                display_title = display_title_from_meta(stable_name, display_meta) or s_name
+                canonical_key = normalize_text(display_title) or "uncategorized"
+                romaji_title = (display_meta or {}).get("romaji_title") or (
+                    s_name if s_name.lower() != display_title.lower() else ""
+                )
                 if not romaji_title and candidate_parts:
-                    other_parts = [p for p in candidate_parts if normalize_text(p) != normalize_text(canonical_title)]
+                    other_parts = [p for p in candidate_parts if normalize_text(p) != normalize_text(display_title)]
                     if other_parts:
                         romaji_title = other_parts[0]
 
-                # Decorate release itself
-                rel["canonical_series_name"] = canonical_title
-                rel["series_name"] = canonical_title
+                # Decorate release itself.  NOTE: rel["series_name"] deliberately keeps
+                # the stored matching key; the display title is an additional field.
+                rel["canonical_series_name"] = display_title
+                rel["display_series_name"] = display_title
+                rel["stable_series_name"] = stable_name
                 rel["romaji_name"] = romaji_title
 
                 if canonical_key not in groups_dict:
@@ -1550,7 +1900,10 @@ class MangaDatabase:
 
                     groups_dict[canonical_key] = {
                         "series_key": canonical_key,
-                        "series_name": canonical_title,
+                        # series_name is the DISPLAY title (cosmetic); stable_name is
+                        # the matching key used for Track/Backfill/Blacklist actions.
+                        "series_name": display_title,
+                        "stable_name": stable_name,
                         "romaji_name": romaji_title,
                         "raw_name": s_name,
                         "cover_url": cover,
@@ -1576,6 +1929,23 @@ class MangaDatabase:
                     }
 
                 group = groups_dict[canonical_key]
+                # A later release in the same display group may carry the Calibre/tracked
+                # identity or the resolved stable key; upgrade the group without ever
+                # changing the display title.
+                if calibre_match and not group.get("in_calibre"):
+                    group["in_calibre"] = True
+                    group["is_monitored"] = bool(calibre_match.get("is_monitored", 0))
+                    group["calibre_series_id"] = calibre_match.get("id")
+                    group["calibre_book_count"] = calibre_match.get("book_count", 0)
+                    group["calibre_latest_index"] = calibre_match.get("latest_index", 0.0)
+                    group["stable_name"] = calibre_match.get("name") or group.get("stable_name")
+                elif (
+                    normalize_text(group.get("stable_name") or "") != normalize_text(stable_name)
+                    and normalize_text(group.get("stable_name") or "") == normalize_text(group.get("raw_name") or "")
+                    and normalize_text(stable_name) != normalize_text(s_name)
+                ):
+                    # Prefer a recovered stable key over the raw stored name.
+                    group["stable_name"] = stable_name
                 if not group.get("romaji_name") and romaji_title:
                     group["romaji_name"] = romaji_title
                 if not group.get("cover_url") and rel.get("cover_url"):
@@ -1708,6 +2078,8 @@ class MangaDatabase:
                 filtered = [
                     g for g in result_groups
                     if clean_s in g["series_name"].lower()
+                    or clean_s in (g.get("stable_name") or "").lower()
+                    or clean_s in (g.get("raw_name") or "").lower()
                     or clean_s in (g.get("romaji_name") or "").lower()
                     or clean_s in (g.get("synopsis") or "").lower()
                 ]

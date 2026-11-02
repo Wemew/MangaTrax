@@ -329,13 +329,15 @@ def test_acceptance_4_blacklisted_survives_name_divergence():
         _check(_status(env, rel_id) == "BLACKLISTED",
                f"expected BLACKLISTED after blacklisted poll, got {_status(env, rel_id)}")
 
-        # Poll 2: metadata resolution now canonicalises the series to "Attack on Titan",
-        # so scheduler.py's blacklist check no longer matches -> automation computes DISCOVERY.
-        # The stored BLACKLISTED status must still win (P3 secondary defect).
+        # Poll 2: metadata resolution now yields canonical English "Attack on Titan".
+        # Under the P3a naming contract the STABLE matching key must not be rewritten:
+        # releases.series_name stays "Shingeki no Kyojin" while the display title
+        # becomes the AniList canonical one.  The stored BLACKLISTED status must still
+        # win, because the stable key still matches the blacklist entry.
         env.anilist_map["Shingeki no Kyojin"] = "Attack on Titan"
         env.poll()
-        _check(env.db.get_release_by_id(rel_id)["series_name"] == "Attack on Titan",
-               "expected canonical series rename to be applied")
+        _check(env.db.get_release_by_id(rel_id)["series_name"] == "Shingeki no Kyojin",
+               "REGRESSION: feed poll renamed the stable matching key to the AniList display title")
         _check(_status(env, rel_id) == "BLACKLISTED",
                f"REGRESSION: BLACKLISTED reverted to {_status(env, rel_id)} on name divergence")
         _check(env.db.is_series_blacklisted("Shingeki no Kyojin"))

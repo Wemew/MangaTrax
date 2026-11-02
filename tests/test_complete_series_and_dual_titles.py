@@ -82,7 +82,10 @@ def test_external_metadata_volume_resolution():
         is_new, status, missing, rel_id, canon = scheduler._process_release(rel, "Nyaa", matcher)
 
     assert status == "DISCOVERY"
-    assert canon == "The Devil is a Part-Timer!"
+    # P3a naming contract: _process_release returns the STABLE matching key (the parsed
+    # series name; no Calibre match here), never AniList's canonical English title.
+    assert canon == "Hataraku Maou-sama! | The Devil is a Part-Timer!", canon
+    assert db.get_display_title(canon) == "The Devil is a Part-Timer!"
     assert rel.volume_start == 1.0
     assert rel.volume_end == 24.0
     assert len(rel.volumes) == 24

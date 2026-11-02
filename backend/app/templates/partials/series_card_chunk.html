@@ -72,19 +72,21 @@
                     </div>
                 </div>
 
-                <!-- Series Quick Actions: Track, Backfill, Blacklist & Releases Accordion -->
+                <!-- Series Quick Actions: Track, Backfill, Blacklist & Releases Accordion.
+                     Actions always send the STABLE matching key (group.stable_name), never
+                     the cosmetic AniList display title shown in the heading. -->
                 <div class="flex items-center gap-1.5 flex-wrap self-start sm:self-auto">
                     {% if not group.in_calibre and not group.is_monitored %}
-                    <button type="button" onclick="handleTrackSeries('{{ group.series_name|escape }}', this)" title="Track upcoming releases of {{ group.series_name }}" class="px-2.5 py-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm">
+                    <button type="button" onclick="handleTrackSeries('{{ (group.stable_name or group.series_name)|escape }}', this)" title="Track upcoming releases of {{ group.series_name }}" class="px-2.5 py-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm">
                         <i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i>
                         <span class="hidden sm:inline">Track</span>
                     </button>
                     {% endif %}
-                    <button type="button" onclick="backfillSeriesGlobal('{{ group.series_name|escape }}', this)" title="Search Nyaa for all past releases of {{ group.series_name }}" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-brand-600/30 text-slate-300 hover:text-brand-300 border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm">
+                    <button type="button" onclick="backfillSeriesGlobal('{{ (group.stable_name or group.series_name)|escape }}', this)" title="Search Nyaa for all past releases of {{ group.series_name }}" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-brand-600/30 text-slate-300 hover:text-brand-300 border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm">
                         <i data-lucide="history" class="w-3.5 h-3.5 text-brand-400"></i>
                         <span class="hidden sm:inline">Backfill</span>
                     </button>
-                    <button type="button" onclick="blacklistSeriesGlobal('{{ group.series_name|escape }}', this)" title="Blacklist {{ group.series_name }} (hide all releases & stop tracking)" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm">
+                    <button type="button" onclick="blacklistSeriesGlobal('{{ (group.stable_name or group.series_name)|escape }}', this)" title="Blacklist {{ group.series_name }} (hide all releases & stop tracking)" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm">
                         <i data-lucide="ban" class="w-3.5 h-3.5 text-rose-400"></i>
                         <span class="hidden sm:inline">Blacklist</span>
                     </button>

@@ -1,8 +1,8 @@
 {% for r in releases %}
-<tr class="hover:bg-slate-850/50 transition-colors release-row" data-release-name="{{ r.title|lower }} {{ (r.series_name or '')|lower }} {{ (r.romaji_name or '')|lower }} {{ (r.release_group or '')|lower }}">
+<tr class="hover:bg-slate-850/50 transition-colors release-row" data-release-name="{{ r.title|lower }} {{ (r.series_name or '')|lower }} {{ (r.display_series_name or '')|lower }} {{ (r.romaji_name or '')|lower }} {{ (r.release_group or '')|lower }}">
     <td class="py-3 px-4 text-center">
         {% if r.cover_url %}
-        <img src="/api/covers?url={{ r.cover_url|urlencode }}" alt="Cover" onclick="openImageModal(this.src, '{{ (r.series_name or r.title)|escape }}')" class="w-8 h-12 object-cover rounded shadow border border-slate-700/60 inline-block cursor-pointer hover:opacity-90 transition-all cover-placeholder" loading="lazy" decoding="async" title="Click to enlarge cover artwork">
+        <img src="/api/covers?url={{ r.cover_url|urlencode }}" alt="Cover" onclick="openImageModal(this.src, '{{ (r.display_series_name or r.series_name or r.title)|escape }}')" class="w-8 h-12 object-cover rounded shadow border border-slate-700/60 inline-block cursor-pointer hover:opacity-90 transition-all cover-placeholder" loading="lazy" decoding="async" title="Click to enlarge cover artwork">
         {% else %}
         <div class="w-8 h-12 rounded bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-600 mx-auto">
             <i data-lucide="layers" class="w-4 h-4"></i>
@@ -12,9 +12,9 @@
     <td class="py-3 px-4 max-w-sm min-w-0">
         <div class="flex items-center gap-1.5 mb-1.5 flex-wrap">
             <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20 truncate max-w-full break-words-anywhere" title="{{ r.series_name }}">
-                {{ r.series_name or 'Uncategorized' }}
+                {{ r.display_series_name or r.series_name or 'Uncategorized' }}
             </span>
-            {% if r.romaji_name and r.romaji_name.lower() != (r.series_name or '').lower() %}
+            {% if r.romaji_name and r.romaji_name.lower() != (r.display_series_name or r.series_name or '').lower() %}
             <span class="text-[10px] text-slate-400 italic truncate max-w-full break-words-anywhere" title="Original Japanese/Romaji Title: {{ r.romaji_name }}">
                 Romaji: {{ r.romaji_name }}
             </span>
@@ -47,7 +47,7 @@
     </td>
     <td class="py-3 px-4 max-w-md">
         <div class="font-bold text-slate-200 text-sm flex items-center gap-2">
-            <span>{{ r.series_name or '-' }}</span>
+            <span>{{ r.display_series_name or r.series_name or '-' }}</span>
             {% if r.release_group %}
             {% if r.is_prioritized %}
             <span class="px-1.5 py-0.2 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[9px] font-bold flex items-center gap-0.5">
