@@ -92,7 +92,13 @@ KNOWN_PUBLISHERS = {
     'square enix', 'square enix manga & books', 'kodansha', 'kodansha comics',
     'kodansha usa', 'viz', 'viz media', 'tokyopop', 'dark horse', 'dark horse comics',
     'titan', 'titan comics', 'titan manga', 'kaiten books', 'denpa', 'vertical',
-    'seven seas siren', 'monogatari'
+    'seven seas siren', 'monogatari',
+    # Official digital platforms / manga publishers that show up in Nyaa release
+    # titles and are NOT scanlation groups.  Hyphen/space variants are listed so
+    # ("K-MANGA"), "(K MANGA)" and "(KManga)" all normalise to a publisher.
+    'k-manga', 'k manga', 'kmanga', 'manga up', 'manga up!', 'shueisha',
+    'shueisha manga', 'bookwalker', 'comikey', 'azuki', 'mangamo', 'inkr',
+    'coolmic', 'tappytoon', 'tapas', 'manta', 'yen plus', 'kodansha digital',
 }
 
 DEFAULT_KNOWN_GROUPS = [
@@ -101,6 +107,16 @@ DEFAULT_KNOWN_GROUPS = [
     "Shinigami", "FlameScans", "AsuraScans", "ReaperScans", "ZeroScans",
     "Lu自主规制", "a-sloth"
 ]
+
+# Imprints that exclusively publish light novels.  Only these may decide the
+# "[Publisher] [ReleaseGroup] -> light novel" rule; the wider KNOWN_PUBLISHERS set
+# also contains manga publishers/platforms (K-MANGA, Manga UP!, Viz, ...) and must
+# never make a manga release look like a light novel.
+LN_IMPRINT_PUBLISHERS = {
+    'seven seas', 'seven seas entertainment', 'seven seas siren', 'airship', 'ghost ship',
+    'yen press', 'yen on', 'j-novel club', 'j-novel heart', 'one peace books',
+    'cross infinite world', 'tentai books', 'hanashi media', 'sol press', 'vertical',
+}
 
 MAX_BUNDLE_SPAN = 1000
 
@@ -562,45 +578,77 @@ def is_valid_group_candidate(clean: str) -> bool:
         return False
     return True
 
-def extract_release_group(raw_title: str, known_groups: Optional[Iterable[str]] = None) -> Optional[str]:
+def _split_group_list(candidate: str) -> Optional[List[str]]:
+    """Split a "+"-joined multi-group candidate into individually valid groups.
+
+    ``(Rillant + Aquila + DigitalMangaFan)`` -> ``["Rillant", "Aquila",
+    "DigitalMangaFan"]``.  Only "+" is used as the multi-group separator here
+    (comma-separated group lists are handled separately by the broader group
+    work); if any part is not a valid group the candidate is kept intact.
     """
-    Extracts the scanlation or release group tag from raw release titles.
-    Correctly ignores buzzwords, status tags like [Complete], [Completed],
-    resolutions, and formats, and correctly identifies groups regardless
-    of bracket position or scene naming conventions.
+    if "+" not in candidate:
+        return None
+    parts = [part.strip() for part in candidate.split("+") if part.strip()]
+    if len(parts) < 2:
+        return None
+    if all(
+        is_valid_group_candidate(part) and not _is_known_publisher(part)
+        for part in parts
+    ):
+        return parts
+    return None
+
+
+def extract_release_groups(raw_title: str, known_groups: Optional[Iterable[str]] = None) -> List[str]:
+    """Extract release groups as an ordered list; the first entry is primary.
+
+    Ordering rules (position matters, not just vocabulary):
+
+    1. known / prioritized groups win;
+    2. otherwise the LAST valid bracket candidate is the group -- the convention is
+       ``... (Publisher) (Group)``, so an unrecognised publisher-shaped token in an
+       earlier bracket must never steal the group slot;
+    3. then the ''-GROUP scene-style suffix, then a bounded known-group substring.
+
+    Format tags, publishers (``KNOWN_PUBLISHERS``), revision markers (``f``/``fN``)
+    and single-character tokens are filtered out before any of this.  "+"-joined
+    candidates are split and validated one by one.
     """
     if not raw_title:
-        return None
+        return []
 
     groups_to_check = sorted(list(known_groups or []) + DEFAULT_KNOWN_GROUPS, key=len, reverse=True)
 
-    # 1. Extract all bracketed candidates [Group] or (Group)
-    bracket_pairs = re.findall(r'\[([^\]]+)\]|\(([^\)]+)\)', raw_title)
-    all_candidates = []
-    for b1, b2 in bracket_pairs:
+    # 1. Bracket candidates, already filtered to real group names.
+    bracket_groups: List[List[str]] = []
+    for b1, b2 in re.findall(r'\[([^\]]+)\]|\(([^\)]+)\)', raw_title):
         cand = (b1 or b2).strip()
-        if is_valid_group_candidate(cand):
-            all_candidates.append(cand)
+        if not is_valid_group_candidate(cand) or _is_known_publisher(cand):
+            continue
+        split = _split_group_list(cand)
+        bracket_groups.append(split if split else [cand])
 
-    if all_candidates:
-        # A publisher is NEVER a release group, on every path: drop publisher
-        # candidates before matching, so "(Square Enix)" alone yields None instead
-        # of being accepted just because no real group is present.
-        group_candidates = [c for c in all_candidates if not _is_known_publisher(c)]
+    ordered: List[str] = []
 
-        # Match known groups first (publishers already excluded).
-        for cand in group_candidates:
+    def _add(name: str):
+        if name and not _is_known_publisher(name) and name not in ordered:
+            ordered.append(name)
+
+    # 1a. Known/prioritized groups win (in bracket order).
+    for parts in bracket_groups:
+        for part in parts:
             for kg in groups_to_check:
-                if cand.lower() == kg.lower() and not _is_known_publisher(kg):
-                    return cand
+                if part.lower() == kg.lower() and not _is_known_publisher(kg):
+                    _add(part)
 
-        # Non-publisher candidates only; if the brackets held only publishers the
-        # remaining paths (scene-style, known-group substring) may still find a
-        # real group, and otherwise the answer is "no group".
-        if group_candidates:
-            if len(group_candidates) > 1 and all_candidates[0].lower() in KNOWN_PUBLISHERS:
-                return group_candidates[-1]
-            return group_candidates[0]
+    # 1b. Prefer-last: the last valid bracket candidate is the conventional group;
+    #     its "+"-split parts keep their order, so the first part stays primary.
+    for parts in reversed(bracket_groups):
+        for part in parts:
+            _add(part)
+
+    if ordered:
+        return ordered
 
     # 2. Scene release group pattern: -GROUP before trailing brackets or end of string
     # e.g., Manga.Million.SiteRip.1600p.AVIF.2026-TenmaLand (Multi)
@@ -608,7 +656,7 @@ def extract_release_group(raw_title: str, known_groups: Optional[Iterable[str]] 
     if m_scene:
         cand = m_scene.group(1).strip()
         if is_valid_group_candidate(cand) and not _is_known_publisher(cand):
-            return cand
+            return [cand]
 
     # 3. Known groups substring search (publishers are not groups)
     for kg in groups_to_check:
@@ -616,9 +664,20 @@ def extract_release_group(raw_title: str, known_groups: Optional[Iterable[str]] 
             continue
         escaped = re.escape(kg)
         if re.search(r'(?:^|[\s_.\-\(\[])' + escaped + r'(?:$|[\s_.\-\)\]])', raw_title, re.IGNORECASE):
-            return kg
+            return [kg]
 
-    return None
+    return []
+
+
+def extract_release_group(raw_title: str, known_groups: Optional[Iterable[str]] = None) -> Optional[str]:
+    """Extract the primary scanlation/release group from a raw release title.
+
+    Thin wrapper over :func:`extract_release_groups` (kept for call-site
+    compatibility); the full ordered list is available from that function and is
+    exposed as ``release_groups`` in the parse result.
+    """
+    groups = extract_release_groups(raw_title, known_groups=known_groups)
+    return groups[0] if groups else None
 
 def is_light_novel(raw_title: str) -> bool:
     """
@@ -682,7 +741,7 @@ def is_light_novel(raw_title: str) -> bool:
         for i in range(len(square_brackets) - 1):
             cand_pub = square_brackets[i].lower()
             cand_grp = square_brackets[i+1].lower()
-            if cand_pub in KNOWN_PUBLISHERS:
+            if cand_pub in LN_IMPRINT_PUBLISHERS:
                 # Ensure the second bracket is not just a format buzzword or volume tag
                 if cand_grp not in {'cbz', 'cbr', 'manga'} and not re.match(r'^(?:v|vol|vols?)\.?\s*\d+', cand_grp):
                     return True
@@ -871,7 +930,8 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
     (``is_chapter``, ``chapter_number``, ``chapter_ranges``) and must never be used
     to change the scheduler's chapter-discard policy.
     """
-    release_group = extract_release_group(raw_title, known_groups=known_groups)
+    release_groups = extract_release_groups(raw_title, known_groups=known_groups)
+    release_group = release_groups[0] if release_groups else None
     is_comp = is_complete_series_release(raw_title)
 
     # Pattern 0 (spec §5): normalise "DanMachi Omnibus 1 (Vols 1-3)" to
@@ -902,6 +962,8 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
         "clean_title": cleaned,
         "series_name": cleaned,
         "release_group": release_group,
+        # Ordered multi-group data: primary first (task-11 will surface the rest).
+        "release_groups": release_groups,
         # Publisher is a quality signal (official release), surfaced not filtered.
         "publisher": extract_publisher(raw_title),
         # "(f)" / "(f2)" re-release/fix markers: metadata only, never pollution.

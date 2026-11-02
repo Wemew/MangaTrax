@@ -41,6 +41,7 @@ from app.parser import (
     extract_manga_bundle_and_volumes,
     extract_publisher,
     extract_release_group,
+    extract_release_groups,
     extract_revision,
     is_chapter_only,
     is_light_novel,
@@ -91,6 +92,10 @@ SPEC_VECTORS = [
      "Anemone wa Netsu o Obiru | The Anemone Feels the Heat", [1.0, 2.0, 3.0], True, False),
     ("Reading Our Way to a Happy New World 001-009 as v01-02 (Digital-Compilation) (Oak) [JPEG-XL]",
      "Reading Our Way to a Happy New World", [1.0, 2.0], True, False),
+    ("The Exiled Heavy Knight Knows How to Game the System 001-171 as v01-19 "
+     "(Digital-Compilation) (K-MANGA) (Rillant + Aquila + DigitalMangaFan)",
+     "The Exiled Heavy Knight Knows How to Game the System",
+     [float(v) for v in range(1, 20)], True, False),
     # MangaTrax keeps the expanded v01-09 range (the spec's reference build returns
     # only [1]); the "+ 047-051" chapter part is ignored, never a volume.
     ("The Summer Hikaru Died v01-09 + 047-051 (2023-2026) (Digital + Digital-Compilation) "
@@ -781,6 +786,79 @@ def test_publisher_and_revision_persistence():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ===========================================================================
+# 17. Group classification is positional: prefer the LAST valid bracket
+# ===========================================================================
+HEAVY_KNIGHT_TITLE = (
+    "The Exiled Heavy Knight Knows How to Game the System 001-171 as v01-19 "
+    "(Digital-Compilation) (K-MANGA) (Rillant + Aquila + DigitalMangaFan)"
+)
+
+
+def test_group_position_prefer_last():
+    print("--> Testing group position: unknown publisher never steals the group slot...")
+    # The reported title: K-MANGA is Kodansha's official platform (a publisher), so
+    # the three real groups survive and "+"-joined groups split with first primary.
+    parsed = _parsed(HEAVY_KNIGHT_TITLE)
+    assert parsed["release_groups"] == ["Rillant", "Aquila", "DigitalMangaFan"], parsed["release_groups"]
+    assert parsed["release_group"] == "Rillant", parsed["release_group"]
+    assert parsed["publisher"] == "K-MANGA", parsed["publisher"]
+    assert parsed["series_name"] == "The Exiled Heavy Knight Knows How to Game the System"
+    assert parsed["volumes"] == [float(v) for v in range(1, 20)], parsed["volumes"]
+    assert parsed["chapter_ranges"] == [[1.0, 171.0]], parsed["chapter_ranges"]
+
+    # Positional variants: the groups are still the last bracket and Win.
+    expected_groups = ["Rillant", "Aquila", "DigitalMangaFan"]
+    for title in [
+        HEAVY_KNIGHT_TITLE.replace("(Digital-Compilation) ", ""),
+        HEAVY_KNIGHT_TITLE.replace("(K-MANGA) ", ""),
+        HEAVY_KNIGHT_TITLE.replace("(Digital-Compilation) (K-MANGA) ", ""),
+    ]:
+        variant = _parsed(title)
+        assert variant["release_groups"] == expected_groups, (title, variant["release_groups"])
+        assert variant["release_group"] == "Rillant", (title, variant["release_group"])
+        assert variant["volumes"] == [float(v) for v in range(1, 20)], title
+        assert variant["chapter_ranges"] == [[1.0, 171.0]], title
+
+    # K-MANGA alone is a publisher, never a group.
+    alone = _parsed("(K-MANGA)")
+    assert alone["release_groups"] == [] and alone["release_group"] is None, alone
+    assert alone["publisher"] == "K-MANGA", alone["publisher"]
+    for variant_title in ["(K MANGA)", "(KManga)", "(k-manga)", "[K-MANGA]"]:
+        assert extract_release_group(variant_title) is None, variant_title
+        assert extract_publisher(variant_title) is not None, variant_title
+
+    # Structural lesson: even an UNKNOWN publisher-shaped token before the group
+    # must not take the slot -- the last valid bracket wins.
+    unknown_chain = "Some Manga v01 (BogusPublisherCo) (RealGroup)"
+    assert extract_release_group(unknown_chain) == "RealGroup", extract_release_group(unknown_chain)
+    assert extract_release_groups(unknown_chain)[0] == "RealGroup"
+    assert extract_release_group("Some Manga v01 (RealGroup) (f2)") == "RealGroup"
+    assert extract_release_group("Some Manga v01 (K-MANGA) (DigitalMangaFan)") == "DigitalMangaFan"
+
+    # Pre-existing group protections stay green (known groups still win, scene-style
+    # suffix and comma multi-group notation unchanged, publishers never groups).
+    for title, expected in [
+        ("[danke-Empire] Bleach v01-v20 [Digital] [1080p] [CBZ]", "danke-Empire"),
+        ("[Lu自主规制] Chainsaw Man Vol. 01-11 [Digital] [HD]", "Lu自主规制"),
+        ("[Manga] Frieren Vol. 01-10 [danke-Empire] [Completed]", "danke-Empire"),
+        ("[Seven Seas] [Stick] The Tale of a Little Alchemist v01-04 [Digital]", "Stick"),
+        ("Manga.Million.SiteRip.1600p.AVIF.2026-TenmaLand (Multi)", "TenmaLand"),
+        ("Anemone wa Netsu o Obiru v01-03 (2025-2026) (Digital) (1r0n, Anon)", "1r0n, Anon"),
+        ("(Square Enix)", None),
+        ("Overlord v01-14 [Yen On]", None),
+    ]:
+        assert extract_release_group(title) == expected, (title, extract_release_group(title))
+    # Split-group helper contract (primary = first part).
+    assert extract_release_groups("X v01 (Digital) (Rillant + Aquila + DigitalMangaFan)") == [
+        "Rillant", "Aquila", "DigitalMangaFan",
+    ]
+    # Official manga platforms are publishers, not LN evidence (no false LN drop).
+    assert is_light_novel("[K-MANGA] [Rillant] Chainsaw Man v01") is False
+    assert is_light_novel("Overlord v01-14 [Yen On] [Lu自主规制]") is True
+    print("    [PASSED] last valid bracket is the group; K-MANGA recorded as publisher.")
+
+
 def main():
     print("=" * 78)
     print("Running D3 suite: ported NovelTrax parsers + chapter/volume conformance")
@@ -802,6 +880,7 @@ def main():
         test_composite_plus_tail,
         test_revision_markers_and_publisher,
         test_publisher_and_revision_persistence,
+        test_group_position_prefer_last,
     ]
     failures = 0
     for test in tests:
