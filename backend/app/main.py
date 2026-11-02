@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Redirect
 from fastapi.templating import Jinja2Templates
 
 from app.database import MangaDatabase
+from app.database import release_dedupe_signature
 from app.calibre.scanner import CalibreMangaScanner
 from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
@@ -655,7 +656,9 @@ async def api_releases_flat_rows(
     seen_sigs = set()
     deduped = []
     for r in releases:
-        sig = r.get("guid") or (r.get("download_url") or r.get("link") or r.get("title"), tuple(sorted(r.get("volumes", []))), (r.get("release_group") or "").lower())
+        # Dedupe identity uses the SORTED group set so "(1r0n, Ushi)" and
+        # "[1r0n] [Ushi]" are the same release regardless of tag style/order.
+        sig = release_dedupe_signature(r)
         if sig not in seen_sigs:
             seen_sigs.add(sig)
             deduped.append(r)

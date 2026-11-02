@@ -656,25 +656,50 @@ def is_valid_group_candidate(clean: str) -> bool:
         return False
     return True
 
-def _split_group_list(candidate: str) -> Optional[List[str]]:
-    """Split a "+"-joined multi-group candidate into individually valid groups.
+# Multi-group tag separators: "(1r0n, Ushi)", "(1r0n & Ushi)", "(1r0n/Ushi)",
+# "(1r0n + Ushi)", "(1r0n and Ushi)".  Each piece is validated individually so a
+# format tag ("Digital", "Digital-Compilation") or a publisher can never enter a
+# multi-group list.
+_GROUP_SPLIT_RE = re.compile(r"\s*(?:[,&+]|/|\band\b)\s*", re.IGNORECASE)
 
-    ``(Rillant + Aquila + DigitalMangaFan)`` -> ``["Rillant", "Aquila",
-    "DigitalMangaFan"]``.  Only "+" is used as the multi-group separator here
-    (comma-separated group lists are handled separately by the broader group
-    work); if any part is not a valid group the candidate is kept intact.
+
+def split_release_group_value(value: str) -> List[str]:
+    """Split a stored/tagged release-group value into validated group names.
+
+    Returns the valid groups in order (deduplicated).  Used by the parser (multi-
+    group tags), by the database backfill of legacy ``release_group`` values, and
+    by the notifier.  Invalid pieces (format words, publishers, one-character
+    tokens) are dropped.
     """
-    if "+" not in candidate:
+    if not value:
+        return []
+    raw = str(value).strip()
+    if not raw:
+        return []
+    groups: List[str] = []
+    for part in _GROUP_SPLIT_RE.split(raw):
+        part = part.strip()
+        if not part:
+            continue
+        if not is_valid_group_candidate(part) or _is_known_publisher(part):
+            continue
+        if part not in groups:
+            groups.append(part)
+    return groups
+
+
+def _split_group_list(candidate: str) -> Optional[List[str]]:
+    """Split a multi-group bracket candidate into individually valid groups.
+
+    ``(1r0n, Ushi)`` / ``(1r0n & Ushi)`` / ``(1r0n/Ushi)`` /
+    ``(Rillant + Aquila + DigitalMangaFan)`` -> the validated list.  ``None`` when
+    the candidate has no group separator (a single group) or nothing valid can be
+    extracted from it.
+    """
+    if not candidate or not _GROUP_SPLIT_RE.search(candidate):
         return None
-    parts = [part.strip() for part in candidate.split("+") if part.strip()]
-    if len(parts) < 2:
-        return None
-    if all(
-        is_valid_group_candidate(part) and not _is_known_publisher(part)
-        for part in parts
-    ):
-        return parts
-    return None
+    groups = split_release_group_value(candidate)
+    return groups if groups else None
 
 
 def extract_release_groups(raw_title: str, known_groups: Optional[Iterable[str]] = None) -> List[str]:

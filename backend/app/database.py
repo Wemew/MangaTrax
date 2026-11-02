@@ -87,6 +87,106 @@ def tracked_media_clause(alias: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
+# Multi-group release tags (task-11)
+# ---------------------------------------------------------------------------
+# A release can carry several scanlation groups in one tag: "(1r0n, Ushi)",
+# "(1r0n & Ushi)", "[1r0n] [Ushi]".  The full set is persisted in
+# ``releases.release_groups_json`` next to the primary ``release_group``; every
+# prioritized-group comparison is SET MEMBERSHIP ("any stored group is a
+# prioritized group"), never whole-string equality.
+
+def release_groups_of(rel: Dict[str, Any]) -> List[str]:
+    """Return the release's group set (validated, deduplicated, primary first).
+
+    Reads ``release_groups_json`` when present and falls back to splitting the
+    legacy ``release_group`` value (legacy rows / direct SQL inserts) so both
+    the in-memory and SQL paths agree on the set.
+    """
+    if not isinstance(rel, dict):
+        return []
+    # In-memory payloads (scheduler rel_dict, webhook) may already carry the list.
+    explicit = rel.get("release_groups")
+    if isinstance(explicit, list):
+        groups = []
+        for value in explicit:
+            name = str(value or "").strip()
+            if name and name not in groups:
+                groups.append(name)
+        if groups:
+            return groups
+    raw = rel.get("release_groups_json")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, list):
+            groups: List[str] = []
+            for value in parsed:
+                name = str(value or "").strip()
+                if name and name not in groups:
+                    groups.append(name)
+            if groups:
+                return groups
+    from app.parser import split_release_group_value
+
+    groups = split_release_group_value(rel.get("release_group") or "")
+    if not groups:
+        primary = str(rel.get("release_group") or "").strip()
+        if primary:
+            groups = [primary]
+    return groups
+
+
+def release_prioritized_priority(rel: Dict[str, Any], priority_map: Dict[str, int]) -> int:
+    """Highest configured priority among the release's groups (0 = not prioritized).
+
+    A release tagged ``(1r0n, Ushi)`` is prioritized when EITHER group is a
+    prioritized group; the user's higher-ranked matching group wins.
+    """
+    if not priority_map:
+        return 0
+    best = 0
+    for group in release_groups_of(rel):
+        priority = priority_map.get(group.lower(), 0)
+        if priority > best:
+            best = priority
+    return best
+
+
+def release_is_prioritized(rel: Dict[str, Any], priority_map: Dict[str, int]) -> bool:
+    """True when any of the release's groups is a prioritized group."""
+    return release_prioritized_priority(rel, priority_map) > 0
+
+
+def release_dedupe_signature(rel: Dict[str, Any]):
+    """Dedupe signature: guid, else (link/download, volumes, sorted group set)."""
+    return rel.get("guid") or (
+        rel.get("download_url") or rel.get("link") or rel.get("title"),
+        tuple(sorted(rel.get("volumes") or [])),
+        tuple(sorted(group.lower() for group in release_groups_of(rel))),
+    )
+
+
+def prioritized_release_clause(alias: str = "") -> str:
+    """SQL predicate: any of the release's groups is a prioritized group.
+
+    Uses ``json_each(release_groups_json)`` (set membership) and keeps a legacy
+    whole-group fallback for rows inserted directly via SQL before the backfill
+    ran, so a joint release can never silently fall out of the VIP views.
+    ``alias`` is the releases table alias in the enclosing query (e.g. ``"r"``).
+    """
+    prefix = f"{alias}." if alias else ""
+    group_col = f"{prefix}release_group"
+    json_col = f"{prefix}release_groups_json"
+    return (
+        f"(lower(COALESCE({group_col}, '')) IN (SELECT lower(name) FROM prioritized_groups)"
+        f" OR EXISTS (SELECT 1 FROM json_each(COALESCE(NULLIF({json_col}, ''), '[]')) AS jg"
+        f" JOIN prioritized_groups pg ON lower(jg.value) = lower(pg.name)))"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Release status precedence model
 # ---------------------------------------------------------------------------
 # Release statuses fall into two families:
@@ -314,6 +414,7 @@ class MangaDatabase:
                     title TEXT NOT NULL,
                     series_name TEXT,
                     release_group TEXT DEFAULT '',
+                    release_groups_json TEXT DEFAULT '[]',
                     description TEXT DEFAULT '',
                     mangaupdates_url TEXT DEFAULT '',
                     is_bundle INTEGER DEFAULT 0,
@@ -342,6 +443,9 @@ class MangaDatabase:
             r_cols = [r["name"] for r in cur.fetchall()]
             if "release_group" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN release_group TEXT DEFAULT '';")
+            # Full multi-group set (task-11): JSON list next to the primary group.
+            if "release_groups_json" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN release_groups_json TEXT DEFAULT '[]';")
             if "description" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN description TEXT DEFAULT '';")
             if "mangaupdates_url" not in r_cols:
@@ -400,15 +504,45 @@ class MangaDatabase:
             # (_run_media_filter_once, run after this transaction); nothing here (or
             # anywhere else on the automatic startup path) may delete releases.
 
+            # Multi-group support (task-11): backfill the full group set from the
+            # legacy single ``release_group`` value.  Idempotent: rows whose list is
+            # already populated are skipped, so repeated init_db() calls are no-ops.
+            try:
+                from app.parser import split_release_group_value
+                cur.execute("SELECT id, release_group, release_groups_json FROM releases;")
+                for r in cur.fetchall():
+                    stored = (r["release_groups_json"] or "").strip()
+                    if stored and stored not in ("[]", "null"):
+                        continue
+                    groups = split_release_group_value(r["release_group"] or "")
+                    if groups:
+                        cur.execute(
+                            "UPDATE releases SET release_groups_json = ? WHERE id = ?;",
+                            (json.dumps(groups), r["id"]),
+                        )
+            except Exception:
+                pass
+
             # Re-evaluate and sanitize release_group in releases table
             try:
-                cur.execute("SELECT id, title, release_group FROM releases;")
+                cur.execute("SELECT id, title, release_group, release_groups_json FROM releases;")
                 all_rel = cur.fetchall()
-                from app.parser import extract_release_group
+                from app.parser import extract_release_groups
                 for r in all_rel:
-                    correct_rg = extract_release_group(r["title"]) or ""
+                    title_groups = extract_release_groups(r["title"]) or []
+                    if title_groups:
+                        correct_rg = title_groups[0]
+                        correct_json = json.dumps(title_groups)
+                    else:
+                        correct_rg = ""
+                        correct_json = "[]"
                     if (r["release_group"] or "") != correct_rg:
                         cur.execute("UPDATE releases SET release_group = ? WHERE id = ?;", (correct_rg, r["id"]))
+                    if (r["release_groups_json"] or "[]") != correct_json:
+                        cur.execute(
+                            "UPDATE releases SET release_groups_json = ? WHERE id = ?;",
+                            (correct_json, r["id"]),
+                        )
             except Exception:
                 pass
 
@@ -925,6 +1059,13 @@ class MangaDatabase:
         publisher = (rel.get("publisher") or "").strip()
         # Inferred full volume set (collected batch resolved from metadata).
         inferred_val = 1 if rel.get("inferred_volumes") else 0
+        # Full multi-group set: explicit list when provided, else split the primary.
+        stored_groups = rel.get("release_groups")
+        if not stored_groups:
+            from app.parser import split_release_group_value
+
+            stored_groups = split_release_group_value(rel.get("release_group") or "")
+        groups_json = json.dumps([str(g).strip() for g in stored_groups if str(g).strip()])
 
         with self.get_connection() as conn:
             cur = conn.cursor()
@@ -943,6 +1084,7 @@ class MangaDatabase:
                         title = ?,
                         series_name = ?,
                         release_group = COALESCE(?, release_group),
+                        release_groups_json = CASE WHEN ? != '[]' THEN ? ELSE release_groups_json END,
                         description = CASE WHEN ? != '' AND ? IS NOT NULL THEN ? ELSE description END,
                         mangaupdates_url = CASE WHEN ? != '' AND ? IS NOT NULL THEN ? ELSE mangaupdates_url END,
                         is_bundle = ?,
@@ -964,6 +1106,8 @@ class MangaDatabase:
                     rel["title"],
                     rel.get("series_name"),
                     rel.get("release_group"),
+                    groups_json,
+                    groups_json,
                     rel.get("description", ""),
                     rel.get("description"),
                     rel.get("description", ""),
@@ -993,16 +1137,17 @@ class MangaDatabase:
             else:
                 cur.execute("""
                     INSERT INTO releases (
-                        guid, title, series_name, release_group, description, mangaupdates_url,
+                        guid, title, series_name, release_group, release_groups_json, description, mangaupdates_url,
                         is_bundle, is_complete, volume_start, volume_end, volumes_json, missing_vols_json,
                         download_url, link, cover_url, source_feed_name, status, download_status, torrent_hash,
                         revision, publisher, inferred_volumes
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     guid,
                     rel["title"],
                     rel.get("series_name"),
                     rel.get("release_group") or "",
+                    groups_json,
                     rel.get("description") or "",
                     rel.get("mangaupdates_url") or "",
                     1 if rel.get("is_bundle") else 0,
@@ -1091,12 +1236,20 @@ class MangaDatabase:
             conn.commit()
             self._invalidate_grouped_cache()
 
+    def _prioritized_priority_map(self, cur) -> Dict[str, int]:
+        """Return {lower(group name): priority} for the prioritized groups."""
+        cur.execute("SELECT name, priority FROM prioritized_groups;")
+        return {
+            str(row["name"] or "").strip().lower(): int(row["priority"] or 0)
+            for row in cur.fetchall()
+            if str(row["name"] or "").strip()
+        }
+
     def get_releases(self, status: Optional[str] = None, limit: int = 500, offset: int = 0) -> List[Dict[str, Any]]:
         media_guard = tracked_media_clause()
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT lower(name) FROM prioritized_groups;")
-            p_groups = {row[0] for row in cur.fetchall()}
+            priority_map = self._prioritized_priority_map(cur)
 
             if status == "COMPLETED":
                 cur.execute(f"""
@@ -1136,8 +1289,10 @@ class MangaDatabase:
                 r["missing_volumes"] = json.loads(r["missing_vols_json"] or "[]")
                 r["is_rerelease"] = bool(r.get("revision"))
                 r["is_inferred"] = bool(r.get("inferred_volumes"))
-                r_group = (r.get("release_group") or "").strip().lower()
-                r["is_prioritized"] = r_group in p_groups if r_group else False
+                # Multi-group set membership (task-11): ANY group may be prioritized.
+                r["release_groups"] = release_groups_of(r)
+                r["is_prioritized"] = release_is_prioritized(r, priority_map)
+                r["prioritized_priority"] = release_prioritized_priority(r, priority_map)
 
                 # Naming model: releases.series_name stays the STABLE matching key;
                 # the AniList title is exposed separately as the cosmetic display name
@@ -1175,18 +1330,22 @@ class MangaDatabase:
             cur.execute(f"""
                 SELECT * FROM releases
                 WHERE (lower(title) LIKE ? ESCAPE '\\'
-                   OR lower(COALESCE(series_name, '')) LIKE ? ESCAPE '\\')
+                   OR lower(COALESCE(series_name, '')) LIKE ? ESCAPE '\\'
+                   OR lower(COALESCE(release_group, '')) LIKE ? ESCAPE '\\'
+                   OR EXISTS (SELECT 1 FROM json_each(COALESCE(NULLIF(release_groups_json, ''), '[]')) AS jg
+                              WHERE lower(jg.value) LIKE ? ESCAPE '\\'))
                   AND {tracked_media_clause()}
                 ORDER BY
                     CASE
                         WHEN lower(title) LIKE ? ESCAPE '\\' THEN 0
                         WHEN lower(COALESCE(series_name, '')) LIKE ? ESCAPE '\\' THEN 1
-                        ELSE 2
+                        WHEN lower(COALESCE(release_group, '')) LIKE ? ESCAPE '\\' THEN 2
+                        ELSE 3
                     END,
                     updated_at DESC,
                     id DESC
                 LIMIT ?;
-            """, (contains, contains, prefix, prefix, int(limit)))
+            """, (contains, contains, contains, contains, prefix, prefix, prefix, int(limit)))
             rows = [dict(r) for r in cur.fetchall()]
 
             cur.execute("SELECT * FROM manga_metadata_cache;")
@@ -1198,6 +1357,7 @@ class MangaDatabase:
             row["volumes"] = json.loads(row.get("volumes_json") or "[]")
             row["missing_volumes"] = json.loads(row.get("missing_vols_json") or "[]")
             row["is_complete"] = bool(row.get("is_complete", 0) or is_complete_series_release(row.get("title", "")))
+            row["release_groups"] = release_groups_of(row)
             stable = (row.get("series_name") or "").strip()
             meta = meta_cache.get(stable.lower()) if stable else None
             row["display_series_name"] = (display_title_from_meta(stable, meta) or stable) if stable else ""
@@ -1304,14 +1464,15 @@ class MangaDatabase:
             cur.execute(query, tuple(params))
             rows = [dict(row) for row in cur.fetchall()]
 
-            cur.execute("SELECT lower(name) FROM prioritized_groups;")
-            p_groups = {row[0] for row in cur.fetchall()}
+            priority_map = self._prioritized_priority_map(cur)
 
             from app.parser import is_complete_series_release
             for r in rows:
                 r["is_complete"] = bool(r.get("is_complete", 0) or is_complete_series_release(r.get("title", "")))
                 r["is_inferred"] = bool(r.get("inferred_volumes"))
-                r["is_prioritized"] = bool(r.get("release_group") and r["release_group"].lower() in p_groups)
+                r["release_groups"] = release_groups_of(r)
+                r["is_prioritized"] = release_is_prioritized(r, priority_map)
+                r["prioritized_priority"] = release_prioritized_priority(r, priority_map)
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
                 # Fallback to cache if description, mangaupdates_url, or canonical English title wasn't directly populated on release
                 s_name = r.get("series_name")
@@ -2019,10 +2180,10 @@ class MangaDatabase:
 
         persisted = 0
         media_guard = tracked_media_clause()
+        prioritized_guard = prioritized_release_clause()
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT lower(name) FROM prioritized_groups;")
-            p_groups = {row[0] for row in cur.fetchall()}
+            priority_map = self._prioritized_priority_map(cur)
 
             if prioritized_only:
                 if status == "COMPLETED":
@@ -2031,14 +2192,14 @@ class MangaDatabase:
                         WHERE (is_complete = 1 OR lower(title) LIKE '%complete%')
                           AND status NOT IN ('BLACKLISTED', 'IGNORED')
                           AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
-                          AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                          AND {prioritized_guard}
                           AND {media_guard}
                         ORDER BY updated_at DESC;
                     """)
                 elif status:
                     cur.execute(f"""
                         SELECT * FROM releases 
-                        WHERE status = ? AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                        WHERE status = ? AND {prioritized_guard}
                           AND {media_guard}
                         ORDER BY updated_at DESC;
                     """, (status,))
@@ -2047,7 +2208,7 @@ class MangaDatabase:
                         SELECT * FROM releases 
                         WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
                           AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
-                          AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                          AND {prioritized_guard}
                           AND {media_guard}
                         ORDER BY 
                             CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
@@ -2086,8 +2247,10 @@ class MangaDatabase:
                 r["is_inferred"] = bool(r.get("inferred_volumes"))
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
                 r["missing_volumes"] = json.loads(r["missing_vols_json"] or "[]")
-                r_group = (r.get("release_group") or "").strip().lower()
-                r["is_prioritized"] = r_group in p_groups if r_group else False
+                # Multi-group set membership (task-11).
+                r["release_groups"] = release_groups_of(r)
+                r["is_prioritized"] = release_is_prioritized(r, priority_map)
+                r["prioritized_priority"] = release_prioritized_priority(r, priority_map)
 
             cur.execute("SELECT * FROM series_tracking;")
             tracked_map = {}
@@ -2273,7 +2436,9 @@ class MangaDatabase:
                         "has_wanted": False,
                         "has_discovery": False,
                         "has_in_calibre": False,
-                        "has_prioritized": False
+                        "has_prioritized": False,
+                        # Highest configured priority among any release's group set.
+                        "prioritized_priority": 0
                     }
 
                 group = groups_dict[canonical_key]
@@ -2361,13 +2526,14 @@ class MangaDatabase:
                                     pass
 
                 # Deduplicate releases in group: same guid or (download_url, volume set,
-                # group).  The re-release revision is part of the identity so a "(f2)"
-                # fix is never silently collapsed into the original; the supersede
-                # pass below keeps the higher revision visible where they do coincide.
+                # sorted GROUP SET).  The re-release revision is part of the identity so
+                # a "(f2)" fix is never silently collapsed into the original; the
+                # supersede pass below keeps the higher revision visible where they do
+                # coincide.
                 sig = rel.get("guid") or (
                     rel.get("download_url") or rel.get("link") or rel.get("title"),
                     tuple(sorted(rel.get("volumes", []))),
-                    (rel.get("release_group") or "").lower(),
+                    tuple(sorted(g.lower() for g in release_groups_of(rel))),
                     rel.get("revision") or 0,
                 )
                 rel["is_superseded"] = False
@@ -2390,6 +2556,10 @@ class MangaDatabase:
 
                 if rel.get("is_prioritized"):
                     group["has_prioritized"] = True
+                # Highest-ranked matching prioritized group wins the ordering.
+                rel_priority = int(rel.get("prioritized_priority") or 0)
+                if rel_priority > group["prioritized_priority"]:
+                    group["prioritized_priority"] = rel_priority
 
                 if not group["cover_url"] and rel.get("cover_url"):
                     group["cover_url"] = rel["cover_url"]
@@ -2404,7 +2574,7 @@ class MangaDatabase:
                 for rel_row in group["releases"]:
                     identity = (
                         tuple(sorted(rel_row.get("volumes") or [])),
-                        (rel_row.get("release_group") or "").lower(),
+                        tuple(sorted(g.lower() for g in release_groups_of(rel_row))),
                     )
                     by_identity.setdefault(identity, []).append(rel_row)
                 for candidates in by_identity.values():
@@ -2452,7 +2622,8 @@ class MangaDatabase:
                     priority = 6
                 else:
                     priority = 7
-                return (priority, g["series_name"].lower())
+                # Within a tier, the user's highest-ranked matching group sorts first.
+                return (priority, -(g.get("prioritized_priority") or 0), g["series_name"].lower())
 
             result_groups.sort(key=sort_key)
 
@@ -2490,10 +2661,13 @@ class MangaDatabase:
     def get_prioritized_groups(self) -> List[Dict[str, Any]]:
         with self.get_connection() as conn:
             cur = conn.cursor()
+            # release_count is SET-based: a joint tag "(1r0n, Ushi)" counts for both.
             cur.execute(f"""
                 SELECT pg.*, 
                        (SELECT count(*) FROM releases r
-                         WHERE lower(COALESCE(r.release_group, '')) = lower(pg.name)
+                         WHERE (lower(COALESCE(r.release_group, '')) = lower(pg.name)
+                                OR EXISTS (SELECT 1 FROM json_each(COALESCE(NULLIF(r.release_groups_json, ''), '[]')) AS jg
+                                           WHERE lower(jg.value) = lower(pg.name)))
                            AND {tracked_media_clause('r')}) as release_count
                 FROM prioritized_groups pg
                 ORDER BY pg.priority DESC, pg.name COLLATE NOCASE ASC;
@@ -2523,32 +2697,53 @@ class MangaDatabase:
             self._invalidate_grouped_cache()
 
     def is_group_prioritized(self, group_name: str) -> bool:
+        """True when *group_name* (or ANY group in a joint tag) is prioritized.
+
+        ``"Ushi"`` and ``"1r0n, Ushi"`` both answer True when either component is a
+        prioritized group; the membership test is set-based, not whole-string.
+        """
         if not group_name:
             return False
+        from app.parser import split_release_group_value
+
+        candidates = split_release_group_value(group_name) or [str(group_name).strip()]
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT id FROM prioritized_groups WHERE lower(name) = lower(?);", (group_name.strip(),))
-            return cur.fetchone() is not None
+            for candidate in candidates:
+                cur.execute(
+                    "SELECT id FROM prioritized_groups WHERE lower(name) = lower(?);",
+                    (candidate,),
+                )
+                if cur.fetchone() is not None:
+                    return True
+            return False
 
     def get_prioritized_releases(self, status: Optional[str] = None, limit: int = 500, offset: int = 0) -> List[Dict[str, Any]]:
-        """Returns releases published by prioritized release groups."""
+        """Returns releases published by prioritized release groups.
+
+        Set membership: a release tagged ``(1r0n, Ushi)`` is included when EITHER
+        group is prioritized.  Rows are ordered by the user's highest-ranked
+        matching group (descending), then the usual status/recency order.
+        """
         media_guard = tracked_media_clause()
+        prioritized_guard = prioritized_release_clause()
         with self.get_connection() as conn:
             cur = conn.cursor()
+            priority_map = self._prioritized_priority_map(cur)
             if status == "COMPLETED":
                 cur.execute(f"""
                     SELECT * FROM releases 
                     WHERE (is_complete = 1 OR lower(title) LIKE '%complete%')
                       AND status NOT IN ('BLACKLISTED', 'IGNORED')
                       AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
-                      AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                      AND {prioritized_guard}
                       AND {media_guard}
                     ORDER BY updated_at DESC LIMIT ? OFFSET ?;
                 """, (limit, offset))
             elif status:
                 cur.execute(f"""
                     SELECT * FROM releases 
-                    WHERE status = ? AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                    WHERE status = ? AND {prioritized_guard}
                       AND {media_guard}
                     ORDER BY updated_at DESC LIMIT ? OFFSET ?;
                 """, (status, limit, offset))
@@ -2557,7 +2752,7 @@ class MangaDatabase:
                     SELECT * FROM releases 
                     WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
                       AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
-                      AND lower(COALESCE(release_group, '')) IN (SELECT lower(name) FROM prioritized_groups)
+                      AND {prioritized_guard}
                       AND {media_guard}
                     ORDER BY 
                         CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
@@ -2570,7 +2765,11 @@ class MangaDatabase:
                 r["is_complete"] = bool(r.get("is_complete", 0) or is_complete_series_release(r.get("title", "")))
                 r["volumes"] = json.loads(r["volumes_json"] or "[]")
                 r["missing_volumes"] = json.loads(r["missing_vols_json"] or "[]")
+                r["release_groups"] = release_groups_of(r)
                 r["is_prioritized"] = True
+                r["prioritized_priority"] = release_prioritized_priority(r, priority_map)
+            # Highest-ranked matching group first (stable: SQL order kept within a rank).
+            rows.sort(key=lambda r: -(r.get("prioritized_priority") or 0))
             return rows
 
     def reset_all_data(self) -> Dict[str, Any]:

@@ -340,9 +340,13 @@ def test_compound_format_tag_is_not_a_release_group():
     assert extract_release_group("[danke-Empire] Bleach v01-v20 [Digital] [1080p] [CBZ]") == "danke-Empire"
     assert extract_release_group("[Lu自主规制] Chainsaw Man Vol. 01-11 [Hui]") == "Lu自主规制"
     assert extract_release_group("[Manga] Frieren Vol. 01-10 [danke-Empire] [Completed]") == "danke-Empire"
+    # Comma-separated joint tag: primary group + full set (task-11).
     assert extract_release_group(
         "Anemone wa Netsu o Obiru v01-03 (2025-2026) (Digital) (1r0n, Anon)"
-    ) == "1r0n, Anon"
+    ) == "1r0n"
+    assert extract_release_groups(
+        "Anemone wa Netsu o Obiru v01-03 (2025-2026) (Digital) (1r0n, Anon)"
+    ) == ["1r0n", "Anon"]
     # A preserved volume range bracket is not a group either.
     assert extract_release_group("DanMachi Omnibus 1 (Vols 1-3)") is None
     print("    [PASSED] 'Oak' wins; Digital-Compilation rejected; real groups intact.")
@@ -613,7 +617,8 @@ def test_composite_plus_tail():
     assert parsed["chapter_ranges"] == [[47.0, 51.0]], parsed["chapter_ranges"]
     assert parsed["chapter_start"] == 47.0 and parsed["chapter_end"] == 51.0, parsed
     # The format-tag-with-plus block is not a group; the real group wins.
-    assert parsed["release_group"] == "1r0n, Rillant", parsed["release_group"]
+    assert parsed["release_group"] == "1r0n", parsed["release_group"]
+    assert parsed["release_groups"] == ["1r0n", "Rillant"], parsed["release_groups"]
     assert "Digital" not in (parsed["release_group"] or "")
     assert "Digital-Compilation" not in (parsed["release_group"] or "")
 
@@ -715,7 +720,10 @@ def test_revision_markers_and_publisher():
     assert extract_release_group("[Lu自主规制] Chainsaw Man Vol. 01-11") == "Lu自主规制"
     assert extract_release_group(
         "Anemone wa Netsu o Obiru v01-03 (2025-2026) (Digital) (1r0n, Anon)"
-    ) == "1r0n, Anon"
+    ) == "1r0n"
+    assert extract_release_groups(
+        "Anemone wa Netsu o Obiru v01-03 (2025-2026) (Digital) (1r0n, Anon)"
+    ) == ["1r0n", "Anon"]
     assert extract_release_group("(DigitalMangaFan)") == "DigitalMangaFan"
     print("    [PASSED] revisions parsed as data; publishers never masquerade as groups.")
 
@@ -844,7 +852,7 @@ def test_group_position_prefer_last():
         ("[Manga] Frieren Vol. 01-10 [danke-Empire] [Completed]", "danke-Empire"),
         ("[Seven Seas] [Stick] The Tale of a Little Alchemist v01-04 [Digital]", "Stick"),
         ("Manga.Million.SiteRip.1600p.AVIF.2026-TenmaLand (Multi)", "TenmaLand"),
-        ("Anemone wa Netsu o Obiru v01-03 (2025-2026) (Digital) (1r0n, Anon)", "1r0n, Anon"),
+        ("Anemone wa Netsu o Obiru v01-03 (2025-2026) (Digital) (1r0n, Anon)", "1r0n"),
         ("(Square Enix)", None),
         ("Overlord v01-14 [Yen On]", None),
     ]:

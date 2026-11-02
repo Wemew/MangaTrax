@@ -42,7 +42,10 @@ def test_complete_series_bundle_extraction():
     assert parsed["volume_start"] == 1.0
     assert parsed["volume_end"] is None
     assert parsed["volumes"] == []
-    assert parsed["release_group"] == "1r0n, Ushi"
+    # Multi-group tags (task-11): primary stays in release_group, the full set is
+    # exposed as release_groups (comma-separated tag split into its groups).
+    assert parsed["release_group"] == "1r0n"
+    assert parsed["release_groups"] == ["1r0n", "Ushi"]
     print(" [PASSED] Complete series bundle extraction and group isolation verified.")
 
 def test_external_metadata_volume_resolution():

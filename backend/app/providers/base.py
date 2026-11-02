@@ -21,6 +21,7 @@ class ReleaseItem:
         guid: Optional[str] = None,
         source_feed_name: Optional[str] = None,
         release_group: Optional[str] = None,
+        release_groups: Optional[List[str]] = None,
         revision: Optional[int] = None,
         publisher: Optional[str] = None,
         raw_data: Optional[Dict[str, Any]] = None
@@ -30,6 +31,8 @@ class ReleaseItem:
         self.download_url = download_url.strip() if download_url else self.link
         self.series_name = series_name
         self.release_group = release_group
+        # Full multi-group set; the primary stays in release_group (display/back-compat).
+        self.release_groups = list(release_groups or ([release_group] if release_group else []))
         # "(f)"/"(f2)" re-release marker and the publisher (official-release signal).
         self.revision = revision
         self.publisher = publisher
@@ -59,6 +62,7 @@ class ReleaseItem:
             "download_url": self.download_url,
             "series_name": self.series_name,
             "release_group": self.release_group,
+            "release_groups": self.release_groups,
             "revision": self.revision,
             "publisher": self.publisher,
             "is_bundle": self.is_bundle,

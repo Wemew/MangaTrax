@@ -1,5 +1,5 @@
 {% for r in releases %}
-<tr class="hover:bg-slate-850/50 transition-colors release-row" data-release-name="{{ r.title|lower }} {{ (r.series_name or '')|lower }} {{ (r.display_series_name or '')|lower }} {{ (r.romaji_name or '')|lower }} {{ (r.release_group or '')|lower }}">
+<tr class="hover:bg-slate-850/50 transition-colors release-row" data-release-name="{{ r.title|lower }} {{ (r.series_name or '')|lower }} {{ (r.display_series_name or '')|lower }} {{ (r.romaji_name or '')|lower }} {{ (r.release_group or '')|lower }} {{ (r.release_groups or [])|join(' ')|lower }}">
     <td class="py-3 px-4 text-center">
         {% if r.cover_url %}
         <img src="/api/covers?url={{ r.cover_url|urlencode }}" alt="Cover" onclick="openImageModal(this.src, '{{ (r.display_series_name or r.series_name or r.title)|escape }}')" class="w-8 h-12 object-cover rounded shadow border border-slate-700/60 inline-block cursor-pointer hover:opacity-90 transition-all cover-placeholder" loading="lazy" decoding="async" title="Click to enlarge cover artwork">
@@ -19,17 +19,22 @@
                 Romaji: {{ r.romaji_name }}
             </span>
             {% endif %}
-            {% if r.release_group %}
+            {% set row_groups = r.release_groups or ([r.release_group] if r.release_group else []) %}
+            {% for grp in row_groups %}
+            {% if loop.first %}
             {% if r.is_prioritized %}
             <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-bold shrink-0">
-                <i data-lucide="star" class="w-2.5 h-2.5 fill-amber-400"></i> {{ r.release_group }}
+                <i data-lucide="star" class="w-2.5 h-2.5 fill-amber-400"></i> {{ grp }}
             </span>
             {% else %}
-            <button onclick="quickPrioritizeGroup('{{ r.release_group|escape }}')" title="Add to Prioritized Groups" class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-slate-800 text-slate-300 hover:text-amber-300 border border-slate-700 text-[10px] font-medium shrink-0 transition-colors">
-                <i data-lucide="star" class="w-2.5 h-2.5"></i> {{ r.release_group }}
+            <button onclick="quickPrioritizeGroup('{{ grp|escape }}')" title="Add to Prioritized Groups" class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-slate-800 text-slate-300 hover:text-amber-300 border border-slate-700 text-[10px] font-medium shrink-0 transition-colors">
+                <i data-lucide="star" class="w-2.5 h-2.5"></i> {{ grp }}
             </button>
             {% endif %}
+            {% else %}
+            <span class="inline-flex items-center px-1.5 py-0.5 rounded-md bg-slate-900/80 border border-slate-800 text-slate-400 text-[10px] font-medium shrink-0" title="Joint release group: {{ grp }}">{{ grp }}</span>
             {% endif %}
+            {% endfor %}
         </div>
         {% if r.link %}
         <a href="{{ r.link|safe_url }}" target="_blank" rel="noopener noreferrer" class="font-bold text-slate-100 text-xs sm:text-sm hover:text-brand-400 transition-colors inline-flex items-center gap-1.5 max-w-full break-words-anywhere" title="Open RSS Feed Post: {{ r.title }}">
@@ -48,17 +53,22 @@
     <td class="py-3 px-4 max-w-md">
         <div class="font-bold text-slate-200 text-sm flex items-center gap-2">
             <span>{{ r.display_series_name or r.series_name or '-' }}</span>
-            {% if r.release_group %}
+            {% set row_groups2 = r.release_groups or ([r.release_group] if r.release_group else []) %}
+            {% for grp in row_groups2 %}
+            {% if loop.first %}
             {% if r.is_prioritized %}
             <span class="px-1.5 py-0.2 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[9px] font-bold flex items-center gap-0.5">
-                <i data-lucide="star" class="w-2.5 h-2.5 fill-amber-400"></i> {{ r.release_group }}
+                <i data-lucide="star" class="w-2.5 h-2.5 fill-amber-400"></i> {{ grp }}
             </span>
             {% else %}
-            <button onclick="quickPrioritizeGroup('{{ r.release_group|escape }}')" title="Prioritize Group" class="px-1.5 py-0.2 rounded bg-slate-800 text-slate-400 hover:text-amber-300 border border-slate-700 text-[9px] flex items-center gap-0.5 transition-colors">
-                <i data-lucide="star" class="w-2.5 h-2.5"></i> {{ r.release_group }}
+            <button onclick="quickPrioritizeGroup('{{ grp|escape }}')" title="Prioritize Group" class="px-1.5 py-0.2 rounded bg-slate-800 text-slate-400 hover:text-amber-300 border border-slate-700 text-[9px] flex items-center gap-0.5 transition-colors">
+                <i data-lucide="star" class="w-2.5 h-2.5"></i> {{ grp }}
             </button>
             {% endif %}
+            {% else %}
+            <span class="px-1.5 py-0.2 rounded bg-slate-900/80 border border-slate-800 text-slate-400 text-[9px] font-medium" title="Joint release group: {{ grp }}">{{ grp }}</span>
             {% endif %}
+            {% endfor %}
         </div>
         <div class="mt-1 flex items-center gap-1.5 flex-wrap">
             {% if r.is_complete %}

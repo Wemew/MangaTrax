@@ -5,8 +5,25 @@ import urllib.error
 from typing import Dict, Any, Optional
 
 from app import security
+from app.parser import split_release_group_value
 
 logger = logging.getLogger("mangatrax.notifier")
+
+
+def _release_group_list(release: Dict[str, Any]):
+    """Full multi-group list for a release payload (primary first).
+
+    Uses the persisted list when present, else splits the legacy single value, so
+    webhooks carry every group a joint release was tagged with.
+    """
+    groups = release.get("release_groups")
+    if not isinstance(groups, list) or not groups:
+        groups = split_release_group_value(release.get("release_group") or "")
+    if not groups:
+        primary = str(release.get("release_group") or "").strip()
+        if primary:
+            groups = [primary]
+    return groups
 
 class SimpleHttpResponse:
     def __init__(self, status_code: int, text: str):
@@ -51,6 +68,7 @@ class NotificationService:
         cover = release.get("cover_url")
         feed = release.get("source_feed_name", "")
         group = release.get("release_group", "")
+        groups = _release_group_list(release)
         revision = release.get("revision")
         publisher = (release.get("publisher") or "").strip()
 
@@ -67,6 +85,9 @@ class NotificationService:
         ]
         if group:
             fields.append({"name": "Group", "value": group, "inline": True})
+        if len(groups) > 1:
+            # Joint tag "(1r0n, Ushi)": primary above, full set here.
+            fields.append({"name": "Groups", "value": ", ".join(groups), "inline": True})
         if publisher:
             # Publisher = official-release quality signal.
             fields.append({"name": "Publisher", "value": publisher, "inline": True})
@@ -84,7 +105,14 @@ class NotificationService:
             fields=fields,
             color=0xf59e0b # Amber
         )
-        self._send_generic({"event": "NEW_REQUEST", "release": release})
+        self._send_generic({"event": "NEW_REQUEST", "release": self._release_payload(release)})
+
+    @staticmethod
+    def _release_payload(release: Dict[str, Any]) -> Dict[str, Any]:
+        """Release payload carrying the full group list plus the primary group."""
+        payload = dict(release)
+        payload["release_groups"] = _release_group_list(release)
+        return payload
 
     def notify_acquired(self, release: Dict[str, Any]):
         """Trigger notification when a requested manga is added to Calibre."""
@@ -106,7 +134,7 @@ class NotificationService:
             fields=fields,
             color=0x10b981 # Emerald
         )
-        self._send_generic({"event": "ACQUIRED", "release": release})
+        self._send_generic({"event": "ACQUIRED", "release": self._release_payload(release)})
 
     def _send_discord(self, title: str, description: str, url: Optional[str] = None, image_url: Optional[str] = None, fields: Optional[list] = None, color: int = 0xf59e0b):
         if not self.discord_webhook:

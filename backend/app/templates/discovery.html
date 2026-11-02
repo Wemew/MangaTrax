@@ -90,17 +90,24 @@
                             {% endif %}
                         </div>
                         <div class="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
-                            {% if item.release_group %}
+                            {% set item_groups = item.release_groups or ([item.release_group] if item.release_group else []) %}
+                            {% for grp in item_groups %}
+                            {% if loop.first %}
                             {% if item.is_prioritized %}
-                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-bold shrink-0" title="Prioritized VIP Group: {{ item.release_group }}">
-                                <i data-lucide="star" class="w-2.5 h-2.5 fill-amber-400"></i> {{ item.release_group }}
+                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-bold shrink-0" title="Prioritized VIP Group: {{ grp }}">
+                                <i data-lucide="star" class="w-2.5 h-2.5 fill-amber-400"></i> {{ grp }}
                             </span>
                             {% else %}
-                            <button type="button" onclick="quickPrioritizeGroup('{{ item.release_group|escape }}')" title="Add '{{ item.release_group }}' to Prioritized VIP Groups" class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-900/90 hover:bg-slate-800 text-slate-400 hover:text-amber-300 border border-slate-800 hover:border-amber-500/30 text-[10px] font-medium transition-colors shrink-0">
-                                <i data-lucide="star" class="w-2.5 h-2.5"></i> {{ item.release_group }}
+                            <button type="button" onclick="quickPrioritizeGroup('{{ grp|escape }}')" title="Add '{{ grp }}' to Prioritized VIP Groups" class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-900/90 hover:bg-slate-800 text-slate-400 hover:text-amber-300 border border-slate-800 hover:border-amber-500/30 text-[10px] font-medium transition-colors shrink-0">
+                                <i data-lucide="star" class="w-2.5 h-2.5"></i> {{ grp }}
                             </button>
                             {% endif %}
+                            {% else %}
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-md bg-slate-900/90 border border-slate-800 text-slate-400 text-[10px] font-medium shrink-0" title="Joint release group: {{ grp }}">
+                                {{ grp }}
+                            </span>
                             {% endif %}
+                            {% endfor %}
                             {% if item.publisher %}
                             <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-violet-500/20 border border-violet-500/40 text-violet-300 text-[10px] font-bold shrink-0" title="Official publisher (quality signal): {{ item.publisher }}">
                                 <i data-lucide="badge-check" class="w-2.5 h-2.5"></i> {{ item.publisher }}
