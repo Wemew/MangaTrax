@@ -248,8 +248,8 @@ class NyaaMangaProvider(BaseFeedProvider):
             if reached_date_cutoff:
                 break
 
-            # Polite delay between pages
-            if page < max_pages and delay_sec > 0:
+            # Polite delay between pages (respects start_page offset)
+            if page < (start_page + max_pages - 1) and delay_sec > 0:
                 time.sleep(delay_sec)
 
         return results

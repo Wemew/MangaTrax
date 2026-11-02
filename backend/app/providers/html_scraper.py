@@ -1,5 +1,7 @@
 import re
 import logging
+import urllib.request
+import urllib.error
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
 try:
@@ -34,6 +36,37 @@ class HtmlScraperProvider(BaseFeedProvider):
         self.next_selector = self.config.get("next_selector") or "a.next, a.next-page, a[rel='next']"
         self.max_pages = int(self.config.get("max_pages", 2))
 
+    def _fetch_page_html(
+        self,
+        url: str,
+        headers: Dict[str, str],
+        client: Optional[Any] = None
+    ) -> Optional[str]:
+        """
+        Safely fetches HTML content using an active httpx client if available,
+        falling back to standard library urllib.request on failure or if httpx is missing.
+        Guarantees that network errors never raise unhandled exceptions.
+        """
+        if client is not None:
+            try:
+                resp = client.get(url)
+                resp.raise_for_status()
+                return resp.text
+            except Exception as e:
+                logger.warning(f"httpx fetch error for {url}: {e}. Retrying with urllib fallback.")
+
+        # Fallback to standard library urllib.request
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15.0) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            logger.warning(f"HTTP error fetching {url} via urllib: {e.code} {e.reason}")
+            return None
+        except Exception as e:
+            logger.warning(f"Network error fetching {url} via urllib: {e}")
+            return None
+
     def fetch_releases(self) -> List[ReleaseItem]:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -44,14 +77,19 @@ class HtmlScraperProvider(BaseFeedProvider):
         current_url = self.url
         page_num = 1
 
-        with httpx.Client(headers=headers, timeout=15.0, follow_redirects=True) as client:
+        client = None
+        if httpx is not None:
+            try:
+                client = httpx.Client(headers=headers, timeout=15.0, follow_redirects=True)
+            except Exception as e:
+                logger.warning(f"Failed to initialize httpx.Client for '{self.name}': {e}. Falling back to urllib.")
+                client = None
+
+        try:
             while current_url and page_num <= self.max_pages:
-                try:
-                    resp = client.get(current_url)
-                    resp.raise_for_status()
-                    html_text = resp.text
-                except Exception as e:
-                    logger.warning(f"Error fetching page {page_num} ({current_url}): {e}")
+                html_text = self._fetch_page_html(current_url, headers, client=client)
+                if not html_text:
+                    logger.warning(f"Could not retrieve HTML for page {page_num} ({current_url}). Stopping crawl.")
                     break
 
                 soup = BeautifulSoup(html_text, "html.parser")
@@ -152,5 +190,11 @@ class HtmlScraperProvider(BaseFeedProvider):
                         break
                 else:
                     break
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
         return results

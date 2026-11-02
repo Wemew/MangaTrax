@@ -546,6 +546,7 @@ class MangaDatabase:
                         download_url = ?,
                         link = ?,
                         cover_url = ?,
+                        status = CASE WHEN status = 'IGNORED' THEN status ELSE COALESCE(?, status) END,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?;
                 """, (
@@ -567,6 +568,7 @@ class MangaDatabase:
                     rel.get("download_url"),
                     rel.get("link"),
                     rel.get("cover_url"),
+                    rel.get("status"),
                     rel_id
                 ))
                 conn.commit()
@@ -710,6 +712,7 @@ class MangaDatabase:
             if row:
                 d = dict(row)
                 d["volumes"] = json.loads(d.get("volumes_json") or "[]")
+                d["missing_volumes"] = json.loads(d.get("missing_vols_json") or "[]")
                 return d
             return None
 
@@ -897,6 +900,7 @@ class MangaDatabase:
             else:
                 cur.execute("UPDATE releases SET status = 'REQUESTED', updated_at = CURRENT_TIMESTAMP WHERE lower(series_name) = lower(?);", (clean,))
             conn.commit()
+            self._invalidate_grouped_cache()
             return True
 
     # --- Feeds ---
@@ -982,6 +986,7 @@ class MangaDatabase:
             cur.execute("UPDATE series_tracking SET description = '';")
             count = cur.rowcount
             conn.commit()
+            self._invalidate_grouped_cache()
             self.log_activity("DEBUG_CLEAR", "Cleared all manga descriptions", f"Reset descriptions across {count} tracked series.")
             return count
 
@@ -992,6 +997,7 @@ class MangaDatabase:
             cur.execute("DELETE FROM releases WHERE status = 'DISCOVERY';")
             count = cur.rowcount
             conn.commit()
+            self._invalidate_grouped_cache()
             self.log_activity("DEBUG_CLEAR", "Cleared discovered manga series", f"Removed {count} unreviewed discovery releases.")
             return count
 
@@ -1085,6 +1091,7 @@ class MangaDatabase:
                     logger.debug(f"Normalization failed for '{s_name}': {e}")
 
             conn.commit()
+            self._invalidate_grouped_cache()
             if updated_count > 0:
                 self.log_activity(
                     "TITLES_NORMALIZED",

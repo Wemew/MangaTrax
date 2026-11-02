@@ -64,6 +64,8 @@ DEFAULT_KNOWN_GROUPS = [
     "Lu自主规制", "a-sloth"
 ]
 
+MAX_BUNDLE_SPAN = 1000
+
 def is_valid_group_candidate(clean: str) -> bool:
     clean = clean.strip()
     if not clean or len(clean) < 2 or len(clean) > 40:
@@ -393,9 +395,14 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
             if start_vol > end_vol:
                 start_vol, end_vol = end_vol, start_vol
 
+            # Clamp span to safe upper limit to prevent algorithmic complexity DoS
+            if (end_vol - start_vol) > MAX_BUNDLE_SPAN:
+                end_vol = start_vol + MAX_BUNDLE_SPAN
+
             vols = []
             curr = int(start_vol)
-            while curr <= int(end_vol):
+            max_vol = int(end_vol)
+            while curr <= max_vol and len(vols) <= MAX_BUNDLE_SPAN:
                 vols.append(float(curr))
                 curr += 1
 

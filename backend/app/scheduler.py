@@ -30,6 +30,8 @@ class MangaScheduler:
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._calibre_sync_lock = threading.Lock()
+        self.last_calibre_sync: float = 0.0
         self.is_backfilling = False
         self.stop_backfill_requested = False
 
@@ -55,78 +57,91 @@ class MangaScheduler:
         Scans the Calibre metadata.db in zero-lock read-only mode, updates series tracking,
         and auto-resolves any requests for volumes that have now been added to Calibre.
         """
-        calibre_path = self.db.get_setting("calibre_path", "/calibre")
-        scanner = CalibreMangaScanner(calibre_path)
-        if not scanner.is_available():
-            msg = f"Calibre library not accessible at: {calibre_path}"
-            logger.warning(msg)
-            return {"success": False, "message": msg, "synced_series": 0, "resolved_requests": 0}
-
-        try:
-            series_list = scanner.get_all_series()
-            volumes_map = scanner.get_all_volumes_per_series()
-            synced_count = self.db.sync_calibre_series(series_list, volumes_map=volumes_map)
-
-            # Build matcher
-            meta_cache = self.db.get_all_manga_metadata_cache()
-            matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
-
-            # Check pending requests against Calibre
-            pending = self.db.get_pending_requests()
-            resolved = matcher.resolve_pending_requests(pending)
-
-            notifier = self.get_notifier()
-            for item in resolved:
-                self.db.update_release_status(item["release_id"], "IN_CALIBRE")
-                self.db.log_activity(
-                    "REQUEST_RESOLVED",
-                    f"Resolved: '{item['title']}' is now available in your Calibre library.",
-                    item["reason"]
-                )
-                try:
-                    rel_row = self.db.get_release_by_id(item["release_id"])
-                    if rel_row:
-                        notifier.notify_acquired(rel_row)
-                except Exception as e:
-                    logger.debug(f"Webhook notification failed for acquired release: {e}")
-
-            # Reconcile all active releases against Calibre matcher to update missing_volumes and statuses
-            all_active = self.db.get_releases(limit=5000)
-            for r in all_active:
-                if r.get("status") in ("REQUESTED", "DISCOVERY", "IN_CALIBRE", "NEW"):
-                    res = matcher.check_release(r, auto_request_monitored=True)
-                    new_missing = res.get("missing_volumes", [])
-                    new_status = res.get("status")
-                    old_missing = r.get("missing_volumes", [])
-                    old_status = r.get("status")
-                    if new_missing != old_missing or new_status != old_status:
-                        self.db.update_release_volumes_and_status(
-                            r["id"],
-                            r.get("volumes", []),
-                            new_missing,
-                            new_status
-                        )
-
-            # Auto-expand any unexpanded complete releases against freshly synced Calibre library
-            try:
-                self.expand_unresolved_complete_releases(matcher=matcher)
-            except Exception as e:
-                logger.debug(f"Complete releases expansion error during Calibre sync: {e}")
-
-            summary = f"Synced {synced_count} manga series from Calibre; auto-resolved {len(resolved)} acquired requests."
-            logger.info(summary)
-            self.db.log_activity("CALIBRE_SYNC", summary)
+        if not self._calibre_sync_lock.acquire(blocking=False):
+            logger.info("Calibre sync is already in progress in another thread; skipping concurrent execution.")
             return {
                 "success": True,
-                "message": summary,
-                "synced_series": synced_count,
-                "resolved_requests": len(resolved)
+                "message": "Calibre sync already in progress",
+                "synced_series": 0,
+                "resolved_requests": 0
             }
-        except Exception as e:
-            err = f"Error syncing Calibre library: {e}"
-            logger.error(err)
-            self.db.log_activity("CALIBRE_SYNC_ERROR", err)
-            return {"success": False, "message": err, "synced_series": 0, "resolved_requests": 0}
+
+        try:
+            self.last_calibre_sync = time.time()
+            calibre_path = self.db.get_setting("calibre_path", "/calibre")
+            scanner = CalibreMangaScanner(calibre_path)
+            if not scanner.is_available():
+                msg = f"Calibre library not accessible at: {calibre_path}"
+                logger.warning(msg)
+                return {"success": False, "message": msg, "synced_series": 0, "resolved_requests": 0}
+
+            try:
+                series_list = scanner.get_all_series()
+                volumes_map = scanner.get_all_volumes_per_series()
+                synced_count = self.db.sync_calibre_series(series_list, volumes_map=volumes_map)
+
+                # Build matcher
+                meta_cache = self.db.get_all_manga_metadata_cache()
+                matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
+
+                # Check pending requests against Calibre
+                pending = self.db.get_pending_requests()
+                resolved = matcher.resolve_pending_requests(pending)
+
+                notifier = self.get_notifier()
+                for item in resolved:
+                    self.db.update_release_status(item["release_id"], "IN_CALIBRE")
+                    self.db.log_activity(
+                        "REQUEST_RESOLVED",
+                        f"Resolved: '{item['title']}' is now available in your Calibre library.",
+                        item["reason"]
+                    )
+                    try:
+                        rel_row = self.db.get_release_by_id(item["release_id"])
+                        if rel_row:
+                            notifier.notify_acquired(rel_row)
+                    except Exception as e:
+                        logger.debug(f"Webhook notification failed for acquired release: {e}")
+
+                # Reconcile all active releases against Calibre matcher to update missing_volumes and statuses
+                all_active = self.db.get_releases(limit=5000)
+                for r in all_active:
+                    if r.get("status") in ("REQUESTED", "DISCOVERY", "IN_CALIBRE", "NEW"):
+                        res = matcher.check_release(r, auto_request_monitored=True)
+                        new_missing = res.get("missing_volumes", [])
+                        new_status = res.get("status")
+                        old_missing = r.get("missing_volumes", [])
+                        old_status = r.get("status")
+                        if new_missing != old_missing or new_status != old_status:
+                            self.db.update_release_volumes_and_status(
+                                r["id"],
+                                r.get("volumes", []),
+                                new_missing,
+                                new_status
+                            )
+
+                # Auto-expand any unexpanded complete releases against freshly synced Calibre library
+                try:
+                    self.expand_unresolved_complete_releases(matcher=matcher)
+                except Exception as e:
+                    logger.debug(f"Complete releases expansion error during Calibre sync: {e}")
+
+                summary = f"Synced {synced_count} manga series from Calibre; auto-resolved {len(resolved)} acquired requests."
+                logger.info(summary)
+                self.db.log_activity("CALIBRE_SYNC", summary)
+                return {
+                    "success": True,
+                    "message": summary,
+                    "synced_series": synced_count,
+                    "resolved_requests": len(resolved)
+                }
+            except Exception as e:
+                err = f"Error syncing Calibre library: {e}"
+                logger.error(err)
+                self.db.log_activity("CALIBRE_SYNC_ERROR", err)
+                return {"success": False, "message": err, "synced_series": 0, "resolved_requests": 0}
+        finally:
+            self._calibre_sync_lock.release()
 
     # --- Feed Check Task ---
     def check_all_feeds(self) -> Dict[str, Any]:
@@ -256,20 +271,46 @@ class MangaScheduler:
                         "download_status": "IDLE"
                     }
 
+                    # Check existing release state before upsert to detect transitions
+                    existing_row = None
+                    try:
+                        with self.db.get_connection() as conn:
+                            cur = conn.cursor()
+                            cur.execute(
+                                "SELECT id, status, download_status FROM releases WHERE guid = ?;",
+                                (rel.guid,)
+                            )
+                            existing_row = cur.fetchone()
+                    except Exception as e:
+                        logger.debug(f"Error checking existing release guid {rel.guid}: {e}")
+
                     is_new, rel_id = self.db.upsert_release(rel_dict)
+
+                    # Determine if an existing release is transitioning from DISCOVERY or NEW to REQUESTED
+                    prev_status = existing_row["status"] if existing_row else None
+                    prev_dl_status = existing_row["download_status"] if existing_row else "IDLE"
+                    is_transition = (
+                        not is_new
+                        and prev_status in ("DISCOVERY", "NEW")
+                        and prev_dl_status == "IDLE"
+                    )
 
                     # Auto-download trigger for REQUESTED releases
                     if status == "REQUESTED":
                         feed_requested += 1
                         total_requested += 1
 
-                        if is_new:
+                        if is_transition:
+                            # Ensure database status is updated to REQUESTED even if upsert omitted it
+                            self.db.update_release_status(rel_id, "REQUESTED")
+
+                        if is_new or is_transition:
                             try:
                                 self.get_notifier().notify_new_request(rel_dict)
                             except Exception as e:
                                 logger.debug(f"Webhook notification failed for new request: {e}")
 
-                        if is_new and global_auto_download and feed.get("auto_download"):
+                        if (is_new or is_transition) and global_auto_download and feed.get("auto_download"):
                             success = qbit.add_torrent(
                                 url_or_magnet=rel.download_url,
                                 savepath=staging_dir,
@@ -1018,7 +1059,6 @@ class MangaScheduler:
         except Exception as e:
             logger.debug(f"Initial complete releases expansion error: {e}")
 
-        last_calibre_sync = 0
         last_feed_check = 0
         last_tag_check = 0
         last_dl_check = 0
@@ -1033,9 +1073,8 @@ class MangaScheduler:
                 auto_tag_enabled = self.db.get_setting("auto_tag", "true").lower() == "true"
 
                 # Check Calibre
-                if now - last_calibre_sync >= calibre_int:
+                if now - self.last_calibre_sync >= calibre_int:
                     self.sync_calibre_library()
-                    last_calibre_sync = time.time()
 
                 # Check Feeds
                 if now - last_feed_check >= feed_int:

@@ -45,3 +45,6 @@ scratch/
 .vscode/
 *.swp
 *.swo
+
+# Agent run artifacts (local only)
+.agents/

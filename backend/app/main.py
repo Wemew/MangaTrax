@@ -43,8 +43,7 @@ scheduler = MangaScheduler(db, cover_cache)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting MangaTrax application...")
-    scheduler.start()
-    # Trigger initial Calibre sync if available
+    # Trigger initial Calibre sync if available BEFORE starting background scheduler loop
     calibre_path = db.get_setting("calibre_path", CALIBRE_DIR)
     scanner = CalibreMangaScanner(calibre_path)
     if scanner.is_available():
@@ -52,6 +51,7 @@ async def lifespan(app: FastAPI):
         scheduler.sync_calibre_library()
     else:
         logger.info(f"Calibre library metadata.db not yet found at {scanner.db_path}. Will re-check periodically.")
+    scheduler.start()
     yield
     logger.info("Shutting down MangaTrax application...")
     scheduler.stop()
@@ -561,8 +561,7 @@ async def api_downloader_delete(torrent_hash: str):
 @app.post("/api/releases/{release_id}/download")
 async def api_release_download(release_id: int):
     """Manually send release to qBittorrent downloader."""
-    releases = db.get_releases(limit=1000)
-    target = next((r for r in releases if r["id"] == release_id), None)
+    target = db.get_release_by_id(release_id)
     if not target:
         raise HTTPException(status_code=404, detail="Release not found")
 
@@ -582,7 +581,7 @@ async def api_release_download(release_id: int):
         db.update_download_status(release_id, "DOWNLOADING", torrent_h)
         db.log_activity("MANUAL_DOWNLOAD", f"Sent to downloader: '{target['title']}'", f"URL: {download_url[:60]}...")
 
-        missing = target.get("missing_volumes") or []
+        missing = target.get("missing_volumes") or json.loads(target.get("missing_vols_json") or "[]")
         vols = target.get("volumes") or []
         if torrent_h and target.get("is_bundle") and missing and len(missing) < len(vols):
             sel_res = qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing])
