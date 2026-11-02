@@ -10,6 +10,17 @@ logger = logging.getLogger("mangatrax.metadata.mangaupdates")
 
 MANGAUPDATES_SEARCH_API = "https://api.mangaupdates.com/v1/series/search"
 
+# Horizontal whitespace sitting directly in front of punctuation, e.g. the orphan
+# space left behind when an inline HTML tag is stripped out of
+# "<p>demons lurk</p>, young" -> "demons lurk , young".
+_SPACE_BEFORE_PUNCTUATION = re.compile(r"[ \t]+(?=[,.;:!?)\]])")
+
+
+def _collapse_space_before_punctuation(text: str) -> str:
+    """Remove horizontal whitespace orphaned in front of punctuation by markup stripping."""
+    return _SPACE_BEFORE_PUNCTUATION.sub("", text)
+
+
 def clean_description_text(raw_desc: str) -> str:
     """Cleans up MangaUpdates description text, stripping BBCode, HTML, Markdown links, and raw URLs."""
     if not raw_desc:
@@ -18,6 +29,9 @@ def clean_description_text(raw_desc: str) -> str:
     clean = html.unescape(raw_desc)
     # Strip HTML tags
     clean = re.sub(r"<[^>]+>", " ", clean)
+    # Tag stripping replaces "<p>demons lurk</p>" with " demons lurk " and leaves an
+    # orphan space in front of the following punctuation: "demons lurk , young".
+    clean = _collapse_space_before_punctuation(clean)
     # BBCode: convert [url=LINK]LABEL[/url] to LABEL
     clean = re.sub(r"\[url=[^\]]*\](.*?)\[/url\]", r"\1", clean, flags=re.IGNORECASE)
     # Strip remaining BBCode tags e.g. [b], [/b], [i], [url], [/url], [spoiler]
@@ -35,6 +49,9 @@ def clean_description_text(raw_desc: str) -> str:
     clean = re.sub(r"~~([^~]+)~~", r"\1", clean)
     # Strip common publisher prefix lines e.g. "From Viz:", "From Yen Press:", "From Kodansha:"
     clean = re.sub(r"^\s*(?:From\s+[A-Za-z0-9\s\-]+:)\s*", "", clean, flags=re.IGNORECASE)
+    # Stripping raw URLs / empty brackets above can orphan a space before punctuation
+    # too ("see https://example.com)." -> "see )."), so collapse it once more at the end.
+    clean = _collapse_space_before_punctuation(clean)
     # Clean up excessive whitespace
     clean = " ".join(clean.split())
     return clean

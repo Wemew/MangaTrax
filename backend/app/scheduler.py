@@ -3,7 +3,7 @@ import logging
 import threading
 import re
 import json
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 from datetime import datetime
 
 from app.database import (
@@ -21,10 +21,47 @@ from app.providers.registry import create_provider
 from app.providers.nyaa import NyaaMangaProvider
 from app.metadata.anilist import AniListMetadataService
 from app.metadata.mangaupdates import MangaUpdatesService
-from app.parser import is_chapter_only, is_light_novel, is_complete_series_release, normalize_text, match_manga_series_in_calibre
+from app.parser import (
+    is_chapter_only,
+    is_light_novel,
+    is_complete_series_release,
+    normalize_text,
+    clean_manga_title,
+    match_manga_series_in_calibre,
+)
 from app.notifier.webhook import NotificationService
 
 logger = logging.getLogger("mangatrax.scheduler")
+
+# --- Marker-less chapter guard (context-aware, NOT a blind regex) -------------
+#
+# A release titled "Chainsaw Man 180" carries no "v"/"vol" marker, so the pure
+# parser cannot call it chapter-only and it used to be ingested as a volume-less
+# junk release.  Treating *any* trailing bare number as a chapter would destroy
+# legitimate titles whose number belongs to the series name ("Mob Psycho 100",
+# "20th Century Boys", "7th Time Loop", "Isekai Ojisan 2"), and the parser is a
+# pure function with no library context.  The decision therefore happens at
+# ingestion time in the scheduler, where the Calibre matcher and the tracked
+# series rows are available:
+#
+#   * the title has no volume marker, AND
+#   * the release series name ends in a bare number, AND
+#   * the series name WITH that number removed exactly equals a series we
+#     already know (Calibre library or series_tracking row)
+#
+# Only then is the release a chapter of a known series.  For "Mob Psycho 100"
+# stripping the number yields "Mob Psycho", which is not a known series (the
+# known series is "Mob Psycho 100" itself), so it is never discarded.
+_UNMARKED_CHAPTER_TRAILING_NUMBER = re.compile(
+    r"^(?P<series>.+?)[\s\-–—:|,.]+(?P<number>\d{1,4}(?:\.\d+)?)$"
+)
+# Mirrors the volume-marker test inside parser.is_chapter_only(): an explicit
+# volume indicator means the trailing number is a volume, never a chapter.
+_VOLUME_MARKER = re.compile(
+    r"\b(?:volumes?|volume|vols?|vol|books?|book)\b\.?\s*\d+"
+    r"|(?:^|[\s_.\-\(\[])v\d+",
+    re.IGNORECASE,
+)
 
 class MangaScheduler:
     def __init__(self, db: MangaDatabase, cover_cache: CoverCache):
@@ -113,6 +150,114 @@ class MangaScheduler:
             series_list, volumes_map, self.db.get_all_manga_metadata_cache()
         )
         return series_list, matcher
+
+    # --- Marker-less chapter guard ---------------------------------------
+    def _known_series_keys(self, matcher: Optional[MangaCalibreMatcher] = None) -> Set[str]:
+        """Normalized names of every series MangaTrax can already name.
+
+        Sources: the ``series_tracking`` rows (Calibre-synced *and* user-typed)
+        plus the Calibre series list the matcher was built from.  This is the
+        library context the pure parser cannot have, and it is what makes the
+        trailing-number guard safe: a number is only a chapter when the title
+        without it names a series we already know.
+        """
+        keys: Set[str] = set()
+        names: List[str] = []
+        try:
+            for row in self.db.get_all_series():
+                names.append(row.get("name") or "")
+        except Exception as exc:  # pragma: no cover - guard must never break ingestion
+            logger.debug("Could not load tracked series for the chapter guard: %s", exc)
+        for series in getattr(matcher, "calibre_series", None) or []:
+            names.append(series.get("series_name") or series.get("name") or "")
+
+        for name in names:
+            for variant in self._name_variants(name):
+                key = normalize_text(variant)
+                if key:
+                    keys.add(key)
+        return keys
+
+    def _discard_unmarked_chapters_enabled(self) -> bool:
+        """Whether marker-less chapter releases are discarded (default: true)."""
+        value = str(self.db.get_setting("discard_unmarked_chapters", "true")).strip().lower()
+        return value not in ("false", "0", "no", "off")
+
+    def _unmarked_chapter_reason(self, rel, known_series_keys: Set[str]) -> str:
+        """Return the audit reason when *rel* is a marker-less chapter release.
+
+        Empty string means "not proven to be a chapter" -- the release is then
+        handled exactly as before.  Requirements (all must hold):
+
+        * not a complete-series release, light novel, or explicitly chapter-only
+          release (those are already classified before this guard runs);
+        * no volume marker anywhere in the title;
+        * the release series name ends in a bare number;
+        * the numbered title itself is NOT a known series (that protects
+          "Mob Psycho 100", where the number is part of the name);
+        * the series name with that number removed IS a known series.
+        """
+        title = (getattr(rel, "title", "") or "").strip()
+        if not title:
+            return ""
+        if is_complete_series_release(title) or is_light_novel(title) or is_chapter_only(title):
+            return ""
+        if _VOLUME_MARKER.search(title):
+            return ""
+        # Volume bundles are volume releases, never marker-less chapters.
+        if getattr(rel, "volume_start", None) is not None or getattr(rel, "volumes", None):
+            return ""
+
+        # The parsed series name is the cleaned title (brackets/tags stripped); it is
+        # the key that would be persisted, so the trailing number must be checked here.
+        candidate = (getattr(rel, "series_name", None) or "").strip() or clean_manga_title(title)
+        if not candidate:
+            return ""
+
+        match = _UNMARKED_CHAPTER_TRAILING_NUMBER.match(candidate)
+        if not match:
+            return ""
+        stripped_series = match.group("series").strip(" -–—:,|.")
+        chapter_number = match.group("number")
+        if not stripped_series:
+            return ""
+
+        full_key = normalize_text(candidate)
+        stripped_key = normalize_text(stripped_series)
+        if not stripped_key:
+            return ""
+
+        if full_key in known_series_keys:
+            # The numbered title is a series we already know ("Mob Psycho 100"):
+            # its trailing number is part of the name, not a chapter.
+            return ""
+        if stripped_key not in known_series_keys:
+            # No library context proves this is a chapter: leave the release alone.
+            return ""
+
+        return (
+            f"trailing number {chapter_number} with no volume marker, and "
+            f"'{stripped_series}' is a known series"
+        )
+
+    def _discard_unmarked_chapter(self, rel, known_series_keys: Set[str]) -> bool:
+        """Discard and audit-log a context-proven marker-less chapter release.
+
+        The activity event is written through the actor-aware scheduler helper, so
+        every discard is attributed to ``scheduler`` and stays auditable (and
+        therefore reversible: the message names the exact release title).
+        """
+        reason = self._unmarked_chapter_reason(rel, known_series_keys)
+        if not reason:
+            return False
+        title = getattr(rel, "title", "") or ""
+        logger.info("Discarding marker-less chapter release '%s': %s", title, reason)
+        self._log_activity(
+            "CHAPTER_DISCARDED",
+            f"Discarded marker-less chapter release: '{title}'",
+            reason,
+        )
+        return True
 
     def resolve_series_identity(
         self,
@@ -387,6 +532,12 @@ class MangaScheduler:
         meta_cache = self.db.get_all_manga_metadata_cache()
         matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
 
+        # Marker-less chapter guard context: loaded once per feed-poll pass.  The
+        # guard only discards a release when the title without its trailing bare
+        # number names a series we already know (Calibre library or tracked row).
+        discard_unmarked_chapters = self._discard_unmarked_chapters_enabled()
+        known_series_keys = self._known_series_keys(matcher) if discard_unmarked_chapters else set()
+
         global_auto_download = self.db.get_setting("auto_download", "true").lower() == "true"
         staging_dir = self.db.get_setting("staging_dir", "/staging")
         qbit = self.get_qbit_client()
@@ -409,6 +560,11 @@ class MangaScheduler:
                 for rel in releases:
                     # Discard pure chapter updates and light novels
                     if is_chapter_only(rel.title) or is_light_novel(rel.title):
+                        continue
+                    # Marker-less chapters ("Chainsaw Man 180"): discarded only when the
+                    # title without its trailing number names a series we already know,
+                    # so titles like "Mob Psycho 100" keep their number as part of the name.
+                    if discard_unmarked_chapters and self._discard_unmarked_chapter(rel, known_series_keys):
                         continue
 
                     total_found += 1
@@ -604,18 +760,33 @@ class MangaScheduler:
             "last_page": last_p
         }
 
-    def _process_release(self, rel, feed_name: str, matcher: MangaCalibreMatcher) -> tuple:
+    def _process_release(
+        self,
+        rel,
+        feed_name: str,
+        matcher: MangaCalibreMatcher,
+        known_series_keys: Optional[Set[str]] = None,
+    ) -> tuple:
         """
         Resolves the STABLE matching key (Calibre name / typed name) while keeping
         AniList's canonical English title as display-only metadata, checks the
         Calibre matcher with aliases, pulls MangaUpdates synopsis if Discovery,
         and upserts release into SQLite.
         Returns (is_new, status, missing_volumes, rel_id, stable_series).
+
+        ``known_series_keys`` is the marker-less chapter guard context (Calibre +
+        tracked series); callers that process many releases pass it once instead of
+        letting every release reload it.
         """
         if is_chapter_only(rel.title):
             return (False, "CHAPTER_ONLY", [], None, None)
         if is_light_novel(rel.title):
             return (False, "LIGHT_NOVEL", [], None, None)
+        if self._discard_unmarked_chapters_enabled():
+            if known_series_keys is None:
+                known_series_keys = self._known_series_keys(matcher)
+            if self._discard_unmarked_chapter(rel, known_series_keys):
+                return (False, "CHAPTER_ONLY", [], None, None)
 
         rel_group = getattr(rel, "release_group", None) or rel.to_dict().get("release_group")
         is_comp = getattr(rel, "is_complete", False) or is_complete_series_release(rel.title)
@@ -836,6 +1007,11 @@ class MangaScheduler:
         meta_cache = self.db.get_all_manga_metadata_cache()
         matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
 
+        # Marker-less chapter guard context for the whole backfill run.
+        known_series_keys = (
+            self._known_series_keys(matcher) if self._discard_unmarked_chapters_enabled() else None
+        )
+
         global_auto_download = self.db.get_setting("auto_download", "true").lower() == "true"
         staging_dir = self.db.get_setting("staging_dir", "/staging")
         qbit = self.get_qbit_client()
@@ -856,7 +1032,9 @@ class MangaScheduler:
         for rel in releases:
             if self.stop_backfill_requested:
                 break
-            is_new, status, missing_vols, rel_id, _ = self._process_release(rel, f"Nyaa: {primary_title}", matcher)
+            is_new, status, missing_vols, rel_id, _ = self._process_release(
+                rel, f"Nyaa: {primary_title}", matcher, known_series_keys=known_series_keys
+            )
             if status in ("CHAPTER_ONLY", "LIGHT_NOVEL"):
                 continue
 
@@ -979,6 +1157,11 @@ class MangaScheduler:
             meta_cache = self.db.get_all_manga_metadata_cache()
             matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
 
+            # Marker-less chapter guard context for the whole backfill run.
+            known_series_keys = (
+                self._known_series_keys(matcher) if self._discard_unmarked_chapters_enabled() else None
+            )
+
             nyaa_provider = NyaaMangaProvider(name="Nyaa Manga Backfill", config={"delay_seconds": delay_seconds})
 
             for page_num in range(start_p, end_p + 1):
@@ -1007,7 +1190,9 @@ class MangaScheduler:
                     if self.stop_backfill_requested:
                         break
 
-                    is_new, status, missing_vols, _, _ = self._process_release(rel, "Nyaa Manga", matcher)
+                    is_new, status, missing_vols, _, _ = self._process_release(
+                        rel, "Nyaa Manga", matcher, known_series_keys=known_series_keys
+                    )
                     if status in ("CHAPTER_ONLY", "LIGHT_NOVEL"):
                         continue
 

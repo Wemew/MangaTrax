@@ -464,6 +464,10 @@ class MangaDatabase:
                     "staging_dir": os.getenv("STAGING_DIR", "/staging"),
                     "auto_download": "true",
                     "auto_tag": "true",
+                    # Context-guarded discard of marker-less chapter releases
+                    # ("Chainsaw Man 180" as opposed to "Chainsaw Man Vol. 180").
+                    # Default on; operators can turn it off without a code change.
+                    "discard_unmarked_chapters": os.getenv("MANGATRAX_DISCARD_UNMARKED_CHAPTERS", "true"),
                     "calibre_sync_interval_minutes": "15",
                     "feed_check_interval_minutes": "60",
                     "backfill_max_pages": "15",
@@ -476,6 +480,13 @@ class MangaDatabase:
             # Ensure in-app downloader keys exist in case of upgrade
             for k, v in [("qbit_enabled", "true"), ("qbit_category", "manga"), ("qbit_tags", "mangatrax")]:
                 cur.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);", (k, v))
+
+            # Behaviour flags added after the first release: INSERT OR IGNORE keeps any
+            # value the operator already chose (or the env seed for this deployment).
+            cur.execute(
+                "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",
+                ("discard_unmarked_chapters", os.getenv("MANGATRAX_DISCARD_UNMARKED_CHAPTERS", "true")),
+            )
 
             # Seed sample manga feed if empty
             cur.execute("SELECT count(*) FROM feeds;")

@@ -589,15 +589,11 @@ def test_mangaupdates_and_rss_links():
     assert "[/b]" not in cleaned
     assert "From Viz:" not in cleaned
     assert "<p>" not in cleaned
-    # Known cosmetic product quirk (P4, tests/../backend/app/metadata/mangaupdates.py:
-    # clean_description_text): stripping an inline HTML tag inserts a space, so
-    # "<p>demons lurk</p>, young" cleans to "demons lurk , young" -- a stray space
-    # before punctuation. The words and punctuation are otherwise exactly right.
-    # That product file is outside this task's write scope, so assert the intended
-    # *content* contract while normalizing only that spacing artefact.
-    normalized = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
-    assert normalized == "In a world where demons lurk, young Denji must survive.", (
-        f"description content/punctuation mismatch: {normalized!r}"
+    # P4 fix: stripping an inline HTML tag used to leave an orphan space in front
+    # of the punctuation that followed it ("demons lurk , young").  It is now
+    # collapsed, so the exact expected sentence can be asserted.
+    assert cleaned == "In a world where demons lurk, young Denji must survive.", (
+        f"description content/punctuation mismatch: {cleaned!r}"
     )
 
     raw_markdown = "**Original Webtoon:** [Kakao Webtoon R19](https://webtoon.kakao.com/content/12345)"
