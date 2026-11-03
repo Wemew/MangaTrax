@@ -48,6 +48,7 @@ __all__ = [
     "WebhookTestRequest",
     "BackfillStartRequest",
     "DebugActionRequest",
+    "MaintenanceClearRequest",
     "ManualTagRequest",
     "SeriesRepairRequest",
     "validate",
@@ -727,6 +728,24 @@ class DebugActionRequest(BaseModel):
         "normalize-english-titles",
         "purge-non-manga",
         "reset-all-data",
+    ]
+
+
+class MaintenanceClearRequest(BaseModel):
+    """Strict payload for the SAFE maintenance endpoint.
+
+    Only re-fetchable cache/discovery cleanups are accepted here; the destructive
+    actions (``purge-non-manga``, ``normalize-english-titles``, ``reset-all-data``)
+    are deliberately NOT part of this enum and remain behind the debug flag in
+    ``/api/debug/action``.  ``extra="forbid"`` rejects any unknown key.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal[
+        "clear-cover-cache",
+        "clear-discovery",
+        "clear-descriptions",
     ]
 
 

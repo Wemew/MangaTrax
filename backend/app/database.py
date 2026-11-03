@@ -1756,21 +1756,46 @@ class MangaDatabase:
 
     # --- Debug / Maintenance Operations ---
     def clear_all_descriptions(self) -> int:
-        """Clears all stored descriptions and synopses in series_tracking."""
+        """Blanks stored descriptions/synopses without deleting anything.
+
+        Covers both release rows and tracked series; the providers re-populate the
+        text the next time it is needed.  Returns the number of rows blanked (the
+        safe-maintenance API surfaces it in the message/toast).
+        """
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("UPDATE series_tracking SET description = '';")
-            count = cur.rowcount
+            cur.execute("UPDATE releases SET description = '' WHERE COALESCE(description, '') != '';")
+            release_count = cur.rowcount
+            cur.execute("UPDATE series_tracking SET description = '' WHERE COALESCE(description, '') != '';")
+            series_count = cur.rowcount
+            count = release_count + series_count
             conn.commit()
             self._invalidate_grouped_cache()
-            self.log_activity("DEBUG_CLEAR", "Cleared all manga descriptions", f"Reset descriptions across {count} tracked series.")
+            self.log_activity(
+                "DEBUG_CLEAR",
+                "Cleared all manga descriptions",
+                f"Reset descriptions across {release_count} release(s) and {series_count} tracked series.",
+            )
             return count
 
     def clear_discovered_series(self) -> int:
-        """Clears unreviewed new series from the Discovery page (status='DISCOVERY')."""
+        """Clears unreviewed discovery rows (status='DISCOVERY') only.
+
+        Scoped to rows the Discovery page shows as unreviewed: tracked series and
+        blacklisted series are excluded, so the safe maintenance action can never
+        remove a wishlist request (REQUESTED), an owned/in-Calibre row, an IGNORED
+        row or anything belonging to the user's tracked library.
+        """
         with self.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("DELETE FROM releases WHERE status = 'DISCOVERY';")
+            cur.execute(
+                """
+                DELETE FROM releases
+                WHERE status = 'DISCOVERY'
+                  AND (series_name IS NULL OR lower(trim(series_name)) NOT IN (SELECT lower(trim(name)) FROM series_tracking))
+                  AND (series_name IS NULL OR lower(trim(series_name)) NOT IN (SELECT lower(trim(name)) FROM series_blacklist));
+                """
+            )
             count = cur.rowcount
             conn.commit()
             self._invalidate_grouped_cache()

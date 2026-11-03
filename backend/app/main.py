@@ -26,6 +26,7 @@ from app import auth as auth_module
 from app import schemas
 from app import security
 from app import search as search_module
+from app import maintenance
 
 # Setup Logging
 logging.basicConfig(
@@ -1575,6 +1576,25 @@ async def api_backfill_stop():
 async def api_backfill_status():
     """Returns current backfill progress and state."""
     return JSONResponse(scheduler.get_backfill_status())
+
+@app.post("/api/maintenance/clear")
+async def api_maintenance_clear(payload: Dict[str, Any]):
+    """Safe maintenance/clear actions (Settings -> Maintenance).
+
+    These are re-fetchable cache/discovery cleanups, so they are available by
+    default: they are deliberately NOT gated by ``MANGATRAX_DEBUG_ACTIONS``.  The
+    global authentication middleware and the CSRF Origin/Referer check still apply
+    exactly as for every other mutating route, and the strict
+    ``MaintenanceClearRequest`` model (extra="forbid", closed action enum) prevents
+    a destructive action name from ever reaching this handler.
+    """
+    model = _validated_payload(schemas.MaintenanceClearRequest, payload)
+    try:
+        result = maintenance.perform(model.action, db, cover_cache)
+    except maintenance.UnknownMaintenanceAction as exc:  # unreachable via the enum
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
+
 
 @app.post("/api/debug/action")
 async def api_debug_action(payload: Dict[str, Any]):

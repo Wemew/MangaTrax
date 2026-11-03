@@ -286,33 +286,89 @@
             </div>
         </div>
 
-        <!-- Maintenance & Diagnostics (opt-in: MANGATRAX_DEBUG_ACTIONS=1) -->
-        {% if debug_actions_enabled %}
+        <!-- Maintenance (always available: safe, re-fetchable cleanups only) -->
         <div class="bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
             <h3 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
                 <i data-lucide="wrench" class="w-4 h-4 text-amber-400"></i>
-                Maintenance & Diagnostics
+                Maintenance
             </h3>
             <p class="text-xs text-slate-400">
-                Safely clear temporary caches or unreviewed discovery items to free up disk space or declutter lists.
+                Safe cleanups you can run at any time. Nothing here deletes tracked series, wishlist requests, ignored releases or your Calibre library.
+            </p>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5 pt-2">
+                <!-- Purge Cover Cache -->
+                <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+                    <div>
+                        <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                            <i data-lucide="image" class="w-4 h-4 text-brand-400"></i>
+                            Purge Cover Cache
+                        </h4>
+                        <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
+                            Deletes cached cover thumbnails from disk. Images are re-downloaded safely when viewed.
+                        </p>
+                    </div>
+                    <button type="button" onclick="maintenanceAction('clear-cover-cache')" id="btn-maint-cover-cache" class="mt-4 w-full px-3 py-2 rounded-xl bg-brand-500/10 hover:bg-brand-500/20 text-brand-300 border border-brand-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors active:scale-95 disabled:opacity-60 disabled:cursor-wait">
+                        <i data-lucide="flame" class="w-3.5 h-3.5"></i>
+                        <span>Purge Cover Cache</span>
+                    </button>
+                </div>
+
+                <!-- Clear Unreviewed Discovery -->
+                <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+                    <div>
+                        <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                            <i data-lucide="compass" class="w-4 h-4 text-amber-400"></i>
+                            Clear Unreviewed Discovery
+                        </h4>
+                        <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
+                            Removes unreviewed Discovery entries so they can be re-scraped cleanly. Wishlist requests, ignored releases and Calibre tracked series stay untouched.
+                        </p>
+                    </div>
+                    <button type="button" onclick="maintenanceAction('clear-discovery')" id="btn-maint-clear-discovery" class="mt-4 w-full px-3 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors active:scale-95 disabled:opacity-60 disabled:cursor-wait">
+                        <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
+                        <span>Clear Unreviewed Discovery</span>
+                    </button>
+                </div>
+
+                <!-- Reset Descriptions -->
+                <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+                    <div>
+                        <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                            <i data-lucide="file-text" class="w-4 h-4 text-slate-400"></i>
+                            Reset Descriptions
+                        </h4>
+                        <p class="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
+                            Blanks stored descriptions/synopses so providers can re-fetch them later. No releases or series are deleted.
+                        </p>
+                    </div>
+                    <button type="button" onclick="maintenanceAction('clear-descriptions')" id="btn-maint-clear-descriptions" class="mt-4 w-full px-3 py-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors active:scale-95 disabled:opacity-60 disabled:cursor-wait">
+                        <i data-lucide="file-x" class="w-3.5 h-3.5"></i>
+                        <span>Reset Descriptions</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Advanced / Dangerous (opt-in: MANGATRAX_DEBUG_ACTIONS=1) -->
+        {% if debug_actions_enabled %}
+        <div class="bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold uppercase tracking-wider text-rose-300 flex items-center gap-2">
+                <i data-lucide="alert-triangle" class="w-4 h-4 text-rose-400"></i>
+                Advanced / Dangerous
+            </h3>
+            <p class="text-xs text-slate-400">
+                Destructive or rare repair operations. These are opt-in only (enabled with <code class="text-slate-300">MANGATRAX_DEBUG_ACTIONS=1</code>) and can delete data.
             </p>
 
             <div class="flex flex-wrap items-center gap-3 pt-1">
-                <button type="button" onclick="debugAction('clear-thumbnails')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
-                    <i data-lucide="image" class="w-3.5 h-3.5 text-brand-400"></i>
-                    Purge Cover Thumbnail Cache
+                <button type="button" onclick="debugAction('purge-non-manga')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-rose-900/40 text-rose-300 border border-slate-700 hover:border-rose-600 text-xs font-semibold flex items-center gap-1.5 transition-colors" title="Permanently deletes release rows typed as non-manga (novel / audiobook / light novel). Manga and unknown rows are kept.">
+                    <i data-lucide="shield-alert" class="w-3.5 h-3.5 text-rose-400"></i>
+                    Purge Non-Manga Releases
                 </button>
-                <button type="button" onclick="debugAction('clear-discovery')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
-                    <i data-lucide="compass" class="w-3.5 h-3.5 text-amber-400"></i>
-                    Clear Unreviewed Discovery Items
-                </button>
-                <button type="button" onclick="debugAction('clear-descriptions')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
-                    <i data-lucide="file-text" class="w-3.5 h-3.5 text-slate-400"></i>
-                    Reset Descriptions
-                </button>
-                <button type="button" onclick="debugAction('normalize-english-titles')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors" title="Scan database releases and convert any Romaji titles to official English equivalents">
+                <button type="button" onclick="debugAction('normalize-english-titles')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors" title="Repairs releases stranded under an AniList display title by re-keying them to their tracked series' stable matching name (idempotent).">
                     <i data-lucide="languages" class="w-3.5 h-3.5 text-cyan-400"></i>
-                    Convert Romaji to English Titles
+                    Repair Re-keyed Series Names
                 </button>
             </div>
 
@@ -506,6 +562,48 @@ async function saveSettings(e) {
     }
 }
 
+const MAINTENANCE_CONFIRMATIONS = {
+    'clear-cover-cache': 'Purge all cached cover image thumbnails from disk?\n\nImages will be safely re-downloaded when viewed.',
+    'clear-discovery': 'Clear all unreviewed manga series from the Discovery page?\n\nYour wishlist requests, ignored/blacklisted releases and Calibre tracked series are untouched.',
+    'clear-descriptions': 'Reset all stored manga descriptions?\n\nNo releases or series are deleted; descriptions are re-fetched from the metadata providers when next needed.'
+};
+
+async function maintenanceAction(action) {
+    const msg = MAINTENANCE_CONFIRMATIONS[action] || 'Run this maintenance action?';
+    if (!confirm(msg)) return;
+
+    const btn = document.getElementById('btn-maint-' + action);
+    if (btn && btn.disabled) return;
+    const original = btn ? btn.innerHTML : null;
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i><span>Working...</span>';
+        if (window.lucide) lucide.createIcons();
+    }
+
+    try {
+        const res = await fetch('/api/maintenance/clear', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: action })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast(data.message, 'success');
+        } else {
+            showToast(data.message || 'Maintenance action failed', 'error');
+        }
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = original;
+            if (window.lucide) lucide.createIcons();
+        }
+    }
+}
+
 async function debugAction(action) {
     let msg = '';
     if (action === 'clear-thumbnails') {
@@ -514,6 +612,10 @@ async function debugAction(action) {
         msg = 'Are you sure you want to clear all unreviewed manga series from the Discovery page?\n\nThis will not delete your active wishlist requests or Calibre tracked series.';
     } else if (action === 'clear-descriptions') {
         msg = 'Are you sure you want to clear stored manga descriptions?';
+    } else if (action === 'purge-non-manga') {
+        msg = 'Permanently delete every release row typed as non-manga (novel / audiobook / light novel)?\n\nManga and unknown/inconclusive rows are kept. This cannot be undone.';
+    } else if (action === 'normalize-english-titles') {
+        msg = 'Repair releases stranded under an AniList display title by re-keying them to their tracked series\' stable matching name?\n\nThis is idempotent and only touches rows whose series is a tracked series.';
     }
 
     if (!confirm(msg)) return;
