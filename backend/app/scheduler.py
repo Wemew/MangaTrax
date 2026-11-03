@@ -39,6 +39,7 @@ from app.metadata.anilist import AniListMetadataService
 from app.metadata.mangaupdates import MangaUpdatesService
 from app.parser import (
     is_chapter_only,
+    is_jpegxl_release,
     is_light_novel,
     is_complete_series_release,
     is_collected_release_candidate,
@@ -88,6 +89,8 @@ class MangaScheduler:
         self.last_calibre_sync: float = 0.0
         # Torbox non-fatal issue de-duplication (release id -> last surfaced message).
         self._torbox_notified: Dict[int, str] = {}
+        # JPEG XL throw-away filter: audit once per release guid (feeds re-poll often).
+        self._jpegxl_discard_notified: set = set()
         # Startup work (legacy key repair + initial Calibre sync) runs as the FIRST
         # action of the worker thread so the web UI can serve immediately; see
         # perform_initial_sync().
@@ -123,6 +126,20 @@ class MangaScheduler:
         pass the request actor explicitly.
         """
         self.db.log_activity(event_type, message, details, actor=actor)
+
+    def _log_jpegxl_discard(self, rel) -> None:
+        """Audit a discarded JPEG XL release once per guid, marked ``[JPEGXL]``."""
+        guid = str(getattr(rel, "guid", "") or getattr(rel, "title", "") or "")
+        if guid and guid in self._jpegxl_discard_notified:
+            return
+        if guid:
+            self._jpegxl_discard_notified.add(guid)
+        message = f"[JPEGXL] Discarded JPEG XL release: '{getattr(rel, 'title', '')}'"
+        logger.info(message)
+        self._log_activity(
+            "JPEGXL_DISCARDED", message,
+            "JPEG XL format is in the throw-away filter: never auto-downloaded or stored.",
+        )
 
     # --- Naming model: STABLE MATCHING KEY vs. DISPLAY TITLE ---
     #
@@ -702,6 +719,14 @@ class MangaScheduler:
         download route, a polled Torbox row) use this so strict selection never
         defaults to "everything" just because the stored list is empty.
         """
+        persisted = release.get("download_wanted_json")
+        if persisted:
+            try:
+                values = [float(value) for value in json.loads(persisted)]
+                if values:
+                    return values
+            except (TypeError, ValueError):
+                pass
         stored = self._release_missing_volumes(release)
         if stored:
             return stored
@@ -712,6 +737,56 @@ class MangaScheduler:
         except Exception as exc:
             logger.debug("Could not compute missing volumes for '%s': %s", release.get("title"), exc)
             return stored
+
+    def _auto_download_wanted(self, rel, stable_series: str, missing_vols: List[float]):
+        """Auto-download only: exclude volumes already in flight/awaiting Calibre.
+
+        Returns ``(wanted_volumes, reserved_volumes)``.  A volume is reserved when
+        another release of the same series is DOWNLOADING or COMPLETED (files fetched
+        but not yet imported into Calibre), so a second group's release for the same
+        volume is not auto-downloaded.  Failed/IDLE rows release their reservation;
+        manual downloads intentionally bypass this filter.
+        """
+        missing = [float(value) for value in (missing_vols or [])]
+        if not missing:
+            return missing, set()
+        series_names: List[str] = []
+        for candidate in (stable_series, getattr(rel, "series_name", None)):
+            text = str(candidate or "").strip()
+            if text and text not in series_names:
+                series_names.append(text)
+        try:
+            reserved = self.db.get_inflight_reserved_volumes(
+                series_names, exclude_guid=getattr(rel, "guid", None),
+            )
+        except Exception as exc:
+            logger.debug("In-flight reservation lookup failed for '%s': %s", getattr(rel, "title", ""), exc)
+            reserved = set()
+        wanted = [value for value in missing if round(value, 2) not in reserved]
+        if len(wanted) != len(missing):
+            in_flight = sorted({round(value, 2) for value in missing} & reserved)
+            title = str(getattr(rel, "title", "") or "")
+            if wanted:
+                message = (
+                    f"Auto-download dedupe for '{title}': volume(s) {in_flight} already in "
+                    f"flight/downloaded and awaiting Calibre; downloading only {wanted}."
+                )
+            else:
+                message = (
+                    f"Auto-download suppressed for '{title}': volume(s) {in_flight} already "
+                    "in flight/downloaded and awaiting Calibre; no duplicate submitted."
+                )
+            logger.info(message)
+            self._log_activity(
+                "IN_FLIGHT_DEDUPE", message,
+                json.dumps({
+                    "series": series_names,
+                    "missing_volumes": missing,
+                    "reserved_volumes": sorted(reserved),
+                    "wanted_volumes": wanted,
+                }),
+            )
+        return wanted, reserved
 
     @staticmethod
     def _parse_db_timestamp(value: Any) -> Optional[datetime]:
@@ -861,6 +936,7 @@ class MangaScheduler:
             engine,
             downloader_id=persisted_id,
             torrent_hash=handle.get("hash"),
+            wanted_volumes=wanted,
         )
         cached = bool(result.get("cached"))
         if queued_id and not torrent_id:
@@ -1689,6 +1765,11 @@ class MangaScheduler:
                 feed_requested = 0
 
                 for rel in releases:
+                    # JPEG XL images are in the user's throw-away filter: never ingested
+                    # or downloaded; the log line marks the release as [JPEGXL].
+                    if is_jpegxl_release(rel.title):
+                        self._log_jpegxl_discard(rel)
+                        continue
                     # Discard pure chapter updates and light novels.  Explicit chapter
                     # markers ("Ch1-50", "Chapter 180", "#12") are always discarded
                     # (existing policy); chapter RANGES of a known series are audited
@@ -1838,7 +1919,13 @@ class MangaScheduler:
                                 logger.debug(f"Webhook notification failed for new request: {e}")
 
                         if (is_new or is_transition) and global_auto_download and feed.get("auto_download"):
-                            if downloader_engine == "torbox":
+                            # In-flight dedupe (auto-download only): volumes already
+                            # DOWNLOADING/COMPLETED for this series (not yet in Calibre)
+                            # are never requested twice from a second release.
+                            auto_wanted, _reserved = self._auto_download_wanted(rel, series_key, missing_vols)
+                            if missing_vols and not auto_wanted:
+                                pass  # fully suppressed; IN_FLIGHT_DEDUPE already audited
+                            elif downloader_engine == "torbox":
                                 # Torbox engine: submit + persist handle; the poll task
                                 # fetches files (volume-scoped) into staging.
                                 result = self.submit_torbox_download(
@@ -1846,7 +1933,7 @@ class MangaScheduler:
                                     rel.title,
                                     rel.download_url,
                                     link=rel.link,
-                                    missing_volumes=[float(v) for v in (missing_vols or [])],
+                                    missing_volumes=auto_wanted,
                                     source=feed_name,
                                     guid=getattr(rel, "guid", "") or "",
                                 )
@@ -1864,18 +1951,21 @@ class MangaScheduler:
                                     torrent_h = qbit.extract_torrent_hash(rel.download_url) if hasattr(qbit, "extract_torrent_hash") else None
                                     if not isinstance(torrent_h, str):
                                         torrent_h = None
-                                    self.db.update_download_handle(rel_id, "qbit", downloader_id=torrent_h or "", torrent_hash=torrent_h)
+                                    self.db.update_download_handle(
+                                        rel_id, "qbit", downloader_id=torrent_h or "",
+                                        torrent_hash=torrent_h, wanted_volumes=auto_wanted,
+                                    )
                                     self._log_activity(
                                         "AUTO_DOWNLOAD",
-                                        f"Sent to downloader: '{rel.title}' (Missing: {missing_vols})",
+                                        f"Sent to downloader: '{rel.title}' (Missing: {auto_wanted})",
                                         f"Source: {feed_name}"
                                     )
-                                    if torrent_h and rel.is_bundle and missing_vols and len(missing_vols) < len(rel.volumes):
-                                        sel_res = qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing_vols])
+                                    if torrent_h and rel.is_bundle and auto_wanted and len(auto_wanted) < len(rel.volumes):
+                                        sel_res = qbit.apply_selective_volume_download(torrent_h, auto_wanted)
                                         if sel_res.get("status") == "filtered":
                                             self._log_activity(
                                                 "SELECTIVE_DOWNLOAD",
-                                                f"Selective download applied for '{rel.title}': skipped {len(sel_res.get('skipped_volumes', []))} owned volumes; downloading {len(sel_res.get('kept_volumes', []))} missing volumes."
+                                                f"Selective download applied for '{rel.title}': skipped {len(sel_res.get('skipped_volumes', []))} owned/in-flight volumes; downloading {len(sel_res.get('kept_volumes', []))} missing volumes."
                                             )
 
                 self.db.update_feed_status(feed_id, "OK", None)
@@ -1978,6 +2068,9 @@ class MangaScheduler:
         tracked series); callers that process many releases pass it once instead of
         letting every release reload it.
         """
+        if is_jpegxl_release(rel.title):
+            self._log_jpegxl_discard(rel)
+            return (False, "JPEGXL", [], None, None)
         if is_chapter_only(rel.title):
             return (False, "CHAPTER_ONLY", [], None, None)
         if is_light_novel(rel.title):
@@ -2580,10 +2673,10 @@ class MangaScheduler:
         for rel in releases:
             if self.stop_backfill_requested:
                 break
-            is_new, status, missing_vols, rel_id, _ = self._process_release(
+            is_new, status, missing_vols, rel_id, stable_series = self._process_release(
                 rel, f"Nyaa: {primary_title}", matcher, known_series_keys=known_series_keys
             )
-            if status in ("CHAPTER_ONLY", "LIGHT_NOVEL"):
+            if status in ("CHAPTER_ONLY", "LIGHT_NOVEL", "JPEGXL"):
                 continue
 
             total_found += 1
@@ -2597,13 +2690,19 @@ class MangaScheduler:
                     except Exception as e:
                         logger.debug(f"Webhook notification failed for backfill request: {e}")
                 if is_new and global_auto_download and rel_id:
-                    if downloader_engine == "torbox":
+                    # In-flight dedupe (auto-download only): don't fetch a volume
+                    # another release of this series is already downloading/awaiting
+                    # Calibre with.
+                    auto_wanted, _reserved = self._auto_download_wanted(rel, stable_series, missing_vols)
+                    if missing_vols and not auto_wanted:
+                        pass  # fully suppressed; IN_FLIGHT_DEDUPE already audited
+                    elif downloader_engine == "torbox":
                         result = self.submit_torbox_download(
                             rel_id,
                             rel.title,
                             rel.download_url,
                             link=rel.link,
-                            missing_volumes=[float(v) for v in (missing_vols or [])],
+                            missing_volumes=auto_wanted,
                             source=f"Nyaa: {primary_title}",
                             guid=getattr(rel, "guid", "") or "",
                         )
@@ -2621,9 +2720,12 @@ class MangaScheduler:
                             torrent_h = qbit.extract_torrent_hash(rel.download_url) if hasattr(qbit, "extract_torrent_hash") else None
                             if not isinstance(torrent_h, str):
                                 torrent_h = None
-                            self.db.update_download_handle(rel_id, "qbit", downloader_id=torrent_h or "", torrent_hash=torrent_h)
-                            if torrent_h and rel.is_bundle and missing_vols and len(missing_vols) < len(rel.volumes):
-                                qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing_vols])
+                            self.db.update_download_handle(
+                                rel_id, "qbit", downloader_id=torrent_h or "",
+                                torrent_hash=torrent_h, wanted_volumes=auto_wanted,
+                            )
+                            if torrent_h and rel.is_bundle and auto_wanted and len(auto_wanted) < len(rel.volumes):
+                                qbit.apply_selective_volume_download(torrent_h, auto_wanted)
 
         if metadata_summary.get("skipped"):
             metadata_text = "metadata skipped (provider unavailable)"
@@ -2836,7 +2938,7 @@ class MangaScheduler:
                     is_new, status, missing_vols, _, _ = self._process_release(
                         rel, "Nyaa Manga", matcher, known_series_keys=known_series_keys
                     )
-                    if status in ("CHAPTER_ONLY", "LIGHT_NOVEL"):
+                    if status in ("CHAPTER_ONLY", "LIGHT_NOVEL", "JPEGXL"):
                         continue
 
                     total_processed += 1

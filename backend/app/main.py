@@ -442,7 +442,9 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
     eta = info.get("eta") if isinstance(info.get("eta"), (int, float)) else None
     speed = int(info.get("download_speed") or 0)
     try:
-        wanted_volumes = sorted(float(v) for v in json.loads(release.get("missing_vols_json") or "[]"))
+        wanted_volumes = sorted(float(v) for v in json.loads(release.get("download_wanted_json") or "[]"))
+        if not wanted_volumes:
+            wanted_volumes = sorted(float(v) for v in json.loads(release.get("missing_vols_json") or "[]"))
     except Exception:
         wanted_volumes = []
     strict_volumes = as_bool(db.get_setting("torbox_strict_volume_selection", "true"), default=True)
@@ -1598,7 +1600,10 @@ async def api_release_download(release_id: int):
 
     if success:
         torrent_h = qbit.extract_torrent_hash(download_url)
-        db.update_download_handle(release_id, "qbit", downloader_id=torrent_h or "", torrent_hash=torrent_h)
+        db.update_download_handle(
+            release_id, "qbit", downloader_id=torrent_h or "",
+            torrent_hash=torrent_h, wanted_volumes=[float(v) for v in (missing or [])],
+        )
         db.log_activity("MANUAL_DOWNLOAD", f"Sent to downloader: '{target['title']}'", f"URL: {download_url[:60]}...")
 
         if torrent_h and target.get("is_bundle") and missing and len(missing) < len(vols):

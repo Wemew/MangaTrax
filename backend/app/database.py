@@ -60,6 +60,9 @@ MEDIA_TYPE_LIGHT_NOVEL = "light_novel"
 MEDIA_TYPE_CHAPTER_ONLY = "chapter_only"
 MEDIA_TYPE_NOVEL = "novel"
 MEDIA_TYPE_AUDIOBOOK = "audiobook"
+# JPEG XL releases are discarded by the feed filters and typed so they stay hidden
+# from the manga views (retained rows can be inspected with the media filter off).
+MEDIA_TYPE_JPEGXL = "jpegxl"
 MEDIA_TYPE_UNKNOWN = "unknown"
 MEDIA_TYPES = (
     MEDIA_TYPE_MANGA,
@@ -67,6 +70,7 @@ MEDIA_TYPES = (
     MEDIA_TYPE_CHAPTER_ONLY,
     MEDIA_TYPE_NOVEL,
     MEDIA_TYPE_AUDIOBOOK,
+    MEDIA_TYPE_JPEGXL,
     MEDIA_TYPE_UNKNOWN,
 )
 # Types hidden from the manga tracking views (they are retained in the DB and can
@@ -76,6 +80,7 @@ NON_MANGA_MEDIA_TYPES = (
     MEDIA_TYPE_CHAPTER_ONLY,
     MEDIA_TYPE_NOVEL,
     MEDIA_TYPE_AUDIOBOOK,
+    MEDIA_TYPE_JPEGXL,
 )
 
 
@@ -484,6 +489,10 @@ class MangaDatabase:
             # but a timeout cannot be computed without knowing when submission began.
             if "downloader_started_at" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN downloader_started_at TEXT DEFAULT '';")
+            # Effective engine selection (auto-downloads may exclude volumes already
+            # in flight from another release; Torbox polls this exact wanted set).
+            if "download_wanted_json" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN download_wanted_json TEXT DEFAULT '[]';")
 
             # Backfill is_complete for existing releases matching complete indicators (local SQL/regex only, NO network calls)
             try:
@@ -795,6 +804,7 @@ class MangaDatabase:
         # transaction above so it never contends for the write lock, and it is the
         # only media-typing work on the automatic startup path.
         self._run_media_filter_once()
+        self._run_jpegxl_filter_once()
 
     def _run_media_filter_once(self):
         """One-shot, NON-DESTRUCTIVE re-typing of rows stored before media typing.
@@ -815,7 +825,7 @@ class MangaDatabase:
         ``__init__`` and on Windows a leaked (cycle-held) sqlite handle would keep
         the database file locked.
         """
-        typed = {MEDIA_TYPE_LIGHT_NOVEL: 0, MEDIA_TYPE_CHAPTER_ONLY: 0}
+        typed = {MEDIA_TYPE_LIGHT_NOVEL: 0, MEDIA_TYPE_CHAPTER_ONLY: 0, MEDIA_TYPE_JPEGXL: 0}
         changed = 0
         try:
             conn = self.get_connection()
@@ -834,7 +844,7 @@ class MangaDatabase:
                 if filter_setting in ("false", "0", "no", "off"):
                     return 0
 
-                from app.parser import is_chapter_only, is_light_novel
+                from app.parser import is_chapter_only, is_jpegxl_release, is_light_novel
 
                 cur.execute(
                     "SELECT id, title FROM releases "
@@ -845,7 +855,9 @@ class MangaDatabase:
                     title = (row["title"] or "").strip()
                     if not title:
                         continue
-                    if is_light_novel(title):
+                    if is_jpegxl_release(title):
+                        kind = MEDIA_TYPE_JPEGXL
+                    elif is_light_novel(title):
                         kind = MEDIA_TYPE_LIGHT_NOVEL
                     elif is_chapter_only(title):
                         kind = MEDIA_TYPE_CHAPTER_ONLY
@@ -872,7 +884,8 @@ class MangaDatabase:
                             "MEDIA_RECLASSIFY",
                             "Re-typed stored releases by media type (no rows deleted)",
                             f"Light novel: {typed[MEDIA_TYPE_LIGHT_NOVEL]}, "
-                            f"chapter-only: {typed[MEDIA_TYPE_CHAPTER_ONLY]}. "
+                            f"chapter-only: {typed[MEDIA_TYPE_CHAPTER_ONLY]}, "
+                            f"JPEG XL: {typed[MEDIA_TYPE_JPEGXL]}. "
                             "Non-manga types are hidden from the tracking views and kept in the database.",
                             _resolve_audit_actor("system"),
                         ),
@@ -887,10 +900,72 @@ class MangaDatabase:
         if changed:
             self._invalidate_grouped_cache()
             logger.info(
-                "Media filter: typed %s light-novel and %s chapter-only row(s); nothing deleted.",
+                "Media filter: typed %s light-novel, %s chapter-only and %s JPEG XL row(s); nothing deleted.",
                 typed[MEDIA_TYPE_LIGHT_NOVEL], typed[MEDIA_TYPE_CHAPTER_ONLY],
+                typed[MEDIA_TYPE_JPEGXL],
             )
         return changed
+
+    def _run_jpegxl_filter_once(self):
+        """One-shot, non-destructive typing of legacy JPEG XL rows (upgrade path).
+
+        Feed ingestion discards JPEG XL releases before they are stored; this pass
+        only labels rows that were stored by older versions so the manga views hide
+        them and the UI can mark them ``[JPEGXL]``.  Idempotent via its own marker so
+        databases that already ran the D1 media pass are still upgraded.
+        """
+        try:
+            conn = self.get_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT value FROM app_settings WHERE key = 'jpegxl_filter_applied';")
+                row = cur.fetchone()
+                if row and (row["value"] or "").strip() not in ("", "0"):
+                    return 0
+                from app.parser import is_jpegxl_release
+
+                cur.execute(
+                    "SELECT id, title FROM releases "
+                    "WHERE COALESCE(media_type, 'unknown') IN ('unknown', '');"
+                )
+                rows = cur.fetchall()
+                typed = 0
+                for item in rows:
+                    title = (item["title"] or "").strip()
+                    if title and is_jpegxl_release(title):
+                        cur.execute(
+                            "UPDATE releases SET media_type = ? "
+                            "WHERE id = ? AND COALESCE(media_type, 'unknown') IN ('unknown', '');",
+                            (MEDIA_TYPE_JPEGXL, item["id"]),
+                        )
+                        typed += 1
+                cur.execute(
+                    "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = ?;",
+                    ("jpegxl_filter_applied", "1", "1"),
+                )
+                if typed:
+                    cur.execute(
+                        "INSERT INTO activity_logs (event_type, message, details, actor) "
+                        "VALUES (?, ?, ?, ?);",
+                        (
+                            "MEDIA_RECLASSIFY",
+                            "Re-typed stored releases as [JPEGXL] (no rows deleted)",
+                            "JPEG XL releases are never auto-downloaded and are hidden from the "
+                            "manga views; they stay inspectable in the database.",
+                            _resolve_audit_actor("system"),
+                        ),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:  # pragma: no cover - typing must never block startup
+            logger.warning("JPEG XL re-typing pass skipped: %s", exc)
+            return 0
+        if typed:
+            self._invalidate_grouped_cache()
+            logger.info("Media filter: typed %s stored JPEG XL row(s); nothing deleted.", typed)
+        return typed
 
     # --- Settings ---
     def get_setting(self, key: str, default: str = "") -> str:
@@ -1129,6 +1204,49 @@ class MangaDatabase:
                 (clean_name, int(limit)),
             )
             return [dict(row) for row in cur.fetchall()]
+
+    def get_inflight_reserved_volumes(
+        self,
+        series_names: Any,
+        exclude_guid: Optional[str] = None,
+    ) -> Set[float]:
+        """Volumes already being downloaded / downloaded-but-not-in-Calibre.
+
+        Used by auto-download only: a second release (another group/quality/source)
+        for the same volume must not be auto-submitted while the first release is
+        still DOWNLOADING or COMPLETED (files fetched but not yet imported into
+        Calibre).  Failed/IDLE rows release their reservation.
+        """
+        names = sorted({str(name).strip().lower() for name in (series_names or []) if str(name or "").strip()})
+        if not names:
+            return set()
+        placeholders = ", ".join("?" for _ in names)
+        reserved: Set[float] = set()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT guid, volumes_json FROM releases
+                WHERE lower(series_name) IN ({placeholders})
+                  AND download_status IN ('DOWNLOADING', 'COMPLETED')
+                  AND COALESCE(status, '') NOT IN ('IN_CALIBRE', 'IGNORED', 'BLACKLISTED');
+                """,
+                tuple(names),
+            )
+            rows = cur.fetchall()
+        for row in rows:
+            if exclude_guid and str(row["guid"] or "") == str(exclude_guid):
+                continue
+            try:
+                volumes = json.loads(row["volumes_json"] or "[]")
+            except (TypeError, ValueError):
+                volumes = []
+            for volume in volumes:
+                try:
+                    reserved.add(round(float(volume), 2))
+                except (TypeError, ValueError):
+                    continue
+        return reserved
 
     def get_series_templates_map(self) -> Dict[str, Dict[str, Any]]:
         """Returns map of normalized series name -> template dict for ComicInfo.xml metadata injection."""
@@ -1397,11 +1515,15 @@ class MangaDatabase:
         engine: str,
         downloader_id: Optional[str] = None,
         torrent_hash: Optional[str] = None,
+        wanted_volumes: Optional[List[float]] = None,
     ):
-        """Persist the engine provenance for a submitted release (task-20)."""
+        """Persist the engine provenance and effective wanted volumes for a release."""
         clean_engine = str(engine or "").strip().lower()
         clean_id = str(downloader_id).strip() if downloader_id is not None else ""
         clean_hash = str(torrent_hash).strip() if (isinstance(torrent_hash, str) and torrent_hash.strip()) else None
+        clean_wanted = None
+        if wanted_volumes is not None:
+            clean_wanted = json.dumps(sorted({round(float(v), 2) for v in wanted_volumes}))
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
@@ -1410,10 +1532,11 @@ class MangaDatabase:
                     downloader = ?,
                     downloader_id = ?,
                     torrent_hash = COALESCE(?, torrent_hash),
+                    download_wanted_json = COALESCE(?, download_wanted_json),
                     downloader_started_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?;
-            """, (clean_engine, clean_id, clean_hash, release_id))
+            """, (clean_engine, clean_id, clean_hash, clean_wanted, release_id))
             conn.commit()
             self._invalidate_grouped_cache()
 

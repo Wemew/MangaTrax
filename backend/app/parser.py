@@ -1004,6 +1004,26 @@ def extract_release_group(raw_title: str, known_groups: Optional[Iterable[str]] 
     groups = extract_release_groups(raw_title, known_groups=known_groups)
     return groups[0] if groups else None
 
+def is_jpegxl_release(raw_title: str) -> bool:
+    """True when the release is a JPEG XL / JXL image-format release.
+
+    The user explicitly does not want any JPEG XL manga downloaded; these releases
+    are discarded by the feed filters and typed ``jpegxl`` (hidden from the manga
+    views, marked ``[JPEGXL]`` where stored rows are shown).  Matches the explicit
+    tags (``[JPEGXL]``, ``(JPEG XL)``, ``[JXL]``), bare words (``JPEGXL``,
+    ``JPEG XL``, ``JXL``) and the ``.jxl`` suffix without matching inside other
+    words.
+    """
+    if not raw_title or not isinstance(raw_title, str):
+        return False
+    return bool(re.search(
+        r"(?i)(?:[\[\(]\s*(?:jpeg\s*-?\s*xl|jxl)\s*[\]\)]"
+        r"|\b(?:jpeg\s*-?\s*xl|jxl)\b"
+        r"|\.jxl\b)",
+        raw_title,
+    ))
+
+
 def is_light_novel(raw_title: str) -> bool:
     """
     Returns True if the release is identified as a Light Novel or Web Novel, not a Manga.
