@@ -1333,6 +1333,21 @@ class MangaDatabase:
             conn.commit()
             self._invalidate_grouped_cache()
 
+    def set_downloader_id(self, release_id: int, downloader_id: str):
+        """Replace the engine handle without resetting the submission timestamp.
+
+        Used when a queued Torbox job is promoted to an active torrent; the overall
+        timeout window must keep counting from the original submission.
+        """
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET downloader_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (str(downloader_id or ""), release_id),
+            )
+            conn.commit()
+            self._invalidate_grouped_cache()
+
     def get_downloader_releases(self, engine: str, limit: int = 100) -> List[Dict[str, Any]]:
         """Releases currently representing work for *engine* (active first)."""
         with self.get_connection() as conn:

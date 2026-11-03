@@ -27,6 +27,8 @@ from app.downloader.base import (
     DownloaderNotFoundError,
     DownloaderRateLimitError,
     DownloaderSlotError,
+    encode_queued_handle_id,
+    parse_queued_handle_id,
 )
 from app.tagger.cbz_tagger import auto_tag_staging_cbz_files
 from app.providers.registry import create_provider
@@ -721,7 +723,10 @@ class MangaScheduler:
             max_concurrent = int(self.db.get_setting("torbox_max_concurrent", "2") or 2)
         except ValueError:
             max_concurrent = 2
-        active = self.db.get_active_torbox_downloads()
+        active = [
+            row for row in self.db.get_active_torbox_downloads()
+            if parse_queued_handle_id(row.get("downloader_id")) is None
+        ]
         if len(active) >= max(1, max_concurrent):
             message = (
                 f"Torbox concurrency limit reached ({max_concurrent} active download(s)); "
@@ -745,16 +750,42 @@ class MangaScheduler:
             return {"success": False, "engine": engine, "message": str(exc), "retryable": True}
 
         handle = result.get("handle") or {}
+        torrent_id = handle.get("torrent_id")
+        queued_id = handle.get("queued_id")
+        persisted_id = str(torrent_id) if torrent_id else (
+            encode_queued_handle_id(queued_id) if queued_id else ""
+        )
         self.db.update_download_handle(
             release_id,
             engine,
-            downloader_id=str(handle.get("torrent_id") or ""),
+            downloader_id=persisted_id,
             torrent_hash=handle.get("hash"),
         )
         cached = bool(result.get("cached"))
+        if queued_id and not torrent_id:
+            # No free Torbox active slot: the submission is queued, not failed.  It is
+            # polled on the normal cadence (and does not consume max-concurrent slots).
+            message = "queued: waiting for a free Torbox slot"
+            self._log_activity(
+                "TORBOX_SUBMITTED",
+                f"Sent to Torbox (queued): '{title}'",
+                f"queued_id={queued_id}; {message}"
+                + (f"; Source: {source}" if source else "")
+                + (f"; wantedVolumes={wanted}" if wanted else ""),
+            )
+            return {
+                "success": True,
+                "engine": engine,
+                "handle": handle,
+                "cached": False,
+                "queued": True,
+                "state": "queued_slot",
+                "message": message,
+            }
+
         event = "TORBOX_CACHED" if cached else "TORBOX_SUBMITTED"
         detail_parts = [
-            f"torrent_id={handle.get('torrent_id')}",
+            f"torrent_id={torrent_id}",
             f"hash={handle.get('hash') or ''}",
         ]
         if wanted:
@@ -766,23 +797,26 @@ class MangaScheduler:
             f"Sent to Torbox{' (cached)' if cached else ''}: '{title}'",
             "; ".join(detail_parts),
         )
-        return {"success": True, "engine": engine, "handle": handle, "cached": cached}
+        return {"success": True, "engine": engine, "handle": handle, "cached": cached, "queued": False}
 
-    # --- Torbox polling worker (task-20, Phase 1+2) ---
+    # --- Torbox polling worker (task-20, Phase 1+2; queued slots task-21) ---
     def _torbox_fail_release(self, release_id: int, title: str, message: str) -> None:
         """Mark a Torbox release FAILED and audit it (surfaced, not silently retried)."""
         self.db.update_downloader_state(release_id, "FAILED", "torbox")
         self._log_activity("TORBOX_FAILED", f"Torbox download failed: '{title}'", message)
         logger.warning("Torbox download failed for '%s': %s", title, message)
 
-    def _torbox_surface_once(self, release_id: int, message: str, title: str) -> None:
+    def _torbox_surface_once(
+        self, release_id: int, message: str, title: str, event_type: str = "TORBOX_FAILED",
+    ) -> None:
         """Audit a non-fatal Torbox problem once per distinct message (no log spam)."""
         previous = self._torbox_notified.get(release_id)
         if previous == message:
             return
         self._torbox_notified[release_id] = message
-        self._log_activity("TORBOX_FAILED", f"Torbox download issue: '{title}'", message)
-        logger.warning("Torbox download issue for '%s': %s", title, message)
+        label = {"TORBOX_QUEUED": "queued", "TORBOX_PROMOTED": "activated"}.get(event_type, "download issue")
+        self._log_activity(event_type, f"Torbox {label}: '{title}'", message)
+        logger.warning("Torbox %s for '%s': %s", label, title, message)
 
     def _select_torbox_files(self, release: Dict[str, Any], files: List[Dict[str, Any]], wanted_volumes: List[float]):
         """Choose the Torbox files for a volume subset.
@@ -851,26 +885,45 @@ class MangaScheduler:
         for release in rows:
             release_id = int(release.get("id"))
             title = str(release.get("title") or "")
+            queued_id = parse_queued_handle_id(release.get("downloader_id"))
             started = self._parse_db_timestamp(release.get("downloader_started_at"))
             if started is not None and timeout_hours > 0:
                 age_hours = (datetime.utcnow() - started).total_seconds() / 3600.0
                 if age_hours > timeout_hours:
-                    self._torbox_fail_release(
-                        release_id, title,
-                        f"Timed out after {age_hours:.1f}h (limit {timeout_hours:g}h); "
-                        "the release stays REQUESTED for a retry.",
-                    )
+                    if queued_id is not None:
+                        message = (
+                            f"No free Torbox active slot for {age_hours:.1f}h "
+                            f"(limit {timeout_hours:g}h); the release stays REQUESTED for a retry."
+                        )
+                    else:
+                        message = (
+                            f"Timed out after {age_hours:.1f}h (limit {timeout_hours:g}h); "
+                            "the release stays REQUESTED for a retry."
+                        )
+                    self._torbox_fail_release(release_id, title, message)
                     failed += 1
                     continue
 
-            handle = {
-                "torrent_id": int(release.get("downloader_id") or 0),
-                "hash": str(release.get("torrent_hash") or ""),
-            }
-            if not handle["torrent_id"]:
-                self._torbox_fail_release(release_id, title, "Missing Torbox torrent_id on the release row.")
-                failed += 1
-                continue
+            if queued_id is not None:
+                handle = {
+                    "engine": "torbox",
+                    "queued_id": queued_id,
+                    "torrent_id": None,
+                    "hash": str(release.get("torrent_hash") or ""),
+                }
+            else:
+                try:
+                    torrent_id = int(release.get("downloader_id") or 0)
+                except (TypeError, ValueError):
+                    torrent_id = 0
+                handle = {
+                    "torrent_id": torrent_id,
+                    "hash": str(release.get("torrent_hash") or ""),
+                }
+                if not torrent_id:
+                    self._torbox_fail_release(release_id, title, "Missing Torbox torrent_id/queued_id on the release row.")
+                    failed += 1
+                    continue
 
             try:
                 info = downloader.status(handle)
@@ -888,6 +941,39 @@ class MangaScheduler:
 
             processed += 1
             state = str(info.get("state") or "queued")
+
+            # Queued submission just activated: capture the real torrent id and keep
+            # going with the normal flow in this same poll cycle.
+            promoted = info.get("promoted_torrent_id")
+            if promoted:
+                self.db.set_downloader_id(release_id, str(promoted))
+                self._torbox_surface_once(
+                    release_id,
+                    f"Activated from queued_id={handle.get('queued_id')} as Torbox torrent {promoted}.",
+                    title,
+                    event_type="TORBOX_PROMOTED",
+                )
+                handle = {
+                    "engine": "torbox",
+                    "torrent_id": int(promoted),
+                    "queued_id": handle.get("queued_id"),
+                    "hash": handle.get("hash") or "",
+                }
+                self._torbox_notified.pop(release_id, None)
+
+            if state == "queued_slot":
+                message = "queued: waiting for a free Torbox slot"
+                position = info.get("queue_position")
+                active_limit = info.get("active_limit")
+                if position is not None:
+                    message += f" (position {position})"
+                if active_limit is not None:
+                    message += f" [active limit {active_limit}]"
+                self._torbox_surface_once(
+                    release_id, message, title, event_type="TORBOX_QUEUED",
+                )
+                continue
+
             if state == "failed":
                 self._torbox_fail_release(
                     release_id, title,

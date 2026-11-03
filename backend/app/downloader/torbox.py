@@ -40,6 +40,7 @@ from app.downloader.base import (
 logger = logging.getLogger("mangatrax.downloader.torbox")
 
 TORBOX_API_BASE = "https://api.torbox.app/v1/api"
+REDACTED_SECRET = "'***'"
 TORBOX_API_TIMEOUT_SECONDS = 30.0
 TORBOX_STREAM_TIMEOUT_SECONDS = 60.0
 TORBOX_STREAM_CHUNK_BYTES = 1024 * 256
@@ -132,6 +133,16 @@ class TorboxDownloader:
         self.delete_after_download = bool(delete_after_download)
         self.timeout = float(timeout or TORBOX_API_TIMEOUT_SECONDS)
         self.max_file_bytes = int(max_file_bytes or TORBOX_MAX_FILE_BYTES)
+
+    def __repr__(self) -> str:
+        """Masked representation: ``%r``/tracebacks can never leak the API key."""
+        return (
+            f"TorboxDownloader(api_key={REDACTED_SECRET}, enabled={self.enabled}, "
+            f"base_url={self.base_url!r}, delete_after_download={self.delete_after_download})"
+        )
+
+    def __str__(self) -> str:
+        return self.__repr__()
 
     # -- HTTP plumbing -------------------------------------------------------
     def _safe_label(self, path: str) -> str:
@@ -312,22 +323,41 @@ class TorboxDownloader:
 
         if isinstance(data, dict):
             torrent_id = data.get("torrent_id") or data.get("id")
+            queued_id = data.get("queued_id")
             created_hash = str(data.get("hash") or infohash or "").lower()
         elif isinstance(data, int):
-            torrent_id, created_hash = data, (infohash or "")
+            torrent_id, queued_id, created_hash = data, None, (infohash or "")
         else:
-            torrent_id, created_hash = None, (infohash or "")
-        if not torrent_id:
-            raise DownloaderError("Torbox did not return a torrent_id for the submitted release.")
-        handle = {
-            "engine": self.name,
-            "torrent_id": int(torrent_id),
-            "hash": created_hash,
-            "savepath": savepath,
-            "wanted_volumes": [float(v) for v in (wanted_volumes or [])],
-            "cached": bool(cached),
-        }
-        return {"handle": handle, "state": "ready" if cached else "queued", "cached": bool(cached)}
+            torrent_id, queued_id, created_hash = None, None, (infohash or "")
+
+        wanted = [float(v) for v in (wanted_volumes or [])]
+        if torrent_id:
+            handle = {
+                "engine": self.name,
+                "torrent_id": int(torrent_id),
+                "hash": created_hash,
+                "savepath": savepath,
+                "wanted_volumes": wanted,
+                "cached": bool(cached),
+            }
+            return {"handle": handle, "state": "ready" if cached else "queued", "cached": bool(cached)}
+
+        if queued_id:
+            # The account has no free active slot: Torbox queued the submission.
+            handle = {
+                "engine": self.name,
+                "torrent_id": None,
+                "queued_id": int(queued_id),
+                "hash": created_hash,
+                "savepath": savepath,
+                "wanted_volumes": wanted,
+                "cached": False,
+            }
+            return {"handle": handle, "state": "queued_slot", "cached": False, "queued_id": int(queued_id)}
+
+        raise DownloaderError(
+            "Torbox did not return a torrent_id or queued_id for the submitted release."
+        )
 
     # -- Status --------------------------------------------------------------
     @staticmethod
@@ -345,6 +375,106 @@ class TorboxDownloader:
             return "downloading"
         return "queued"
 
+    def _queued_rows(self) -> List[Dict[str, Any]]:
+        """Fetch the account's queued submissions (``GET /torrents/getqueued``)."""
+        data = self._request("GET", "/torrents/getqueued")
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        if isinstance(data, dict) and data:
+            return [data]
+        return []
+
+    @staticmethod
+    def _row_queued_id(row: Dict[str, Any]) -> Optional[int]:
+        for key in ("queued_id", "id", "torrent_id"):
+            try:
+                value = int(row.get(key))
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return None
+
+    @staticmethod
+    def _row_torrent_id(row: Dict[str, Any]) -> Optional[int]:
+        try:
+            value = int(row.get("torrent_id") or 0)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    def _queued_snapshot(self, queued_id: int, infohash: str) -> Tuple[Optional[Dict[str, Any]], Optional[int]]:
+        """Return (queued row, promoted torrent_id) for a queued submission.
+
+        Torbox activates a queued item by giving it a real ``torrent_id``; in some
+        transitions the queued row disappears entirely, so the fallback is to look the
+        infohash up in ``mylist``.
+        """
+        rows = self._queued_rows()
+        row = next((item for item in rows if self._row_queued_id(item) == int(queued_id)), None)
+        if row is not None:
+            promoted = self._row_torrent_id(row)
+            if promoted:
+                return row, promoted
+            return row, None
+        if infohash:
+            try:
+                data = self._request("GET", "/torrents/mylist", params={"bypass_cache": "true"})
+            except DownloaderError:
+                return None, None
+            mylist = data if isinstance(data, list) else ([data] if isinstance(data, dict) and data else [])
+            for item in mylist:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("hash") or "").lower() == infohash.lower():
+                    try:
+                        found_id = int(item.get("id") or item.get("torrent_id") or 0)
+                    except (TypeError, ValueError):
+                        found_id = 0
+                    if found_id > 0:
+                        return None, found_id
+        return None, None
+
+    def _queued_status(self, handle: Dict[str, Any]) -> Dict[str, Any]:
+        queued_id = int(handle.get("queued_id") or 0)
+        infohash = str(handle.get("hash") or "")
+        try:
+            row, promoted = self._queued_snapshot(queued_id, infohash)
+        except DownloaderNotFoundError:
+            # A just-submitted queue item may not be visible for a moment; treat it as
+            # still queued instead of failing the release.
+            row, promoted = None, None
+        if promoted:
+            # Activated: continue with the normal active-torrent status payload.
+            info = self.status({
+                "engine": self.name,
+                "torrent_id": promoted,
+                "hash": infohash,
+            })
+            info["promoted_torrent_id"] = promoted
+            info["queued_id"] = queued_id
+            return info
+        position = None
+        active_limit = None
+        if row:
+            position = row.get("queue_position") or row.get("position")
+            active_limit = row.get("active_limit") or row.get("current_active_downloads")
+        return {
+            "state": "queued_slot",
+            "raw_state": "queued",
+            "progress": 0.0,
+            "size": int(row.get("size") or 0) if row else 0,
+            "download_speed": 0,
+            "eta": None,
+            "seeds": 0,
+            "files": [],
+            "cached": False,
+            "queued_id": queued_id,
+            "queue_position": position,
+            "active_limit": active_limit,
+            "handle": dict(handle or {}),
+        }
+
     def _find_torrent_row(self, torrent_id: int) -> Dict[str, Any]:
         data = self._request(
             "GET", "/torrents/mylist",
@@ -358,9 +488,12 @@ class TorboxDownloader:
         return row
 
     def status(self, handle: Dict[str, Any]) -> Dict[str, Any]:
-        torrent_id = (handle or {}).get("torrent_id")
+        handle = handle or {}
+        torrent_id = handle.get("torrent_id")
+        if not torrent_id and handle.get("queued_id"):
+            return self._queued_status(handle)
         if not torrent_id:
-            raise DownloaderNotFoundError("Torbox handle is missing its torrent_id.")
+            raise DownloaderNotFoundError("Torbox handle is missing its torrent_id/queued_id.")
         row = self._find_torrent_row(int(torrent_id))
         raw_state = str(row.get("download_state") or row.get("state") or "")
         normalised = self._normalise_state(raw_state, row)
@@ -572,21 +705,25 @@ class TorboxDownloader:
         return saved
 
     def cancel(self, handle: Dict[str, Any], delete_remote: bool = True) -> bool:
-        torrent_id = (handle or {}).get("torrent_id")
-        if not torrent_id:
+        handle = handle or {}
+        torrent_id = handle.get("torrent_id")
+        queued_id = handle.get("queued_id")
+        if not torrent_id and not queued_id:
             return False
         if not delete_remote:
             return True
+        payload: Dict[str, Any] = {"operation": "delete"}
+        if torrent_id:
+            payload["torrent_id"] = int(torrent_id)
+        else:
+            payload["queued_id"] = int(queued_id)
         try:
-            self._request(
-                "POST", "/torrents/controltorrent",
-                json_body={"torrent_id": int(torrent_id), "operation": "delete"},
-            )
+            self._request("POST", "/torrents/controltorrent", json_body=payload)
             return True
         except DownloaderNotFoundError:
             return True
         except DownloaderError as exc:
-            logger.warning("Could not delete Torbox torrent %s: %s", torrent_id, exc)
+            logger.warning("Could not delete Torbox job %s: %s", payload, exc)
             return False
 
     def test_connection(self) -> Dict[str, Any]:

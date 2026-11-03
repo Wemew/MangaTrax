@@ -19,7 +19,7 @@ from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
-from app.downloader.base import DownloaderError
+from app.downloader.base import DownloaderError, parse_queued_handle_id
 from app.downloader.torbox import TorboxDownloader
 from app.tagger import cbz_tagger, series_audit
 from app.tagger.cbz_tagger import has_comicinfo
@@ -463,7 +463,10 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
         "eta_seconds": int(eta) if eta is not None else None,
         "ratio": 0.0,
         "seeds": info.get("seeds") or 0,
-        "is_active": state in ("queued", "downloading", "stalled"),
+        "is_active": state in ("queued", "queued_slot", "downloading", "stalled"),
+        "queued": state == "queued_slot",
+        "queue_position": info.get("queue_position"),
+        "active_limit": info.get("active_limit"),
         "release_id": release.get("id"),
     }
 
@@ -510,9 +513,18 @@ def _build_torbox_downloader_status(payload: Dict[str, Any], timeout: float) -> 
     for release in releases:
         info: Optional[Dict[str, Any]] = None
         if release.get("download_status") == "DOWNLOADING":
-            handle = {"torrent_id": release.get("downloader_id"), "hash": release.get("torrent_hash") or ""}
+            queued_id = parse_queued_handle_id(release.get("downloader_id"))
+            if queued_id is not None:
+                handle = {
+                    "engine": "torbox",
+                    "queued_id": queued_id,
+                    "torrent_id": None,
+                    "hash": release.get("torrent_hash") or "",
+                }
+            else:
+                handle = {"torrent_id": release.get("downloader_id"), "hash": release.get("torrent_hash") or ""}
             try:
-                if handle["torrent_id"]:
+                if handle.get("torrent_id") or handle.get("queued_id"):
                     info = downloader.status(handle)
             except DownloaderError as exc:
                 info = None

@@ -233,6 +233,23 @@ class FakeTorboxService:
         return True
 
 
+class SequenceTorboxService(FakeTorboxService):
+    """Fake returning scripted status payloads (e.g. queued -> promoted -> ready)."""
+
+    def __init__(self, responses, files=None):
+        super().__init__(state="downloading", files=files)
+        self.responses = list(responses)
+        self.last_info = None
+
+    def status(self, handle):
+        self.status_calls.append(handle)
+        if len(self.responses) > 1:
+            self.last_info = self.responses.pop(0)
+        else:
+            self.last_info = self.responses[0]
+        return self.last_info
+
+
 class Ctx:
     def __init__(self):
         self.tmpdir = tempfile.mkdtemp(prefix="mangatrax_torbox_")
@@ -856,9 +873,202 @@ def test_schema_and_settings_defaults():
         ctx.close()
 
 
+# ===========================================================================
+# 12. Queued-slot submissions (task-21): handle, persistence, single surfacing
+# ===========================================================================
+def test_queued_submit_and_pending_poll():
+    print("--> Testing queued-only create -> handle/persist/surface-once...")
+    # Client level: a createtorrent response with only queued_id is a success.
+    api = FakeApi()
+    api.add("/torrents/checkcached", data=[])
+    api.add("/torrents/createtorrent", data={"queued_id": 91, "hash": HASH,
+                                             "active_limit": 2, "current_active_downloads": 2})
+    downloader = TorboxDownloader(api_key=TORBOX_KEY, enabled=True)
+    with patch("app.downloader.torbox.urllib.request.urlopen", side_effect=api):
+        result = downloader.submit({"download_url": f"magnet:?xt=urn:btih:{HASH}"}, "/staging", [2])
+    assert result["state"] == "queued_slot" and result["queued_id"] == 91, result
+    assert result["handle"]["queued_id"] == 91, result["handle"]
+    assert not result["handle"].get("torrent_id"), result["handle"]
+    assert result["cached"] is False, result
+
+    ctx = Ctx()
+    try:
+        ctx.db.set_setting("torbox_enabled", "true")
+        ctx.db.set_setting("torbox_api_key", TORBOX_KEY)
+        queued_service = FakeTorboxService(state="queued_slot", files=[])
+        queued_service.submit = lambda release, savepath, wanted_volumes=None: {
+            "handle": {"engine": "torbox", "queued_id": 91, "torrent_id": None,
+                       "hash": HASH, "savepath": savepath},
+            "state": "queued_slot", "cached": False, "queued_id": 91,
+        }
+        rid = _insert_release(ctx.db, "queued-guid", "Queued Release")
+        with patch("app.scheduler.build_downloader", return_value=queued_service):
+            submit = ctx.scheduler.submit_torbox_download(
+                rid, "Queued Release", f"magnet:?xt=urn:btih:{HASH}", missing_volumes=[2],
+            )
+        assert submit["success"] is True and submit["queued"] is True, submit
+        row = ctx.db.get_release_by_id(rid)
+        assert row["download_status"] == "DOWNLOADING", row
+        assert row["downloader"] == "torbox" and row["downloader_id"] == "queued:91", row
+        submitted_events = ctx.events("TORBOX_SUBMITTED")
+        assert len(submitted_events) == 1, submitted_events
+        submitted_text = submitted_events[0].get("message", "") + submitted_events[0].get("details", "")
+        assert "queued" in submitted_text.lower(), submitted_events[0]
+        assert ctx.events("TORBOX_QUEUED") == [], "queued event is the poller's single surfacing"
+        assert ctx.events("TORBOX_FAILED") == []
+
+        # Still queued: surfaced once, state stays DOWNLOADING, no error spam.
+        with patch("app.scheduler.build_downloader", return_value=queued_service):
+            first = ctx.scheduler.poll_torbox_downloads()
+            second = ctx.scheduler.poll_torbox_downloads()
+        assert first["completed"] == 0 and second["completed"] == 0, (first, second)
+        assert ctx.db.get_release_by_id(rid)["download_status"] == "DOWNLOADING"
+        assert len(ctx.events("TORBOX_QUEUED")) == 1, ctx.events("TORBOX_QUEUED")
+        assert ctx.events("TORBOX_FAILED") == [], ctx.events("TORBOX_FAILED")
+
+        # Queued jobs do not consume torbox_max_concurrent: with max=1 and only a
+        # queued row present, a fresh active submission is still allowed.
+        ctx.db.set_setting("torbox_max_concurrent", "1")
+        active_service = FakeTorboxService(state="downloading")
+        rid2 = _insert_release(ctx.db, "active-allowed-guid", "Active Allowed")
+        with patch("app.scheduler.build_downloader", return_value=active_service):
+            allowed = ctx.scheduler.submit_torbox_download(
+                rid2, "Active Allowed", f"magnet:?xt=urn:btih:{HASH}",
+            )
+        assert allowed["success"] is True, allowed
+        assert len(active_service.submit_calls) == 1, "queued row must not block a new active slot"
+        print("    [PASSED] queued-only create accepted; persisted as queued:<id>; surfaced once; slot accounting correct.")
+    finally:
+        ctx.close()
+
+
+# ===========================================================================
+# 13. Real client: getqueued polling, promotion, masked repr
+# ===========================================================================
+def test_queued_getqueued_and_promotion():
+    print("--> Testing getqueued polling + promotion to torrent_id...")
+    downloader = TorboxDownloader(api_key=TORBOX_KEY, enabled=True)
+    assert TORBOX_KEY not in repr(downloader), repr(downloader)
+    assert TORBOX_KEY not in str(downloader), str(downloader)
+    assert "api_key='***'" in repr(downloader), repr(downloader)
+
+    # Still queued: getqueued has the item without a torrent_id.
+    api = FakeApi().add("/torrents/getqueued", data=[{
+        "id": 91, "hash": HASH, "name": "Queued", "size": 100,
+        "queue_position": 1, "active_limit": 2,
+    }])
+    with patch("app.downloader.torbox.urllib.request.urlopen", side_effect=api):
+        info = downloader.status({"engine": "torbox", "queued_id": 91, "hash": HASH})
+    assert info["state"] == "queued_slot", info
+    assert info["queue_position"] == 1 and info["active_limit"] == 2, info
+    assert info["cached"] is False and info["files"] == [], info
+    assert api.urls_for("/torrents/getqueued"), api.calls
+
+    # Activated: the queued row now carries the real torrent_id.
+    api2 = FakeApi()
+    api2.add("/torrents/getqueued", data=[{"id": 91, "hash": HASH, "torrent_id": 555}])
+    api2.add("/torrents/mylist", data=[{
+        "id": 555, "hash": HASH, "download_state": "downloading", "progress": 0.4,
+        "size": 200, "files": [{"id": 7, "name": "Series Vol. 02.cbz", "size": 200}],
+    }])
+    with patch("app.downloader.torbox.urllib.request.urlopen", side_effect=api2):
+        promoted = downloader.status({"engine": "torbox", "queued_id": 91, "hash": HASH})
+    assert promoted["promoted_torrent_id"] == 555, promoted
+    assert promoted["state"] == "downloading" and promoted["handle"]["torrent_id"] == 555, promoted
+    assert promoted["files"][0]["id"] == 7, promoted
+
+    # Transition variant: the queued row vanished; the hash is already in mylist.
+    api3 = FakeApi()
+    api3.add("/torrents/getqueued", data=[])
+    api3.add("/torrents/mylist", data=[{"id": 556, "hash": HASH, "download_state": "completed",
+                                        "download_finished": True, "progress": 1.0, "files": []}])
+    with patch("app.downloader.torbox.urllib.request.urlopen", side_effect=api3):
+        promoted2 = downloader.status({"engine": "torbox", "queued_id": 91, "hash": HASH})
+    assert promoted2["promoted_torrent_id"] == 556, promoted2
+    assert promoted2["state"] == "ready", promoted2
+    print("    [PASSED] getqueued polled, queue_position/active_limit surfaced, activation captured; repr masked.")
+
+
+# ===========================================================================
+# 14. Queue -> active promotion completes the normal poll/fetch flow
+# ===========================================================================
+def test_queue_promotion_completes_flow():
+    print("--> Testing queue -> active promotion completing the flow...")
+    ctx = Ctx()
+    try:
+        ctx.db.set_setting("torbox_enabled", "true")
+        ctx.db.set_setting("torbox_api_key", TORBOX_KEY)
+        ctx.db.set_setting("torbox_delete_after_download", "true")
+        rid = _insert_release(
+            ctx.db, "promote-guid", "Promote Me", downloader="torbox",
+            downloader_id="queued:91", download_status="DOWNLOADING",
+            downloader_started_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            torrent_hash=HASH, volumes=[1, 2], missing_volumes=[2],
+        )
+        files = [{"id": 1, "name": "Series Vol. 01.cbz", "size": 10},
+                 {"id": 2, "name": "Series Vol. 02.cbz", "size": 10}]
+        service = SequenceTorboxService([
+            {"state": "queued_slot", "raw_state": "queued", "progress": 0.0, "files": [],
+             "queued_id": 91, "queue_position": 1, "active_limit": 2},
+            {"state": "ready", "raw_state": "completed", "progress": 1.0, "files": files,
+             "cached": False, "promoted_torrent_id": 555},
+        ], files=files)
+        with patch("app.scheduler.build_downloader", return_value=service):
+            first = ctx.scheduler.poll_torbox_downloads()
+            assert first["completed"] == 0, first
+            assert ctx.db.get_release_by_id(rid)["downloader_id"] == "queued:91"
+
+            second = ctx.scheduler.poll_torbox_downloads()
+            assert second["completed"] == 1, second
+        row = ctx.db.get_release_by_id(rid)
+        assert row["download_status"] == "COMPLETED", row
+        assert row["downloader_id"] == "555", row
+        assert service.fetch_calls and [item["id"] for item in service.fetch_calls[0][1]] == [2], service.fetch_calls
+        assert service.cancelled and service.cancelled[0]["torrent_id"] == 555, service.cancelled
+        assert ctx.events("TORBOX_DOWNLOADED"), ctx.events("TORBOX_DOWNLOADED")
+        assert ctx.events("TORBOX_PROMOTED"), "promotion must be audited"
+        assert ctx.events("TORBOX_FAILED") == [], ctx.events("TORBOX_FAILED")
+        # The original submission timestamp is preserved across promotion.
+        assert row["downloader_started_at"], row
+        print("    [PASSED] queued job promoted to torrent 555, fetched missing volume 2, completed and cleaned up.")
+    finally:
+        ctx.close()
+
+
+# ===========================================================================
+# 15. Queue timeout -> FAILED + actionable audit (no infinite rotation)
+# ===========================================================================
+def test_queue_timeout_fails():
+    print("--> Testing queued-slot timeout -> FAILED + audit...")
+    ctx = Ctx()
+    try:
+        ctx.db.set_setting("torbox_enabled", "true")
+        ctx.db.set_setting("torbox_api_key", TORBOX_KEY)
+        ctx.db.set_setting("torbox_timeout_hours", "6")
+        old = (datetime.utcnow() - timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
+        rid = _insert_release(
+            ctx.db, "queue-timeout-guid", "Queue Timeout", downloader="torbox",
+            downloader_id="queued:91", download_status="DOWNLOADING",
+            downloader_started_at=old, torrent_hash=HASH,
+        )
+        queued_service = FakeTorboxService(state="queued_slot", files=[])
+        with patch("app.scheduler.build_downloader", return_value=queued_service):
+            result = ctx.scheduler.poll_torbox_downloads()
+        assert result["failed"] == 1, result
+        assert ctx.db.get_release_by_id(rid)["download_status"] == "FAILED"
+        failures = [e for e in ctx.events("TORBOX_FAILED")
+                    if "No free Torbox active slot" in (e.get("details") or "")]
+        assert failures, ctx.events("TORBOX_FAILED")
+        assert "REQUESTED" in (failures[0].get("details") or ""), failures[0]
+        assert queued_service.status_calls == [], "timed-out queued job must not be polled further"
+        print("    [PASSED] queued beyond the window -> FAILED with an actionable audit message.")
+    finally:
+        ctx.close()
+
+
 def main():
     print("=" * 78)
-    print("Running Torbox/engine suite (task-20)")
+    print("Running Torbox/engine suite (task-20 + queued-slot hardening task-21)")
     print("=" * 78)
     tests = [
         test_engine_selection_and_qbit_adapter,
@@ -872,6 +1082,10 @@ def main():
         test_settings_masking_and_validation,
         test_downloads_status_engine_aware,
         test_schema_and_settings_defaults,
+        test_queued_submit_and_pending_poll,
+        test_queued_getqueued_and_promotion,
+        test_queue_promotion_completes_flow,
+        test_queue_timeout_fails,
     ]
     failures = 0
     for test in tests:

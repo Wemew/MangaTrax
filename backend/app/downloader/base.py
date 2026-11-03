@@ -45,6 +45,28 @@ class DownloaderFileError(DownloaderError):
     """A downloaded file was missing, unsafe or failed validation."""
 
 
+# Torbox can queue a submission instead of activating it when the account has no free
+# active download slot.  The persisted ``downloader_id`` encodes that distinction so
+# the poller knows whether to poll ``mylist`` (id) or ``getqueued`` (queued: id).
+QUEUED_ID_PREFIX = "queued:"
+
+
+def encode_queued_handle_id(queued_id: Any) -> str:
+    """Encode a Torbox queued id for ``releases.downloader_id``."""
+    return f"{QUEUED_ID_PREFIX}{int(queued_id)}"
+
+
+def parse_queued_handle_id(value: Any) -> Optional[int]:
+    """Return the queued id encoded in ``downloader_id`` (None for active ids)."""
+    text = str(value or "").strip()
+    if not text.lower().startswith(QUEUED_ID_PREFIX):
+        return None
+    try:
+        return int(text[len(QUEUED_ID_PREFIX):].strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def extract_torrent_hash(url_or_magnet: str) -> Optional[str]:
     """Return the normalised 40-char hex infohash from a magnet/string, if present.
 
