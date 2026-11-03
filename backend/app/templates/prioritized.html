@@ -95,7 +95,7 @@
                 {% if pg.release_count %}
                 <span class="px-1.5 py-0.2 rounded bg-amber-500/20 text-[10px] text-amber-300 font-mono">{{ pg.release_count }}</span>
                 {% endif %}
-                <button onclick="removePrioritizedGroup({{ pg.id }}, '{{ pg.name|escape }}')" title="Remove from prioritized groups" class="text-amber-400/60 hover:text-rose-400 ml-1 transition-colors">
+                <button onclick="removePrioritizedGroup({{ pg.id }}, '{{ pg.name|escape }}')" title="Remove from prioritized groups" class="text-amber-400/60 hover:text-rose-400 ml-1 transition-colors" aria-label="Remove from prioritized groups">
                     <i data-lucide="x" class="w-3 h-3"></i>
                 </button>
             </div>
@@ -205,6 +205,11 @@
 const currentStatus = "{{ current_status or '' }}";
 const currentView = "{{ current_view or 'series' }}";
 
+// Empty-state helper: reset the status query parameter and the client-side search.
+function clearPrioritizedFilters() {
+    window.location.href = '/prioritized';
+}
+
 function toggleReleasesAccordion(id) {
     const el = document.getElementById(id);
     const icon = document.getElementById('icon-' + id);
@@ -244,10 +249,14 @@ async function fetchNextSeriesBatch() {
         if (skeleton) skeleton.remove();
 
         if (isFirstSeriesBatch && data.count === 0) {
+            const searchValue = (document.getElementById('prioritizedSearchInput')?.value || '').trim();
+            const hasFilters = Boolean(currentStatus || searchValue);
             container.innerHTML = `
                 <div class="bg-darkcard border border-amber-500/20 rounded-2xl p-12 text-center text-slate-500">
                     <i data-lucide="inbox" class="w-12 h-12 mx-auto mb-3 opacity-40"></i>
                     <p class="text-sm font-semibold">No prioritized manga releases found matching current filters.</p>
+                    <p class="text-[11px] text-slate-500 mt-1">Try a different search term, status filter, or prioritize more release groups in Settings.</p>
+                    ${hasFilters ? '<button type="button" onclick="clearPrioritizedFilters()" class="mt-3 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors">Clear filters</button>' : ''}
                 </div>
             `;
             hasMoreSeries = false;

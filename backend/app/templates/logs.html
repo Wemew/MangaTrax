@@ -47,10 +47,20 @@
             </div>
             {% else %}
             <div class="p-12 text-center text-slate-500 text-xs">
-                No logs recorded yet.
+                <i data-lucide="scroll-text" class="w-12 h-12 mx-auto mb-3 opacity-40"></i>
+                <p class="text-sm font-semibold">No activity logs recorded yet.</p>
+                <p class="text-[11px] text-slate-500 mt-1">Feed polls, Calibre syncs, downloads and tag operations will show up here.</p>
             </div>
             {% endfor %}
         </div>
+    </div>
+
+    <!-- Empty state shown when the search filter matches nothing (task-16) -->
+    <div id="logs-filter-empty" class="hidden bg-darkcard border border-slate-800 rounded-2xl p-12 text-center text-slate-500">
+        <i data-lucide="search-x" class="w-12 h-12 mx-auto mb-3 opacity-40"></i>
+        <p class="text-sm font-semibold">No log entries match your search.</p>
+        <p class="text-[11px] text-slate-500 mt-1">Try a different term or clear the search to see all activity.</p>
+        <button type="button" onclick="clearLogFilters()" class="mt-3 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors">Clear search</button>
     </div>
 
 </div>
@@ -59,10 +69,23 @@
 function filterLogs() {
     const q = document.getElementById('log-search').value.toLowerCase().trim();
     const items = document.querySelectorAll('.log-item');
+    let visible = 0;
     items.forEach(el => {
         const text = el.getAttribute('data-text');
-        el.style.display = text.includes(q) ? '' : 'none';
+        const show = text.includes(q);
+        el.style.display = show ? '' : 'none';
+        if (show) visible += 1;
     });
+    const emptyEl = document.getElementById('logs-filter-empty');
+    if (emptyEl) emptyEl.classList.toggle('hidden', !(q && items.length > 0 && visible === 0));
+    if (window.lucide) lucide.createIcons();
+}
+
+function clearLogFilters() {
+    const input = document.getElementById('log-search');
+    if (input) input.value = '';
+    filterLogs();
+    if (input) input.focus();
 }
 </script>
 {% endblock %}

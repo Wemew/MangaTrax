@@ -22,6 +22,10 @@
                 <i data-lucide="search" class="w-4 h-4 text-slate-500 absolute left-3 top-2.5"></i>
                 <input type="text" id="series-search" oninput="filterSeries()" placeholder="Search manga series..." class="w-full bg-darkcard border border-slate-700/80 rounded-xl pl-9 pr-4 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 transition-colors">
             </div>
+            <button type="button" onclick="triggerCalibreSync()" id="btn-sync-calibre" aria-label="Sync Calibre library" title="Scan Calibre library for manga series & owned volumes" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-2 transition-colors active:scale-95 disabled:opacity-60 disabled:cursor-wait shrink-0">
+                <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-brand-400" id="icon-calibre-sync"></i>
+                <span>Sync Calibre</span>
+            </button>
         </div>
     </div>
 
@@ -64,9 +68,15 @@
         </div>
     </div>
 
-</div>
+    <!-- Friendly empty state shown when the search filter matches nothing (task-16) -->
+    <div id="series-filter-empty" class="hidden bg-darkcard border border-slate-800 rounded-2xl p-12 text-center text-slate-500">
+        <i data-lucide="search-x" class="w-12 h-12 mx-auto mb-3 opacity-40"></i>
+        <p class="text-sm font-semibold">No manga series match your search.</p>
+        <p class="text-[11px] text-slate-500 mt-1">Try a different title or clear the search to see your whole Calibre library.</p>
+        <button type="button" onclick="clearSeriesFilters()" class="mt-3 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors">Clear search</button>
+    </div>
 
-<!-- Modal: Edit Series Website Link -->
+</div>
 <div id="modal-link" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
     <div class="bg-darkcard border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
         <h3 class="text-base font-bold text-white flex items-center gap-2">
@@ -205,7 +215,21 @@ function filterSeries() {
             r.classList.add('hidden');
         }
     });
+
+    // Friendly empty state + "Clear search" when the filter hides every row (task-16).
+    const emptyEl = document.getElementById('series-filter-empty');
+    if (emptyEl) {
+        const visibleRows = Array.from(rows).filter((row) => !row.classList.contains('hidden')).length;
+        emptyEl.classList.toggle('hidden', !(q && visibleRows === 0));
+    }
     if (window.lucide) lucide.createIcons();
+}
+
+function clearSeriesFilters() {
+    const input = document.getElementById('series-search');
+    if (input) input.value = '';
+    filterSeries();
+    if (input) input.focus();
 }
 
 // Auto-trigger infinite scroll for series table

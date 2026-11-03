@@ -185,8 +185,9 @@
                     </div>
                 </nav>
 
-                <!-- Right side: one primary action (Poll Feeds), a "more actions"
-                     overflow menu, and the auth user menu (task-15). -->
+                <!-- Right side: user menu (auth only) + mobile menu trigger.  Page
+                     actions (Sync Calibre / Tag CBZ / Poll Feeds) live on the pages
+                     that own them (series / downloads / feeds). -->
                 <div class="flex items-center space-x-2">
                     {% if auth_mode and auth_mode != 'none' %}
                     <div class="relative hidden md:block" data-dropdown>
@@ -203,23 +204,6 @@
                         </div>
                     </div>
                     {% endif %}
-                    <button type="button" onclick="triggerFeedCheck()" id="btn-check-feeds" aria-label="Poll feeds for new releases" title="Check feeds for new manga releases & bundles" class="px-2.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm shadow-brand-600/30 active:scale-95">
-                        <i data-lucide="radio" class="w-3.5 h-3.5" id="icon-feed-check"></i>
-                        <span class="hidden sm:inline">Poll Feeds</span>
-                    </button>
-                    <div class="relative" data-dropdown>
-                        <button type="button" data-dropdown-trigger aria-haspopup="true" aria-expanded="false" aria-controls="nav-menu-actions" aria-label="More maintenance actions" title="More actions (Sync Calibre, Tag CBZ)" class="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center justify-center transition-colors">
-                            <i data-lucide="more-horizontal" class="w-4 h-4"></i>
-                        </button>
-                        <div id="nav-menu-actions" data-dropdown-menu role="menu" class="hidden absolute right-0 mt-2 w-52 bg-darkcard border border-slate-800 rounded-xl shadow-2xl p-1.5 z-50">
-                            <button type="button" onclick="triggerCalibreSync()" id="btn-sync-calibre" role="menuitem" title="Scan Calibre library for manga series & owned volumes" class="w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-slate-300 hover:bg-slate-800/70 hover:text-white">
-                                <i data-lucide="refresh-cw" class="w-4 h-4 text-brand-400" id="icon-calibre-sync"></i> Sync Calibre
-                            </button>
-                            <button type="button" onclick="triggerStagingTag()" id="btn-tag-staging" role="menuitem" title="Tag completed .cbz files in staging with inherited Calibre metadata" class="w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-slate-300 hover:bg-slate-800/70 hover:text-white">
-                                <i data-lucide="tag" class="w-4 h-4 text-cyan-400" id="icon-staging-tag"></i> Tag CBZ
-                            </button>
-                        </div>
-                    </div>
                     <button type="button" id="btn-mobile-menu" onclick="toggleMobileMenu()" aria-haspopup="true" aria-expanded="false" aria-controls="mobile-menu" aria-label="Open navigation menu" title="Open navigation menu" class="md:hidden w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center justify-center transition-colors">
                         <i data-lucide="menu" class="w-4 h-4"></i>
                     </button>
@@ -266,19 +250,6 @@
                 <i data-lucide="settings" class="w-4 h-4"></i> Settings
             </a>
 
-            <div class="pt-3 mt-2 border-t border-slate-800/80">
-                <p class="px-3 pb-1 text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Actions</p>
-                <button type="button" onclick="triggerCalibreSync()" class="w-full flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium text-slate-300 hover:bg-slate-800/70 hover:text-white" title="Scan Calibre library for manga series & owned volumes">
-                    <i data-lucide="refresh-cw" class="w-4 h-4 text-brand-400"></i> Sync Calibre
-                </button>
-                <button type="button" onclick="triggerStagingTag()" class="w-full flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium text-slate-300 hover:bg-slate-800/70 hover:text-white" title="Tag completed .cbz files in staging">
-                    <i data-lucide="tag" class="w-4 h-4 text-cyan-400"></i> Tag CBZ
-                </button>
-                <button type="button" onclick="triggerFeedCheck()" class="w-full flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-semibold text-brand-300 hover:bg-slate-800/70 hover:text-white" title="Check feeds for new manga releases & bundles">
-                    <i data-lucide="radio" class="w-4 h-4"></i> Poll Feeds
-                </button>
-            </div>
-
             {% if auth_mode and auth_mode != 'none' %}
             <div class="pt-3 mt-2 border-t border-slate-800/80">
                 <p class="px-3 pb-1 text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Signed in ({{ auth_mode }})</p>
@@ -316,7 +287,7 @@
                     <i data-lucide="history" class="w-4 h-4 text-brand-400"></i>
                     Start Historical Backfill
                 </h3>
-                <button onclick="closeBackfillModal()" class="text-slate-400 hover:text-white">
+                <button onclick="closeBackfillModal()" class="text-slate-400 hover:text-white" title="Close" aria-label="Close">
                     <i data-lucide="x" class="w-4 h-4"></i>
                 </button>
             </div>
@@ -350,6 +321,19 @@
 
     <!-- Main Content Body -->
     <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {% if not request.url.path.startswith('/auth/') %}
+        <!-- Background Calibre sync banner (task-16): explains empty/stale data
+             while the worker indexes the library; auto-refreshes when it finishes. -->
+        <div id="calibre-sync-banner" class="hidden mb-6 bg-cyan-500/10 border border-cyan-500/30 rounded-2xl px-4 py-3 items-center justify-between gap-3 shadow-lg" role="status" aria-live="polite">
+            <div class="flex items-center gap-3 min-w-0">
+                <i data-lucide="refresh-cw" class="w-4 h-4 text-cyan-300 animate-spin shrink-0"></i>
+                <p class="text-xs text-slate-300"><span class="font-semibold text-white">Indexing your Calibre library in the background</span> &mdash; lists refresh automatically.</p>
+            </div>
+            <button type="button" onclick="dismissCalibreSyncBanner()" aria-label="Dismiss Calibre sync notice" title="Dismiss" class="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors shrink-0">
+                <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+        </div>
+        {% endif %}
         <!-- Global Active Backfill Progress Banner (Visible across all pages) -->
         <div id="global-backfill-banner" class="hidden mb-6 bg-brand-500/10 border border-brand-500/30 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-lg">
             <div class="flex items-center gap-3">
@@ -514,8 +498,10 @@
         async function triggerCalibreSync() {
             const btn = document.getElementById('btn-sync-calibre');
             const icon = document.getElementById('icon-calibre-sync');
-            icon.classList.add('animate-spin');
-            btn.disabled = true;
+            // Null-safe: the trigger lives on the Series page; the shared helper
+            // must not throw if it is ever called without the control present.
+            if (icon) icon.classList.add('animate-spin');
+            if (btn) btn.disabled = true;
 
             try {
                 const res = await fetch('/api/calibre/sync', { method: 'POST' });
@@ -529,16 +515,18 @@
             } catch (err) {
                 showToast('Failed to trigger Calibre scan: ' + err, 'error');
             } finally {
-                icon.classList.remove('animate-spin');
-                btn.disabled = false;
+                if (icon) icon.classList.remove('animate-spin');
+                if (btn) btn.disabled = false;
             }
         }
 
         async function triggerFeedCheck() {
+            // Poll Feeds is only rendered on the Feeds page now; keep this null-safe
+            // so the shared helper can never throw if the trigger is absent.
             const btn = document.getElementById('btn-check-feeds');
             const icon = document.getElementById('icon-feed-check');
-            icon.classList.add('animate-spin');
-            btn.disabled = true;
+            if (icon) icon.classList.add('animate-spin');
+            if (btn) btn.disabled = true;
 
             try {
                 // The poll runs in the background: this request returns immediately,
@@ -564,8 +552,8 @@
             } catch (err) {
                 showToast('Failed to trigger feed check: ' + err, 'error');
             } finally {
-                icon.classList.remove('animate-spin');
-                btn.disabled = false;
+                if (icon) icon.classList.remove('animate-spin');
+                if (btn) btn.disabled = false;
             }
         }
 
@@ -588,8 +576,10 @@
         async function triggerStagingTag() {
             const btn = document.getElementById('btn-tag-staging');
             const icon = document.getElementById('icon-staging-tag');
-            icon.classList.add('animate-spin');
-            btn.disabled = true;
+            // Null-safe: each page provides its own trigger ids, so the shared
+            // helper can never throw when the control is absent.
+            if (icon) icon.classList.add('animate-spin');
+            if (btn) btn.disabled = true;
 
             try {
                 const res = await fetch('/api/staging/tag', { method: 'POST' });
@@ -603,8 +593,8 @@
             } catch (err) {
                 showToast('Failed to trigger staging tag: ' + err, 'error');
             } finally {
-                icon.classList.remove('animate-spin');
-                btn.disabled = false;
+                if (icon) icon.classList.remove('animate-spin');
+                if (btn) btn.disabled = false;
             }
         }
 
@@ -679,6 +669,68 @@
         }
 
         window.addEventListener('DOMContentLoaded', initGlobalBackfillPolling);
+
+        // --- Background Calibre sync banner (task-16) --------------------------
+        // One status check on load; polling only starts while a sync is actually
+        // running. When it completes the banner disappears and the page refreshes
+        // so the user sees the new data without guessing. Never runs on /auth/*.
+        let calibreSyncPollTimer = null;
+        let calibreSyncDismissed = false;
+
+        function hideCalibreSyncBanner() {
+            const banner = document.getElementById('calibre-sync-banner');
+            if (banner) {
+                banner.classList.add('hidden');
+                banner.classList.remove('flex');
+            }
+            if (calibreSyncPollTimer) {
+                clearInterval(calibreSyncPollTimer);
+                calibreSyncPollTimer = null;
+            }
+        }
+
+        function dismissCalibreSyncBanner() {
+            calibreSyncDismissed = true;
+            hideCalibreSyncBanner();
+        }
+
+        async function initCalibreSyncBanner() {
+            if (window.location.pathname.startsWith('/auth/')) return;
+            const banner = document.getElementById('calibre-sync-banner');
+            if (!banner || calibreSyncDismissed) return;
+
+            async function checkCalibreSyncStatus() {
+                if (calibreSyncDismissed) return;
+                try {
+                    const res = await fetch('/api/calibre/status');
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    const running = !!data.in_progress || data.initial_sync_done === false;
+                    if (running) {
+                        banner.classList.remove('hidden');
+                        banner.classList.add('flex');
+                        if (!calibreSyncPollTimer) {
+                            calibreSyncPollTimer = setInterval(checkCalibreSyncStatus, 3000);
+                        }
+                    } else {
+                        const wasVisible = !banner.classList.contains('hidden');
+                        hideCalibreSyncBanner();
+                        if (wasVisible) {
+                            showToast('Calibre library indexed. Refreshing lists...', 'success');
+                            setTimeout(() => location.reload(), 1200);
+                        }
+                    }
+                } catch (err) {
+                    // Status endpoint unreachable: do not keep a stale banner/poll.
+                    hideCalibreSyncBanner();
+                }
+            }
+
+            // Single check when the sync is already done -> zero polling cost.
+            checkCalibreSyncStatus();
+        }
+
+        window.addEventListener('DOMContentLoaded', initCalibreSyncBanner);
 
         // Historical Backfill Modal & Start-Page Controller
         let lastKnownBackfillPage = 1;

@@ -18,6 +18,12 @@
         </div>
 
         <div class="flex items-center gap-3">
+            <!-- Poll Feeds lives only on this page (it is a scheduled task, rarely
+                 triggered manually); it calls the shared async triggerFeedCheck(). -->
+            <button type="button" onclick="triggerFeedCheck()" id="btn-check-feeds" aria-label="Poll feeds for new releases" title="Check feeds for new manga releases & bundles" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-2 transition-colors active:scale-95 disabled:opacity-60 disabled:cursor-wait">
+                <i data-lucide="radio" class="w-4 h-4" id="icon-feed-check"></i>
+                Poll Feeds
+            </button>
             <button onclick="openAddFeedModal()" class="px-3.5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold flex items-center gap-2 transition-all shadow-md shadow-brand-600/20 active:scale-95">
                 <i data-lucide="plus" class="w-4 h-4"></i>
                 Add Feed
@@ -77,7 +83,7 @@
                         </td>
                         <td class="py-3 px-4 text-right">
                             <div class="flex items-center justify-end gap-1.5">
-                                <button onclick="deleteFeed({{ f.id }})" title="Delete feed" class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 border border-slate-700 transition-colors">
+                                <button onclick="deleteFeed({{ f.id }})" title="Delete feed" class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 border border-slate-700 transition-colors" aria-label="Delete feed">
                                     <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                                 </button>
                             </div>
@@ -85,8 +91,13 @@
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="7" class="py-10 text-center text-slate-500">
-                            No feeds configured. Click "Add Feed" above.
+                        <td colspan="7" class="py-12 text-center text-slate-500">
+                            <i data-lucide="rss" class="w-12 h-12 mx-auto mb-3 opacity-40"></i>
+                            <p class="text-sm font-semibold">No feeds configured yet.</p>
+                            <p class="text-[11px] text-slate-500 mt-1">Add an RSS/Atom feed, torrent tracker, or HTML scraper to start detecting new manga releases.</p>
+                            <button type="button" onclick="openAddFeedModal()" class="mt-3 px-3.5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold inline-flex items-center gap-2 transition-colors active:scale-95">
+                                <i data-lucide="plus" class="w-3.5 h-3.5"></i> Add Feed
+                            </button>
                         </td>
                     </tr>
                     {% endfor %}

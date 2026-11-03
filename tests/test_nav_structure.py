@@ -142,27 +142,103 @@ def test_all_routes_reachable():
 
 
 # ===========================================================================
-# 4. Right side: Poll Feeds primary, Sync/Tag in the overflow menu
+# 4. No page-action buttons in the global header (they live on owning pages)
 # ===========================================================================
 def test_action_buttons():
-    print("--> Testing right-side action buttons...")
+    print("--> Testing the header has no action buttons (page-owned actions)...")
     source = _source()
+    templates_dir = os.path.dirname(BASE_TEMPLATE)
     header = _segment(source, "<!-- Right side:", "</header>")
-    # Poll Feeds is a top-level primary button (not inside the overflow menu).
-    assert 'id="btn-check-feeds"' in header
-    assert 'onclick="triggerFeedCheck()"' in header
-    overflow_start = header.index('id="nav-menu-actions"')
-    overflow = header[overflow_start:]
-    # The overflow menu is a dropdown with a real button trigger.
-    assert "data-dropdown-trigger" in header[:overflow_start]
-    assert 'onclick="triggerCalibreSync()"' in overflow
-    assert 'id="btn-sync-calibre"' in overflow
-    assert 'onclick="triggerStagingTag()"' in overflow
-    assert 'id="btn-tag-staging"' in overflow
-    assert "triggerFeedCheck()" not in overflow, "Poll Feeds must not be inside the overflow menu"
-    # Overflow trigger is icon-only but labelled/titled.
-    assert 'aria-label="More maintenance actions"' in header
-    print("    [PASSED] Poll Feeds is the only primary button; Sync/Tag moved to overflow.")
+
+    # No page-action call sites in the header, and no overflow menu markup at all.
+    for call in ('onclick="triggerCalibreSync()"', 'onclick="triggerStagingTag()"',
+                 'onclick="triggerFeedCheck()"'):
+        assert call not in header, call
+    assert "nav-menu-actions" not in source, "overflow menu markup still in base.html"
+    assert "more-horizontal" not in source, "overflow menu trigger still in base.html"
+    assert 'aria-label="More maintenance actions"' not in source
+
+    # Sync Calibre now lives on the Series page (with the ids the spinner uses).
+    with open(os.path.join(templates_dir, "series.html"), encoding="utf-8") as handle:
+        series = handle.read()
+    assert series.count('onclick="triggerCalibreSync()"') == 1, series.count('onclick="triggerCalibreSync()"')
+    assert 'id="btn-sync-calibre"' in series
+    assert 'id="icon-calibre-sync"' in series
+
+    # Tag CBZ lives on the Downloads page (with the ids the spinner uses).
+    with open(os.path.join(templates_dir, "downloads.html"), encoding="utf-8") as handle:
+        downloads = handle.read()
+    assert downloads.count('onclick="triggerStagingTag()"') == 1, downloads.count('onclick="triggerStagingTag()"')
+    assert 'id="btn-tag-staging"' in downloads
+    assert 'id="icon-staging-tag"' in downloads
+
+    # Shared JS definitions stay in base.html (the pages call them).
+    assert "async function triggerCalibreSync()" in source
+    assert "async function triggerStagingTag()" in source
+    print("    [PASSED] header has no actions; Sync on Series, Tag on Downloads, JS shared.")
+
+
+# ===========================================================================
+# 4a. Header buttons are only nav/user/mobile triggers
+# ===========================================================================
+def test_header_button_audit():
+    print("--> Testing header buttons are nav/menu triggers only...")
+    source = _source()
+    header = _segment(source, "<header", "</header>")
+    buttons = re.findall(r"<button\b", header)
+    # 3 nav dropdown triggers + user menu trigger + mobile menu trigger.
+    assert len(buttons) == 5, f"unexpected header buttons: {len(buttons)}"
+    for trigger in ("nav-menu-library", "nav-menu-discover", "nav-menu-system", "nav-menu-user"):
+        assert 'aria-controls="%s"' % trigger in header, trigger
+    assert 'id="btn-mobile-menu"' in header
+    # The mobile menu must not list action buttons either.
+    mobile = _mobile_menu(source)
+    for call in ('onclick="triggerCalibreSync()"', 'onclick="triggerStagingTag()"',
+                 'onclick="triggerFeedCheck()"'):
+        assert call not in mobile, call
+    assert ">Actions<" not in mobile, "mobile menu still has the Actions group"
+    print("    [PASSED] header = 5 triggers (3 nav, user, mobile); mobile menu has no actions.")
+
+
+# ===========================================================================
+# 4b. Poll Feeds exists exactly once, on the Feeds page
+# ===========================================================================
+def test_poll_feeds_single_trigger():
+    print("--> Testing Poll Feeds has exactly one call site (feeds.html)...")
+    templates_dir = os.path.dirname(BASE_TEMPLATE)
+    call_sites = []
+    definition_sites = []
+    for name in sorted(os.listdir(templates_dir)):
+        if not name.endswith(".html"):
+            continue
+        with open(os.path.join(templates_dir, name), encoding="utf-8") as handle:
+            text = handle.read()
+        call_sites.extend((name, line) for line in text.splitlines() if 'onclick="triggerFeedCheck()"' in line)
+        definition_sites.extend((name, line) for line in text.splitlines() if "async function triggerFeedCheck()" in line)
+
+    assert [name for name, _line in call_sites] == ["feeds.html"], call_sites
+    assert [name for name, _line in definition_sites] == ["base.html"], definition_sites
+
+    with open(os.path.join(templates_dir, "feeds.html"), encoding="utf-8") as handle:
+        feeds = handle.read()
+    assert 'id="btn-check-feeds"' in feeds
+    assert 'id="icon-feed-check"' in feeds
+    assert "openAddFeedModal()" in feeds
+    # Poll Feeds is visually secondary to Add Feed (Add Feed stays the primary).
+    poll_button = feeds[feeds.index('id="btn-check-feeds"'):feeds.index("openAddFeedModal()")]
+    assert "bg-slate-800" in poll_button and "bg-brand-600" not in poll_button, poll_button
+    # Old header/mobile/discovery triggers are gone.  The shared JS definition may
+    # still reference the ids of the Feeds-page button; only markup call sites matter.
+    with open(BASE_TEMPLATE, encoding="utf-8") as handle:
+        base = handle.read()
+    assert 'onclick="triggerFeedCheck()"' not in base, "Poll Feeds call site still in base.html"
+    assert "<button" not in base[max(0, base.find("btn-check-feeds") - 160):base.find("btn-check-feeds")], (
+        "Poll Feeds button markup still in base.html"
+    )
+    with open(os.path.join(templates_dir, "discovery.html"), encoding="utf-8") as handle:
+        discovery = handle.read()
+    assert "triggerFeedCheck" not in discovery, "Discovery still has a Poll Feeds trigger"
+    print("    [PASSED] one call site (feeds.html); function definition stays in base.html.")
 
 
 # ===========================================================================
@@ -197,15 +273,15 @@ def test_mobile_menu():
     assert 'aria-label="Open navigation menu"' in hamburger
     assert 'onclick="toggleMobileMenu()"' in hamburger
 
-    for heading in ("Library", "Discover", "System", "Actions"):
+    for heading in ("Library", "Discover", "System"):
         assert ">%s<" % heading in mobile, heading
     for label, href in ROUTES.items():
         assert 'href="%s"' % href in mobile, ("mobile route", label)
-    # Actions grouped separately in the mobile menu.
-    actions = mobile[mobile.index(">Actions<"):]
-    assert "triggerCalibreSync()" in actions
-    assert "triggerStagingTag()" in actions
-    assert "triggerFeedCheck()" in actions
+    # No page-action controls in the mobile menu (they live on the owning pages).
+    for call in ('onclick="triggerCalibreSync()"', 'onclick="triggerStagingTag()"', 'onclick="triggerFeedCheck()"'):
+        assert call not in mobile, call
+    assert ">Actions<" not in mobile, "mobile menu still has the Actions group"
+    assert "Poll Feeds" not in mobile, "Poll Feeds must not be in the mobile menu"
     # Tap targets: every mobile nav link/action is at least 44px tall.
     assert len(re.findall(r"min-h-\[44px\]", mobile)) >= 10, "tap targets too small/missing"
     print("    [PASSED] hamburger + grouped mobile menu + 44px tap targets.")
@@ -261,6 +337,8 @@ def main():
         test_dropdown_contract,
         test_all_routes_reachable,
         test_action_buttons,
+        test_header_button_audit,
+        test_poll_feeds_single_trigger,
         test_user_menu,
         test_mobile_menu,
         test_dropdown_js,

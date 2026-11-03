@@ -169,6 +169,11 @@
 const currentStatus = "{{ current_status or '' }}";
 const currentView = "{{ current_view or 'series' }}";
 
+// Empty-state helper: reset the status query parameter and the client-side search.
+function clearReleaseFilters() {
+    window.location.href = '/releases';
+}
+
 function toggleReleasesAccordion(id) {
     const el = document.getElementById(id);
     const icon = document.getElementById('icon-' + id);
@@ -208,10 +213,14 @@ async function fetchNextSeriesBatch() {
         if (skeleton) skeleton.remove();
 
         if (isFirstSeriesBatch && data.count === 0) {
+            const searchValue = (document.getElementById('releaseSearchInput')?.value || '').trim();
+            const hasFilters = Boolean(currentStatus || searchValue);
             container.innerHTML = `
                 <div class="bg-darkcard border border-slate-800 rounded-2xl p-12 text-center text-slate-500">
                     <i data-lucide="inbox" class="w-12 h-12 mx-auto mb-3 opacity-40"></i>
                     <p class="text-sm font-semibold">No manga series found matching current filters.</p>
+                    <p class="text-[11px] text-slate-500 mt-1">Try a different search term or status filter.</p>
+                    ${hasFilters ? '<button type="button" onclick="clearReleaseFilters()" class="mt-3 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors">Clear filters</button>' : ''}
                 </div>
             `;
             hasMoreSeries = false;
