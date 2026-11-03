@@ -13,6 +13,7 @@ from app.database import (
     is_authoritative_metadata,
 )
 from app.covers import CoverCache
+from app.nyaa_source import DEFAULT_NYAA_BASE_URL, NyaaBaseURLError, normalize_nyaa_base_url
 from app.calibre.scanner import CalibreMangaScanner
 from app.calibre.matcher import MangaCalibreMatcher
 from app.downloader.qbit import QBitClient
@@ -611,6 +612,21 @@ class MangaScheduler:
             logger.error("Series key repair failed: %s", exc)
             return 0
 
+    def _nyaa_base_url(self) -> str:
+        """Resolved Nyaa/tracker base URL for every provider construction.
+
+        ``nyaa_base_url`` setting -> default ``https://nyaa.si``; an invalid stored
+        value falls back to the default (and is logged) rather than taking feeds or
+        backfill offline.
+        """
+        try:
+            return normalize_nyaa_base_url(self.db.get_setting("nyaa_base_url", DEFAULT_NYAA_BASE_URL))
+        except NyaaBaseURLError as exc:
+            logger.warning(
+                "Invalid nyaa_base_url setting (%s); falling back to %s", exc, DEFAULT_NYAA_BASE_URL,
+            )
+            return DEFAULT_NYAA_BASE_URL
+
     def get_notifier(self) -> NotificationService:
         discord = self.db.get_setting("discord_webhook_url", "")
         generic = self.db.get_setting("apprise_url", "") or self.db.get_setting("generic_webhook_url", "")
@@ -949,7 +965,7 @@ class MangaScheduler:
             feed_id = feed["id"]
             feed_name = feed["name"]
             try:
-                provider = create_provider(feed)
+                provider = create_provider(feed, nyaa_base_url=self._nyaa_base_url())
             except Exception as exc:
                 # A broken feed configuration must fail that feed, not crash the poll.
                 feeds_failed += 1
@@ -1492,7 +1508,7 @@ class MangaScheduler:
         qbit = self.get_qbit_client()
 
         # 3. Query Nyaa targeted series search across primary and alternate titles
-        nyaa = NyaaMangaProvider(name=f"Nyaa: {primary_title}", config={"delay_seconds": 1.0})
+        nyaa = NyaaMangaProvider(name=f"Nyaa: {primary_title}", config={"delay_seconds": 1.0, "base_url": self._nyaa_base_url()})
         releases = nyaa.search_series(
             primary_title,
             max_pages=max_pages,
@@ -1636,7 +1652,7 @@ class MangaScheduler:
             # numbered-series key protection both need the known-series set.
             known_series_keys = self._known_series_keys(matcher)
 
-            nyaa_provider = NyaaMangaProvider(name="Nyaa Manga Backfill", config={"delay_seconds": delay_seconds})
+            nyaa_provider = NyaaMangaProvider(name="Nyaa Manga Backfill", config={"delay_seconds": delay_seconds, "base_url": self._nyaa_base_url()})
 
             for page_num in range(start_p, end_p + 1):
                 if self.stop_backfill_requested:

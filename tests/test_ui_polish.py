@@ -44,6 +44,7 @@ def test_settings_section_nav():
         ("Downloader", "section-downloader"),
         ("Staging", "section-staging"),
         ("Schedules", "section-schedules"),
+        ("Tracker", "section-tracker"),
         ("Webhooks", "section-webhooks"),
         ("Groups", "section-groups"),
         ("Maintenance", "section-maintenance"),

@@ -3,15 +3,22 @@ import re
 import sqlite3
 import json
 import time
+import urllib.parse
 from typing import List, Dict, Any, Optional, Tuple, Set
 
 import logging
 
 from app.security import escape_like
+from app.nyaa_source import DEFAULT_NYAA_BASE_URL, NyaaBaseURLError, normalize_nyaa_base_url
 
 logger = logging.getLogger("mangatrax.database")
 
 DEFAULT_AUDIT_ACTOR = "system"
+
+# The auto-seeded built-in feed.  These exact values identify the stock row that the
+# mirror migration may repoint; user-created feeds are never touched.
+SEEDED_NYAA_FEED_NAME = "Manga Releases (RSS)"
+SEEDED_NYAA_FEED_URL = "https://nyaa.si/?page=rss&q=manga+cbz&c=3_1&f=0"
 
 
 def _resolve_audit_actor(explicit: Optional[str] = None) -> str:
@@ -482,7 +489,7 @@ class MangaDatabase:
             cur.execute("""
                 UPDATE releases 
                 SET link = replace(replace(link, '/download/', '/view/'), '.torrent', '')
-                WHERE link LIKE '%nyaa.si/download/%.torrent';
+                WHERE link LIKE '%/download/%.torrent';
             """)
 
             # Sanitize legacy uncleaned markdown/HTML descriptions in database
@@ -670,7 +677,10 @@ class MangaDatabase:
                     "feed_check_interval_minutes": "60",
                     "backfill_max_pages": "15",
                     "backfill_delay_seconds": "2.0",
-                    "discord_webhook_url": ""
+                    "discord_webhook_url": "",
+                    # Nyaa/tracker base URL (mirror/proxy support).  Bare base or a
+                    # full Nyaa-style URL is accepted and normalised on save.
+                    "nyaa_base_url": os.getenv("MANGATRAX_NYAA_BASE_URL", DEFAULT_NYAA_BASE_URL),
                 }
                 for k, v in defaults.items():
                     cur.execute("INSERT INTO app_settings (key, value) VALUES (?, ?);", (k, v))
@@ -693,6 +703,10 @@ class MangaDatabase:
                 "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",
                 ("infer_collected_releases", os.getenv("MANGATRAX_INFER_COLLECTED_RELEASES", "true")),
             )
+            cur.execute(
+                "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",
+                ("nyaa_base_url", os.getenv("MANGATRAX_NYAA_BASE_URL", DEFAULT_NYAA_BASE_URL)),
+            )
             # One-shot marker for the D1 re-typing pass ('' = not applied yet).
             cur.execute(
                 "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",
@@ -706,11 +720,18 @@ class MangaDatabase:
                     INSERT INTO feeds (name, feed_type, url, config_json, enabled, auto_download, check_interval_minutes)
                     VALUES (?, ?, ?, ?, 1, 1, 60);
                 """, (
-                    "Manga Releases (RSS)",
+                    SEEDED_NYAA_FEED_NAME,
                     "rss",
-                    "https://nyaa.si/?page=rss&q=manga+cbz&c=3_1&f=0",
+                    SEEDED_NYAA_FEED_URL,
                     json.dumps({"description": "Monitors CBZ Manga releases."})
                 ))
+
+            # Mirror/proxy support: repoint the built-in seeded feed at the configured
+            # Nyaa base URL (idempotent; only the exact stock row, never user feeds).
+            try:
+                self._migrate_seeded_nyaa_feed_cur(cur)
+            except Exception:
+                pass
 
             # Performance indexes for fast queries and instant tab switches
             cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_series_name ON releases(series_name);")
@@ -1616,6 +1637,57 @@ class MangaDatabase:
             return True
 
     # --- Feeds ---
+    @staticmethod
+    def _nyaa_feed_url_for_base(base_url: str) -> str:
+        """Rewrite the seeded feed URL onto *base_url*, preserving its query string."""
+        query = urllib.parse.urlsplit(SEEDED_NYAA_FEED_URL).query
+        base = base_url.rstrip("/")
+        return f"{base}/?{query}" if query else f"{base}/"
+
+    def _migrate_seeded_nyaa_feed_cur(self, cur, base_url: Optional[str] = None) -> int:
+        """Repoint the built-in seeded feed at the configured Nyaa base URL.
+
+        Only the exact stock row (``SEEDED_NYAA_FEED_NAME`` + ``SEEDED_NYAA_FEED_URL``
+        + rss type) is touched; user-created feeds are never modified.  Idempotent:
+        after the first rewrite the stock URL no longer matches, so repeated runs are
+        no-ops.  A default base leaves everything unchanged.
+        """
+        if base_url is None:
+            cur.execute("SELECT value FROM app_settings WHERE key = 'nyaa_base_url';")
+            row = cur.fetchone()
+            base_url = (row["value"] if row else "") or DEFAULT_NYAA_BASE_URL
+        try:
+            base = normalize_nyaa_base_url(base_url)
+        except NyaaBaseURLError:
+            return 0
+        if base.rstrip("/") == DEFAULT_NYAA_BASE_URL.rstrip("/"):
+            return 0
+        new_url = self._nyaa_feed_url_for_base(base)
+        cur.execute(
+            "SELECT id FROM feeds WHERE name = ? AND url = ? AND feed_type = 'rss';",
+            (SEEDED_NYAA_FEED_NAME, SEEDED_NYAA_FEED_URL),
+        )
+        feed_ids = [row["id"] for row in cur.fetchall()]
+        for feed_id in feed_ids:
+            cur.execute("UPDATE feeds SET url = ? WHERE id = ?;", (new_url, feed_id))
+        return len(feed_ids)
+
+    def migrate_seeded_nyaa_feed(self, base_url: Optional[str] = None) -> int:
+        """Public entry point used after a settings save (idempotent)."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            count = self._migrate_seeded_nyaa_feed_cur(cur, base_url=base_url)
+            conn.commit()
+            return count
+
+    def set_feed_enabled(self, feed_id: int, enabled: bool) -> bool:
+        """Enable/disable a feed without deleting it (scheduler skips disabled rows)."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE feeds SET enabled = ? WHERE id = ?;", (1 if enabled else 0, feed_id))
+            conn.commit()
+            return cur.rowcount > 0
+
     def get_all_feeds(self) -> List[Dict[str, Any]]:
         with self.get_connection() as conn:
             cur = conn.cursor()
@@ -2814,8 +2886,18 @@ class MangaDatabase:
             cur.execute("DELETE FROM feeds;")
             cur.execute("""
                 INSERT INTO feeds (name, feed_type, url, config_json, enabled, auto_download, check_interval_minutes)
-                VALUES ('Manga Releases (RSS)', 'rss', 'https://nyaa.si/?page=rss&q=manga+cbz&c=3_1&f=0', '{"description": "Monitors CBZ Manga releases."}', 1, 1, 60);
-            """)
+                VALUES (?, ?, ?, ?, 1, 1, 60);
+            """, (
+                SEEDED_NYAA_FEED_NAME,
+                "rss",
+                SEEDED_NYAA_FEED_URL,
+                json.dumps({"description": "Monitors CBZ Manga releases."}),
+            ))
+            # Re-apply the configured mirror base after the reset (idempotent).
+            try:
+                self._migrate_seeded_nyaa_feed_cur(cur)
+            except Exception:
+                pass
 
             # Reset prioritized groups to standard defaults
             cur.execute("DELETE FROM prioritized_groups;")

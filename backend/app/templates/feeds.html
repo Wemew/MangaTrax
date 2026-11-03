@@ -39,6 +39,7 @@
                     <tr class="bg-slate-900 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
                         <th class="py-3 px-4">Feed Name</th>
                         <th class="py-3 px-4">Type</th>
+                        <th class="py-3 px-4">Enabled</th>
                         <th class="py-3 px-4">URL</th>
                         <th class="py-3 px-4">Auto-Download</th>
                         <th class="py-3 px-4">Interval</th>
@@ -57,16 +58,27 @@
                                 {{ f.feed_type }}
                             </span>
                         </td>
+                        <td class="py-3 px-4">
+                            {% if f.enabled %}
+                            <button type="button" onclick="toggleFeed({{ f.id }}, false)" aria-label="Disable feed {{ f.name }}" title="Disable this feed (keeps it configured but stops polling)" class="px-2 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold flex items-center gap-1 transition-colors">
+                                <i data-lucide="toggle-right" class="w-3.5 h-3.5"></i> On
+                            </button>
+                            {% else %}
+                            <button type="button" onclick="toggleFeed({{ f.id }}, true)" aria-label="Enable feed {{ f.name }}" title="Enable this feed (resume polling)" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 border border-slate-700 text-[10px] font-bold flex items-center gap-1 transition-colors">
+                                <i data-lucide="toggle-left" class="w-3.5 h-3.5"></i> Off
+                            </button>
+                            {% endif %}
+                        </td>
                         <td class="py-3 px-4 max-w-xs truncate text-slate-400 font-mono" title="{{ f.url }}">
                             {{ f.url }}
                         </td>
                         <td class="py-3 px-4">
                             {% if f.auto_download %}
-                            <span class="text-emerald-400 font-semibold flex items-center gap-1">
-                                <i data-lucide="check" class="w-3.5 h-3.5"></i> Enabled
+                            <span class="text-emerald-400 font-semibold flex items-center gap-1" title="New releases from this feed are sent to the downloader automatically">
+                                <i data-lucide="check" class="w-3.5 h-3.5"></i> Auto
                             </span>
                             {% else %}
-                            <span class="text-slate-500">Disabled</span>
+                            <span class="text-slate-500" title="New releases from this feed are only discovered, not downloaded">Manual</span>
                             {% endif %}
                         </td>
                         <td class="py-3 px-4 text-slate-300">
@@ -91,7 +103,7 @@
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="7" class="py-12 text-center text-slate-500">
+                        <td colspan="8" class="py-12 text-center text-slate-500">
                             <i data-lucide="rss" class="w-12 h-12 mx-auto mb-3 opacity-40"></i>
                             <p class="text-sm font-semibold">No feeds configured yet.</p>
                             <p class="text-[11px] text-slate-500 mt-1">Add an RSS/Atom feed, torrent tracker, or HTML scraper to start detecting new manga releases.</p>
@@ -232,6 +244,26 @@ async function deleteFeed(feedId) {
         if (data.status === 'success') {
             showToast('Feed deleted', 'success');
             setTimeout(() => location.reload(), 800);
+        }
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+
+async function toggleFeed(feedId, enabled) {
+    // Enable/disable a source instead of deleting it (e.g. blocked mirror host).
+    try {
+        const res = await fetch(`/api/feeds/${feedId}/toggle`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enabled })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            showToast(enabled ? 'Feed enabled' : 'Feed disabled', 'success');
+            setTimeout(() => location.reload(), 800);
+        } else {
+            showToast(data.message || 'Could not update the feed', 'error');
         }
     } catch (err) {
         showToast('Error: ' + err, 'error');

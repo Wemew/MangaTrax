@@ -914,7 +914,10 @@ async def api_feeds_test(payload: Dict[str, Any]):
     config = model.config
 
     try:
-        provider = create_provider({"name": "Test Feed", "feed_type": feed_type, "url": url, "config_json": json.dumps(config)})
+        provider = create_provider(
+            {"name": "Test Feed", "feed_type": feed_type, "url": url, "config_json": json.dumps(config)},
+            nyaa_base_url=scheduler._nyaa_base_url(),
+        )
         if not provider:
             return JSONResponse({"status": "error", "message": "Invalid provider type"}, status_code=400)
         releases = provider.fetch_releases()
@@ -943,6 +946,23 @@ async def api_delete_feed(feed_id: int):
     """Delete a feed."""
     db.delete_feed(feed_id)
     return JSONResponse({"status": "success"})
+
+@app.post("/api/feeds/{feed_id}/toggle")
+async def api_toggle_feed(feed_id: int, payload: Dict[str, Any]):
+    """Enable/disable a feed without deleting it.
+
+    A blocked/broken source (e.g. nyaa.si on a network where it is DNS-blocked) can
+    be switched off; the scheduler already skips disabled feeds.
+    """
+    model = _validated_payload(schemas.FeedToggleRequest, payload)
+    if not db.set_feed_enabled(feed_id, model.enabled):
+        raise HTTPException(status_code=404, detail="Feed not found")
+    message = f"Feed #{feed_id} {'enabled' if model.enabled else 'disabled'}"
+    db.log_activity(
+        "FEED_ENABLED" if model.enabled else "FEED_DISABLED",
+        message,
+    )
+    return JSONResponse({"status": "success", "feed_id": feed_id, "enabled": model.enabled})
 
 @app.post("/api/staging/tag")
 async def api_staging_tag():
@@ -1551,6 +1571,15 @@ async def api_save_settings(payload: Dict[str, Any]):
                     raise HTTPException(status_code=400, detail=f"{key}: {exc}") from exc
     for k, v in provided.items():
         db.set_setting(k, str(v))
+    if "nyaa_base_url" in provided:
+        # Mirror/proxy support: repoint the built-in seeded feed at the new base
+        # (only the exact stock row; user-created feeds are never touched).
+        migrated = db.migrate_seeded_nyaa_feed(str(provided["nyaa_base_url"]))
+        if migrated:
+            db.log_activity(
+                "NYAA_BASE_UPDATED",
+                f"Nyaa base URL set to {provided['nyaa_base_url']}; repointed {migrated} built-in feed(s).",
+            )
     db.log_activity("SETTINGS_UPDATED", "Application settings updated")
     return JSONResponse({"status": "success"})
 

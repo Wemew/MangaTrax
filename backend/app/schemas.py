@@ -34,6 +34,7 @@ __all__ = [
     "ValidationError",
     "FeedCreateRequest",
     "FeedTestRequest",
+    "FeedToggleRequest",
     "ReleaseStatusUpdateRequest",
     "SeriesLinkUpdateRequest",
     "SeriesBackfillRequest",
@@ -354,6 +355,8 @@ SETTINGS_KEYS = (
     # Behaviour flags that must be settable from the settings page rather than
     # only through ``MANGATRAX_*`` environment variables.
     "discard_unmarked_chapters",
+    # Nyaa/tracker base URL (mirror/proxy support).
+    "nyaa_base_url",
 )
 
 
@@ -515,6 +518,14 @@ class FeedTestRequest(BaseModel):
         return _validate_strict_http_url(value)
 
 
+class FeedToggleRequest(BaseModel):
+    """Enable/disable a feed without deleting it (scheduler skips disabled rows)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
 # ---------------------------------------------------------------------------
 # Releases / series models
 # ---------------------------------------------------------------------------
@@ -638,6 +649,9 @@ class SettingsUpdateRequest(BaseModel):
     # Infer the full volume set of a collected batch (year-range title with no
     # volume markers) from authoritative metadata (default true).
     infer_collected_releases: Optional[str] = Field(default=None, max_length=20)
+    # Nyaa/tracker base URL (mirror/proxy support).  Accepts a bare base or a full
+    # Nyaa-style URL; normalised to scheme://host[:port][/path] with query dropped.
+    nyaa_base_url: Optional[str] = Field(default=None, max_length=security.MAX_URL_LENGTH)
 
     @field_validator("calibre_path")
     @classmethod
@@ -668,6 +682,18 @@ class SettingsUpdateRequest(BaseModel):
         if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
             raise ValueError("qbit_url must be an absolute http:// or https:// URL")
         return candidate
+
+    @field_validator("nyaa_base_url")
+    @classmethod
+    def _validate_nyaa_base_url(cls, value):
+        if value is None:
+            return None
+        from app.nyaa_source import NyaaBaseURLError, normalize_nyaa_base_url
+
+        try:
+            return normalize_nyaa_base_url(str(value))
+        except NyaaBaseURLError as exc:
+            raise ValueError(str(exc))
 
 
 class DownloaderConfigureRequest(BaseModel):

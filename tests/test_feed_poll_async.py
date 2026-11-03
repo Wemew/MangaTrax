@@ -189,7 +189,7 @@ def test_provider_failures_not_silent():
                     raise RuntimeError("nyaa lookup failed: connection reset")
                 return []
 
-        def fake_create_provider(feed):
+        def fake_create_provider(feed, **_kwargs):
             if feed.get("name") == "Unsupported Feed":
                 return None
             return _Provider(feed.get("name"))
@@ -388,7 +388,7 @@ def test_poll_reports_provider_failures():
                 def fetch_releases(self):
                     return []
 
-            def fake_factory(feed):
+            def fake_factory(feed, **_kwargs):
                 if feed.get("name") == "Bad Config":
                     raise RuntimeError("invalid feed configuration")
                 return _Provider()

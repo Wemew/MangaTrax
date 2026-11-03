@@ -164,6 +164,31 @@ services:
 | `auto_tag` | - | `true` | Automatically inject `ComicInfo.xml` into completed `.cbz` files |
 | `calibre_sync_interval_minutes` | - | `15` | Minutes between zero-lock Calibre library scans |
 | `feed_check_interval_minutes` | - | `60` | Minutes between feed polls |
+| `nyaa_base_url` | `MANGATRAX_NYAA_BASE_URL` | `https://nyaa.si` | Nyaa/tracker base URL, including a self-hosted mirror/proxy |
+
+### Nyaa mirror / proxy (`nyaa_base_url`)
+
+If `nyaa.si` is unreachable from your network (e.g. DNS-blocked by your ISP), run your
+own passthrough mirror and point MangaTrax at it with `nyaa_base_url` (Settings →
+Nyaa / Tracker Source, or `MANGATRAX_NYAA_BASE_URL`). Everything that used to hardcode
+`nyaa.si` now uses this base: feed polling, **polite backfill pagination**, post view
+URLs, `.torrent` links and relative-href joins. No code path requires `nyaa.si` once a
+mirror is configured.
+
+* Accepted values: a bare base (`https://wemew-nyaa.vercel.app`) **or** a full
+  Nyaa-style URL (`https://mirror/?page=rss&c=3_1&f=0`). It is normalised to
+  `scheme://host[:port][/path]`: query string and fragment are dropped, the host is
+  lower-cased, default ports are removed and a path prefix is preserved.
+* Credentials-in-URL, non-http(s), empty values, malformed ports and
+  loopback/private/metadata hosts are rejected.
+* The proxy must forward Nyaa's query API:
+  * RSS: `GET /?page=rss&c=3_1&f=0`
+  * HTML paging / backfill: `GET /?p=<N>&c=3_1&f=0&s=id&o=desc`
+  * torrents: `GET /download/<id>.torrent`
+* On startup (and when the setting is saved) the built-in seeded feed is repointed to
+  the mirror, preserving its query string; user-created feeds are never modified.
+* A per-feed `config.base_url` overrides the global setting. Broken sources can be
+  switched off from the Feeds table (`POST /api/feeds/{id}/toggle`) instead of deleted.
 
 ---
 
@@ -179,6 +204,7 @@ services:
 - `GET /settings` — Application Settings View
 - `POST /api/calibre/sync` — Trigger immediate Calibre library rescan
 - `POST /api/feeds/check` — Trigger immediate feed poll
+- `POST /api/feeds/{id}/toggle` — Enable/disable a feed without deleting it
 - `POST /api/staging/tag` — Trigger immediate ComicInfo.xml tagging scan of staging directory
 - `POST /api/downloader/test` — Test connectivity to qBittorrent Web API
 - `POST /api/releases/{id}/download` — Manually push a release to qBittorrent

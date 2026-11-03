@@ -14,7 +14,13 @@ PROVIDER_CLASSES = {
     "nyaa_manga": NyaaMangaProvider,
 }
 
-def create_provider(feed_dict: Dict[str, Any]) -> Optional[BaseFeedProvider]:
+def create_provider(feed_dict: Dict[str, Any], nyaa_base_url: Optional[str] = None) -> Optional[BaseFeedProvider]:
+    """Build a provider for *feed_dict*.
+
+    ``nyaa_base_url`` is the resolved ``nyaa_base_url`` setting; it is injected as
+    the per-feed default so the Nyaa provider (and only it) uses the configured
+    mirror.  A feed's own ``config["base_url"]`` still wins.
+    """
     feed_type = feed_dict.get("feed_type", "").lower()
     cls = PROVIDER_CLASSES.get(feed_type)
     if not cls:
@@ -30,6 +36,9 @@ def create_provider(feed_dict: Dict[str, Any]) -> Optional[BaseFeedProvider]:
                 config = config_raw
         except Exception:
             config = {}
+    config = dict(config or {})
+    if nyaa_base_url and not config.get("base_url"):
+        config["base_url"] = nyaa_base_url
 
     return cls(
         name=feed_dict.get("name", "Unknown Feed"),

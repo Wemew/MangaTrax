@@ -10,10 +10,15 @@ from bs4 import BeautifulSoup
 
 from app.providers.base import BaseFeedProvider, ProviderFetchError, ReleaseItem
 from app.parser import extract_manga_bundle_and_volumes, is_chapter_only, is_light_novel
+from app.nyaa_source import DEFAULT_NYAA_BASE_URL, resolve_nyaa_base_url
 
 logger = logging.getLogger("mangatrax.providers.nyaa")
 
-NYAA_BASE_URL = "https://nyaa.si"
+# Kept for backwards compatibility (imports/tests may reference it); the effective
+# base URL is resolved per provider from config["base_url"] -> nyaa_base_url setting
+# -> this default.  A mirror/proxy configured by the user is used for EVERY URL:
+# crawl pages (backfill), post view URLs, .torrent URLs and relative-href joins.
+NYAA_BASE_URL = DEFAULT_NYAA_BASE_URL
 NYAA_MANGA_CAT = "3_1"  # Literature - English-translated
 
 class NyaaMangaProvider(BaseFeedProvider):
@@ -31,6 +36,26 @@ class NyaaMangaProvider(BaseFeedProvider):
         self.max_pages = int(self.config.get("max_pages", 2))
         self.delay_seconds = float(self.config.get("delay_seconds", 1.5))
         self.query = self.config.get("query", "")
+        # Mirror support: config["base_url"] wins over the saved nyaa_base_url
+        # setting (injected here by the registry/scheduler); default nyaa.si last.
+        self.base_url = resolve_nyaa_base_url(self.config)
+
+    def _join_url(self, href: str) -> str:
+        """Join a mirror-returned href against the configured base URL.
+
+        Absolute hrefs are kept as-is.  Site-relative hrefs ("/view/123") are joined
+        to the configured base (including any path prefix), so they are never
+        rewritten back to the blocked nyaa.si host.
+        """
+        value = (href or "").strip()
+        if not value:
+            return ""
+        if value.lower().startswith(("http://", "https://")):
+            return value
+        if value.startswith("//"):
+            scheme = self.base_url.split(":", 1)[0]
+            return f"{scheme}:{value}"
+        return urllib.parse.urljoin(self.base_url.rstrip("/") + "/", value.lstrip("/"))
 
     def fetch_releases(self) -> List[ReleaseItem]:
         """Fetches releases according to configured query and max_pages.
@@ -128,7 +153,7 @@ class NyaaMangaProvider(BaseFeedProvider):
             if query:
                 params["q"] = query
 
-            page_url = f"{NYAA_BASE_URL}/?{urllib.parse.urlencode(params)}"
+            page_url = f"{self.base_url}/?{urllib.parse.urlencode(params)}"
             if progress_cb:
                 progress_cb(page, max_pages, page_url)
 
@@ -174,7 +199,7 @@ class NyaaMangaProvider(BaseFeedProvider):
                 title_el = title_links[-1]
                 raw_title = title_el.get_text(strip=True)
                 view_href = title_el.get("href", "")
-                view_url = f"{NYAA_BASE_URL}{view_href}" if view_href.startswith("/") else view_href
+                view_url = self._join_url(view_href)
 
                 if not raw_title or not view_url or view_url in seen_links:
                     continue
@@ -196,7 +221,7 @@ class NyaaMangaProvider(BaseFeedProvider):
                 for a in dl_links:
                     h = a.get("href", "")
                     if h.endswith(".torrent") or "/download/" in h:
-                        torrent_url = f"{NYAA_BASE_URL}{h}" if h.startswith("/") else h
+                        torrent_url = self._join_url(h)
                     elif h.startswith("magnet:"):
                         magnet_url = h
 
