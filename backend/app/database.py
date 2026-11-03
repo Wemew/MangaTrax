@@ -84,6 +84,25 @@ NON_MANGA_MEDIA_TYPES = (
 )
 
 
+def _parse_volume_list(raw: Any) -> List[float]:
+    """Parse a JSON volume list column, returning [] for missing/invalid data."""
+    if not raw:
+        return []
+    try:
+        values = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(values, (list, tuple)):
+        return []
+    parsed: List[float] = []
+    for value in values:
+        try:
+            parsed.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return parsed
+
+
 def tracked_media_clause(alias: str = "") -> str:
     """SQL predicate: keep ``manga`` and inconclusive ``unknown`` rows visible.
 
@@ -1226,7 +1245,7 @@ class MangaDatabase:
             cur = conn.cursor()
             cur.execute(
                 f"""
-                SELECT guid, volumes_json FROM releases
+                SELECT guid, download_wanted_json, volumes_json FROM releases
                 WHERE lower(series_name) IN ({placeholders})
                   AND download_status IN ('DOWNLOADING', 'COMPLETED')
                   AND COALESCE(status, '') NOT IN ('IN_CALIBRE', 'IGNORED', 'BLACKLISTED');
@@ -1237,16 +1256,34 @@ class MangaDatabase:
         for row in rows:
             if exclude_guid and str(row["guid"] or "") == str(exclude_guid):
                 continue
-            try:
-                volumes = json.loads(row["volumes_json"] or "[]")
-            except (TypeError, ValueError):
-                volumes = []
-            for volume in volumes:
+            # The effective wanted set is authoritative: a v01-05 bundle under strict
+            # selection may only be fetching [3,4], so reserving the whole bundle would
+            # wrongly block a legitimate release for volume 5.  Legacy rows without a
+            # persisted wanted set fall back to the bundle's full volume list.
+            effective = _parse_volume_list(row["download_wanted_json"])
+            if not effective:
+                effective = _parse_volume_list(row["volumes_json"])
+            for volume in effective:
                 try:
                     reserved.add(round(float(volume), 2))
                 except (TypeError, ValueError):
                     continue
         return reserved
+
+    def get_pending_dedupe_releases(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Releases suppressed by in-flight dedupe, oldest first (bounded)."""
+        try:
+            limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            limit = 50
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM releases WHERE download_status = 'PENDING_DEDUPE' "
+                "ORDER BY id ASC LIMIT ?;",
+                (limit,),
+            )
+            return [dict(row) for row in cur.fetchall()]
 
     def get_series_templates_map(self) -> Dict[str, Dict[str, Any]]:
         """Returns map of normalized series name -> template dict for ComicInfo.xml metadata injection."""

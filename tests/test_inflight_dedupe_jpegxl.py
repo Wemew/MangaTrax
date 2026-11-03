@@ -75,8 +75,9 @@ def _seed_release(ctx, guid, title, series, volumes, download_status, status="RE
             """
             INSERT INTO releases
                 (guid, title, series_name, link, download_url, status, download_status,
-                 downloader, downloader_id, volumes_json, missing_vols_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                 downloader, downloader_id, volumes_json, missing_vols_json,
+                 download_wanted_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             (
                 guid, title, series, f"https://nyaa.si/view/{guid}",
@@ -84,6 +85,7 @@ def _seed_release(ctx, guid, title, series, volumes, download_status, status="RE
                 status, download_status, extra.get("downloader", ""),
                 extra.get("downloader_id", ""),
                 json.dumps(volumes), json.dumps(volumes),
+                json.dumps(extra.get("wanted", [])),
             ),
         )
         conn.commit()
@@ -195,6 +197,10 @@ def test_inflight_suppresses_auto_download():
         assert "Known Series Vol. 03 (NewGroup)" in rows, rows
         new_row = rows["Known Series Vol. 03 (NewGroup)"]
         assert new_row["status"] == "REQUESTED", new_row
+        with ctx.db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT download_status FROM releases WHERE guid = 'new-group-guid';")
+            assert cur.fetchone()["download_status"] == "PENDING_DEDUPE", "suppressed duplicate must be marked"
         dedupe_events = _events(ctx, "IN_FLIGHT_DEDUPE")
         assert len(dedupe_events) == 1, dedupe_events
         assert "already in flight" in dedupe_events[0]["message"], dedupe_events[0]
@@ -347,27 +353,148 @@ def test_reservation_helper():
     tmpdir = tempfile.mkdtemp(prefix="mangatrax_reserved_")
     try:
         db = MangaDatabase(os.path.join(tmpdir, "mangatrax.db"))
-        def insert(guid, status, download_status, volumes):
+        def insert(guid, status, download_status, volumes, wanted=None):
             with db.get_connection() as conn:
                 conn.execute(
-                    "INSERT INTO releases (guid, title, series_name, status, download_status, volumes_json) "
-                    "VALUES (?, ?, 'Known Series', ?, ?, ?);",
-                    (guid, f"Known Series {guid}", status, download_status, json.dumps(volumes)),
+                    "INSERT INTO releases (guid, title, series_name, status, download_status, "
+                    "volumes_json, download_wanted_json) "
+                    "VALUES (?, ?, 'Known Series', ?, ?, ?, ?);",
+                    (guid, f"Known Series {guid}", status, download_status,
+                     json.dumps(volumes), json.dumps(wanted or [])),
                 )
                 conn.commit()
-        insert("downloading", "REQUESTED", "DOWNLOADING", [3.0])
-        insert("completed", "REQUESTED", "COMPLETED", [4.0])
-        insert("failed", "REQUESTED", "FAILED", [5.0])
-        insert("idle", "REQUESTED", "IDLE", [6.0])
-        insert("in-calibre", "IN_CALIBRE", "COMPLETED", [7.0])
-        insert("ignored", "IGNORED", "COMPLETED", [8.0])
+        # Bug 1: a v01-05 bundle fetching only [3,4] reserves only [3,4].
+        insert("bundle", "REQUESTED", "DOWNLOADING", [1.0, 2.0, 3.0, 4.0, 5.0], wanted=[3.0, 4.0])
+        # Legacy row without a wanted set falls back to the bundle's volumes.
+        insert("legacy", "REQUESTED", "DOWNLOADING", [6.0])
+        # COMPLETED reserves only what it actually fetched.
+        insert("completed", "REQUESTED", "COMPLETED", [7.0, 8.0, 9.0], wanted=[8.0])
+        insert("failed", "REQUESTED", "FAILED", [10.0], wanted=[10.0])
+        insert("idle", "REQUESTED", "IDLE", [11.0], wanted=[11.0])
+        insert("in-calibre", "IN_CALIBRE", "COMPLETED", [12.0], wanted=[12.0])
+        insert("ignored", "IGNORED", "COMPLETED", [13.0], wanted=[13.0])
+        insert("blacklisted", "BLACKLISTED", "COMPLETED", [14.0], wanted=[14.0])
         reserved = db.get_inflight_reserved_volumes(["Known Series"])
-        assert reserved == {3.0, 4.0}, reserved
+        assert reserved == {3.0, 4.0, 6.0, 8.0}, reserved
         assert db.get_inflight_reserved_volumes([]) == set()
-        assert db.get_inflight_reserved_volumes(["Known Series"], exclude_guid="downloading") == {4.0}
-        print("    [PASSED] DOWNLOADING/COMPLETED reserve; FAILED/IDLE/IN_CALIBRE/IGNORED do not.")
+        assert db.get_inflight_reserved_volumes(["Known Series"], exclude_guid="bundle") == {6.0, 8.0}
+        print("    [PASSED] reservations prefer download_wanted_json (legacy falls back to volumes); "
+              "IN_CALIBRE/IGNORED/BLACKLISTED never reserve.")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ===========================================================================
+# 9. Bug 1: partial-bundle reservation must not over-reserve
+# ===========================================================================
+def test_partial_bundle_reservation_does_not_overreserve():
+    print("--> Testing a v01-05 bundle fetching [3,4] does not reserve volumes 1,2,5...")
+    ctx = _IngestContext(calibre_series={"Known Series": [1, 2]}, settings={"auto_download": "true"})
+    try:
+        _enable_feed_auto_download(ctx)
+        _seed_release(ctx, "bundle-inflight", "Known Series Vol. 01-05",
+                      "Known Series", [1, 2, 3, 4, 5], "DOWNLOADING", wanted=[3, 4])
+        assert ctx.db.get_inflight_reserved_volumes(["Known Series"]) == {3.0, 4.0}
+        qbit = _fake_qbit()
+        with patch.object(ctx.scheduler, "get_qbit_client", return_value=qbit):
+            result = ctx.poll(_release("Known Series Vol. 05 (Alt)", "vol5-alt-guid"))
+        assert result["sent_to_downloader"] == 1, result
+        qbit.add_torrent.assert_called_once()
+        print("    [PASSED] a second release for volume 5 is not suppressed by the [3,4] bundle.")
+    finally:
+        ctx.close()
+
+
+# ===========================================================================
+# 10. Bug 2: suppressed duplicate retried after the in-flight release fails
+# ===========================================================================
+def test_sweep_retries_after_failure():
+    print("--> Testing PENDING_DEDUPE sweep retries after the first release fails...")
+    ctx = _IngestContext(calibre_series={"Known Series": [1, 2]}, settings={"auto_download": "true"})
+    try:
+        _enable_feed_auto_download(ctx)
+        _seed_release(ctx, "first-inflight", "Known Series Vol. 03 (Old)",
+                      "Known Series", [3], "DOWNLOADING")
+        with patch.object(ctx.scheduler, "get_qbit_client", return_value=_fake_qbit()):
+            ctx.poll(_release("Known Series Vol. 03 (Alt)", "retry-guid"))
+        with ctx.db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT download_status FROM releases WHERE guid = 'retry-guid';")
+            assert cur.fetchone()["download_status"] == "PENDING_DEDUPE"
+            conn.execute(
+                "UPDATE releases SET download_status = 'FAILED' WHERE guid = 'first-inflight';"
+            )
+            conn.commit()
+        qbit = _fake_qbit()
+        with patch.object(ctx.scheduler, "get_qbit_client", return_value=qbit):
+            summary = ctx.scheduler.sweep_pending_dedupe()
+        assert summary == {"checked": 1, "submitted": 1, "still_reserved": 0, "cleared": 0}, summary
+        qbit.add_torrent.assert_called_once()
+        with ctx.db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT download_status FROM releases WHERE guid = 'retry-guid';")
+            assert cur.fetchone()["download_status"] == "DOWNLOADING", "PENDING_DEDUPE must be cleared"
+        retries = [row for row in _events(ctx, "AUTO_DOWNLOAD") if "Dedupe retry submitted" in row["message"]]
+        assert retries and "Missing: [3.0]" in retries[-1]["message"], retries
+        print("    [PASSED] FAILED first release -> sweep submits the duplicate and clears the state.")
+    finally:
+        ctx.close()
+
+
+# ===========================================================================
+# 11. Sweep: no-op while reserved, batch cap, stale non-REQUESTED cleared
+# ===========================================================================
+def test_sweep_noop_while_reserved_and_capped():
+    print("--> Testing sweep no-op while reserved, batch cap and stale-state clearing...")
+    ctx = _IngestContext(calibre_series={"Known Series": [1, 2]}, settings={"auto_download": "true"})
+    try:
+        _enable_feed_auto_download(ctx)
+        _seed_release(ctx, "reserved-first", "Known Series Vol. 06 (Old)",
+                      "Known Series", [6], "DOWNLOADING")
+        _seed_release(ctx, "pending-a", "Known Series Vol. 06 (A)", "Known Series",
+                      [6], "PENDING_DEDUPE")
+        _seed_release(ctx, "pending-b", "Known Series Vol. 06 (B)", "Known Series",
+                      [6], "PENDING_DEDUPE")
+        _seed_release(ctx, "pending-calibre", "Known Series Vol. 07 (Owned)", "Known Series",
+                      [7], "PENDING_DEDUPE", status="IN_CALIBRE")
+        qbit = _fake_qbit()
+        before_dedupe = len(_events(ctx, "IN_FLIGHT_DEDUPE"))
+        with patch.object(ctx.scheduler, "get_qbit_client", return_value=qbit):
+            noop = ctx.scheduler.sweep_pending_dedupe(limit=1)
+        assert noop == {"checked": 1, "submitted": 0, "still_reserved": 1, "cleared": 0}, noop
+        qbit.add_torrent.assert_not_called()
+        assert len(_events(ctx, "IN_FLIGHT_DEDUPE")) == before_dedupe, "no event spam while reserved"
+        with ctx.db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT download_status FROM releases WHERE guid = 'pending-a';")
+            assert cur.fetchone()["download_status"] == "PENDING_DEDUPE"
+
+        with ctx.db.get_connection() as conn:
+            conn.execute("UPDATE releases SET download_status = 'FAILED' WHERE guid = 'reserved-first';")
+            conn.commit()
+        with patch.object(ctx.scheduler, "get_qbit_client", return_value=qbit):
+            one = ctx.scheduler.sweep_pending_dedupe(limit=1)
+        assert one == {"checked": 1, "submitted": 1, "still_reserved": 0, "cleared": 0}, one
+        assert qbit.add_torrent.call_count == 1
+        with ctx.db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT download_status FROM releases WHERE guid = 'pending-b';")
+            assert cur.fetchone()["download_status"] == "PENDING_DEDUPE", "batch cap must leave the rest"
+
+        with patch.object(ctx.scheduler, "get_qbit_client", return_value=qbit):
+            rest = ctx.scheduler.sweep_pending_dedupe(limit=10)
+        # pending-b is still reserved by the just-submitted pending-a; the IN_CALIBRE
+        # PENDING row is cleared and nothing is submitted again.
+        assert rest == {"checked": 2, "submitted": 0, "still_reserved": 1, "cleared": 1}, rest
+        with ctx.db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT download_status FROM releases WHERE guid = 'pending-calibre';")
+            assert cur.fetchone()["download_status"] == "IDLE", "IN_CALIBRE PENDING rows are cleared"
+            cur.execute("SELECT download_status FROM releases WHERE guid = 'pending-b';")
+            assert cur.fetchone()["download_status"] == "PENDING_DEDUPE", "still reserved -> stay pending"
+        print("    [PASSED] sweep is silent while reserved, capped per cycle, clears stale states.")
+    finally:
+        ctx.close()
 
 
 def main():
@@ -383,6 +510,9 @@ def main():
         test_manual_download_bypasses_dedupe,
         test_torbox_poll_uses_persisted_wanted,
         test_reservation_helper,
+        test_partial_bundle_reservation_does_not_overreserve,
+        test_sweep_retries_after_failure,
+        test_sweep_noop_while_reserved_and_capped,
     ]
     failures = 0
     for test in tests:

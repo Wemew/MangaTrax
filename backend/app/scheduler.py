@@ -1207,6 +1207,134 @@ class MangaScheduler:
                     except OSError:
                         pass
 
+    def sweep_pending_dedupe(self, limit: int = 50) -> Dict[str, Any]:
+        """Retry auto-downloads that were suppressed by in-flight dedupe.
+
+        Only rows marked ``PENDING_DEDUPE`` are considered, at most ``limit`` per
+        cycle, and nothing is logged while a reservation still stands.  When the
+        reservation clears (the first release failed/was cancelled) the duplicate is
+        submitted with its full missing set and the state is cleared.
+        """
+        summary = {"checked": 0, "submitted": 0, "still_reserved": 0, "cleared": 0}
+        rows = self.db.get_pending_dedupe_releases(limit=limit)
+        if not rows:
+            return summary
+        downloads_dir = self.get_downloads_dir()
+        engine = self.get_downloader_engine()
+        qbit = None
+        try:
+            matcher = self._series_refresh_matcher()
+        except Exception as exc:
+            logger.debug("Dedupe sweep could not build the Calibre matcher: %s", exc)
+            matcher = None
+        for row in rows:
+            summary["checked"] += 1
+            release_id = int(row.get("id") or 0)
+            title = str(row.get("title") or "")
+            if not release_id:
+                continue
+            if str(row.get("status") or "") != "REQUESTED":
+                # Ignored/blacklisted/IN_CALIBRE: never resurrect these.
+                self.db.update_downloader_state(release_id, "IDLE")
+                summary["cleared"] += 1
+                continue
+            missing = self.resolve_release_missing_volumes(row)
+            if not missing:
+                self.db.update_downloader_state(release_id, "IDLE")
+                summary["cleared"] += 1
+                continue
+            if matcher is not None:
+                # Never resurrect a volume that landed in Calibre while the duplicate
+                # waited: let the normal status/reconcile path own that decision.
+                try:
+                    payload = dict(row)
+                    payload["volumes"] = [
+                        float(value) for value in json.loads(row.get("volumes_json") or "[]")
+                    ]
+                    fresh = matcher.check_release(payload, auto_request_monitored=False)
+                    if fresh.get("status") == "IN_CALIBRE":
+                        self.db.update_downloader_state(release_id, "IDLE")
+                        summary["cleared"] += 1
+                        continue
+                    fresh_missing = [float(value) for value in (fresh.get("missing_volumes") or [])]
+                    if fresh_missing:
+                        missing = fresh_missing
+                except Exception as exc:
+                    logger.debug("Dedupe sweep ownership check failed for '%s': %s", title, exc)
+            try:
+                reserved = self.db.get_inflight_reserved_volumes(
+                    [row.get("series_name") or ""],
+                    exclude_guid=str(row.get("guid") or ""),
+                )
+            except Exception as exc:
+                logger.debug("Dedupe sweep reservation lookup failed for '%s': %s", title, exc)
+                reserved = set()
+            wanted = [value for value in missing if round(value, 2) not in reserved]
+            if not wanted:
+                summary["still_reserved"] += 1
+                continue
+            success = False
+            try:
+                if engine == "torbox":
+                    result = self.submit_torbox_download(
+                        release_id,
+                        title,
+                        row.get("download_url") or row.get("link") or "",
+                        link=row.get("link") or "",
+                        missing_volumes=wanted,
+                        source="dedupe sweep",
+                        guid=str(row.get("guid") or ""),
+                        torrent_hash=str(row.get("torrent_hash") or ""),
+                    )
+                    if result.get("skipped"):
+                        self.db.update_downloader_state(release_id, "IDLE")
+                        summary["cleared"] += 1
+                        continue
+                    success = bool(result.get("success"))
+                else:
+                    if qbit is None:
+                        qbit = self.get_qbit_client()
+                    url = row.get("download_url") or row.get("link") or ""
+                    success = bool(qbit.add_torrent(
+                        url_or_magnet=url,
+                        savepath=downloads_dir,
+                        category="manga",
+                        tags="mangatrax",
+                    ))
+                    if success:
+                        torrent_h = qbit.extract_torrent_hash(url) if hasattr(qbit, "extract_torrent_hash") else None
+                        if not isinstance(torrent_h, str):
+                            torrent_h = None
+                        self.db.update_download_handle(
+                            release_id, "qbit", downloader_id=torrent_h or "",
+                            torrent_hash=torrent_h, wanted_volumes=wanted,
+                        )
+                        try:
+                            bundle_volumes = json.loads(row.get("volumes_json") or "[]")
+                        except (TypeError, ValueError):
+                            bundle_volumes = []
+                        if torrent_h and int(row.get("is_bundle") or 0) and len(wanted) < len(bundle_volumes):
+                            qbit.apply_selective_volume_download(torrent_h, wanted)
+            except Exception as exc:
+                logger.warning("Dedupe retry submit failed for '%s': %s", title, exc)
+                success = False
+            if success:
+                summary["submitted"] += 1
+                self._log_activity(
+                    "AUTO_DOWNLOAD",
+                    f"Dedupe retry submitted: '{title}' (Missing: {wanted})",
+                    "Source: in-flight dedupe sweep",
+                )
+            else:
+                self.db.update_downloader_state(release_id, "IDLE")
+                summary["cleared"] += 1
+        if summary["submitted"]:
+            logger.info(
+                "Pending-dedupe sweep: checked %s, submitted %s, still reserved %s, cleared %s",
+                summary["checked"], summary["submitted"], summary["still_reserved"], summary["cleared"],
+            )
+        return summary
+
     def poll_torbox_downloads(self) -> Dict[str, Any]:
         """Advance Torbox releases: poll → fetch when ready → complete → optional delete.
 
@@ -1924,7 +2052,10 @@ class MangaScheduler:
                             # are never requested twice from a second release.
                             auto_wanted, _reserved = self._auto_download_wanted(rel, series_key, missing_vols)
                             if missing_vols and not auto_wanted:
-                                pass  # fully suppressed; IN_FLIGHT_DEDUPE already audited
+                                # Remember the duplicate: the sweep retries it once the
+                                # in-flight reservation clears (it will never be "new").
+                                if rel_id:
+                                    self.db.update_downloader_state(rel_id, "PENDING_DEDUPE")
                             elif downloader_engine == "torbox":
                                 # Torbox engine: submit + persist handle; the poll task
                                 # fetches files (volume-scoped) into staging.
@@ -2695,7 +2826,9 @@ class MangaScheduler:
                     # Calibre with.
                     auto_wanted, _reserved = self._auto_download_wanted(rel, stable_series, missing_vols)
                     if missing_vols and not auto_wanted:
-                        pass  # fully suppressed; IN_FLIGHT_DEDUPE already audited
+                        # Remember the duplicate for the periodic dedupe sweep.
+                        if rel_id:
+                            self.db.update_downloader_state(rel_id, "PENDING_DEDUPE")
                     elif downloader_engine == "torbox":
                         result = self.submit_torbox_download(
                             rel_id,
@@ -3230,6 +3363,7 @@ class MangaScheduler:
         last_tag_check = 0
         last_dl_check = 0
         last_torbox_poll = 0
+        last_dedupe_sweep = 0
         last_complete_check = time.time()
 
         while self.running:
@@ -3282,6 +3416,14 @@ class MangaScheduler:
                 if now - last_torbox_poll >= torbox_poll_seconds:
                     self.poll_torbox_downloads()
                     last_torbox_poll = time.time()
+
+                # Retry duplicates suppressed by in-flight dedupe (light, batch-capped).
+                if now - last_dedupe_sweep >= 60:
+                    try:
+                        self.sweep_pending_dedupe()
+                    except Exception as exc:
+                        logger.debug("Pending-dedupe sweep failed: %s", exc)
+                    last_dedupe_sweep = time.time()
 
             except Exception as e:
                 logger.error(f"Error in background worker loop: {e}")
