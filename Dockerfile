@@ -5,6 +5,9 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
 ENV CALIBRE_DIR=/calibre
+# Raw downloads land in DOWNLOADS_DIR; STAGING_DIR is the final (tagged) destination.
+# Mount both on the same filesystem so routing moves files by rename, not copy.
+ENV DOWNLOADS_DIR=/downloads
 ENV STAGING_DIR=/staging
 ENV DATA_DIR=/app/data
 
@@ -30,11 +33,11 @@ COPY backend/ /app/
 COPY entrypoint.sh /app/entrypoint.sh
 
 # Create mount points and ensure permissions
-RUN mkdir -p /calibre /staging /app/data && \
+RUN mkdir -p /calibre /staging /downloads /app/data && \
     chmod +x /app/entrypoint.sh && \
-    chown -R appuser:appuser /app /calibre /staging && \
+    chown -R appuser:appuser /app /calibre /staging /downloads && \
     chmod -R 755 /app && \
-    chmod 777 /app/data /calibre /staging
+    chmod 777 /app/data /calibre /staging /downloads
 
 EXPOSE 8080
 

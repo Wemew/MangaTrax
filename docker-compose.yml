@@ -18,6 +18,9 @@ services:
       - PORT=8080
       - CALIBRE_DIR=/calibre
       - STAGING_DIR=/staging
+      # Raw downloads (qBittorrent / Torbox). Keep /downloads and /staging on the SAME
+      # filesystem so routing moves files by rename instead of copying them.
+      - DOWNLOADS_DIR=/downloads
       - DATA_DIR=/app/data
       - PUID=1000
       - PGID=1000
@@ -52,8 +55,13 @@ services:
       # 1. Mount your Calibre library network share (read-only for zero-lock safety)
       - /path/to/calibre/library:/calibre:ro
 
-      # 2. Staging folder where completed manga downloads are tagged before BookOrbit ingestion
+      # 2. Final destination: tagged .cbz files land here, ready to import into Calibre.
+      #    Keep this on the SAME drive as the downloads folder below.
       - /path/to/manga/staging:/staging
 
-      # 3. Persistent application database, cover cache, and logs
+      # 3. Raw downloads for both engines (qBittorrent and Torbox). Files sit here until
+      #    their series exists in Calibre, then they are tagged and moved to /staging.
+      - /path/to/manga/downloads:/downloads
+
+      # 4. Persistent application database, cover cache, and logs
       - ./data:/app/data

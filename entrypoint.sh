@@ -6,7 +6,7 @@ PUID=${PUID:-1000}
 PGID=${PGID:-1000}
 
 # Ensure directories exist
-mkdir -p /app/data /staging /calibre
+mkdir -p /app/data /staging /calibre /downloads
 
 # If running as root (standard container startup)
 if [ "$(id -u)" = "0" ]; then
@@ -23,14 +23,14 @@ if [ "$(id -u)" = "0" ]; then
     # start.  POSIX sh: `-print -quit` stops at the first offender and `grep -q .`
     # tests whether anything was printed.  The chmod fallback is preserved for
     # environments where chown is not permitted.
-    if find /app/data /staging ! -user appuser -print -quit 2>/dev/null | grep -q .; then
-        chown -R appuser:appuser /app/data /staging 2>/dev/null || chmod -R 777 /app/data /staging 2>/dev/null || true
+    if find /app/data /staging /downloads ! -user appuser -print -quit 2>/dev/null | grep -q .; then
+        chown -R appuser:appuser /app/data /staging /downloads 2>/dev/null || chmod -R 777 /app/data /staging /downloads 2>/dev/null || true
     fi
 
     # Drop root privileges and execute command as appuser
     exec gosu appuser "$@"
 else
     # Already running as non-root (e.g. if user specified 'user:' in docker-compose)
-    mkdir -p /app/data /staging 2>/dev/null || true
+    mkdir -p /app/data /staging /downloads 2>/dev/null || true
     exec "$@"
 fi

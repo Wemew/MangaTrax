@@ -29,6 +29,9 @@ services:
       - PORT=8080
       - CALIBRE_DIR=/calibre
       - STAGING_DIR=/staging
+      # Raw downloads (qBittorrent / Torbox). Keep /downloads and /staging on the SAME
+      # dataset/filesystem so routing moves files by rename instead of copying them.
+      - DOWNLOADS_DIR=/downloads
       - DATA_DIR=/app/data
       # TrueNAS SCALE unprivileged 'apps' user and group (568:568)
       - PUID=568
@@ -66,11 +69,17 @@ services:
       # Replace '/mnt/tank/media/calibre' with your actual dataset path:
       - /mnt/tank/media/calibre:/calibre:ro
 
-      # 2. Mount your Manga Staging directory where downloads arrive and get tagged
-      # Replace '/mnt/tank/media/manga/staging' with your staging path:
+      # 2. Final destination: tagged .cbz files land here, ready to import into Calibre.
+      # Replace '/mnt/tank/media/manga/staging' with your staging path.
+      # Keep this on the SAME dataset/filesystem as the downloads folder below.
       - /mnt/tank/media/manga/staging:/staging
 
-      # 3. Mount persistent storage for MangaTrax database, cached covers, and logs
+      # 3. Raw downloads for both engines (qBittorrent and Torbox). Files stay here until
+      # their series exists in Calibre, then they are tagged and moved to /staging.
+      # Replace '/mnt/tank/media/manga/downloads' with your downloads path.
+      - /mnt/tank/media/manga/downloads:/downloads
+
+      # 4. Mount persistent storage for MangaTrax database, cached covers, and logs
       # Dockhand keeps relative './data' inside the stack directory automatically:
       - ./data:/app/data
       # Or use a dedicated TrueNAS dataset path:
