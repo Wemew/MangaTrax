@@ -480,16 +480,47 @@ def _build_downloader_status(timeout: Optional[float] = None) -> Dict[str, Any]:
 def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Normalise a Torbox release row (+optional live status) for the status API."""
     info = info or {}
+    try:
+        progress_data = json.loads(release.get("torbox_progress_json") or "{}")
+    except (TypeError, ValueError):
+        progress_data = {}
+    if not isinstance(progress_data, dict):
+        progress_data = {}
+    local_phase = str(progress_data.get("phase") or "")
     db_status = str(release.get("download_status") or "").upper()
     # The DB is authoritative for failures: Torbox may still report `Ready` for a
     # torrent we refused locally (e.g. over the size cap), which used to look stuck.
     state = "failed" if db_status == "FAILED" else str(
         info.get("state") or ("failed" if db_status == "FAILED" else "queued")
     )
+    if local_phase in ("fetching", "routing") and db_status != "FAILED":
+        state = local_phase
     files = info.get("files") or []
     saved = release.get("downloader_id") or ""
     progress = float(info.get("progress") or 0.0)
     size = int(info.get("size") or 0)
+    local_total = int(progress_data.get("total_bytes") or 0) or size
+    local_downloaded = int(progress_data.get("downloaded_bytes") or 0)
+    if local_phase == "fetching" and local_total:
+        progress = max(0.0, min(1.0, local_downloaded / local_total))
+    local_speed = int(progress_data.get("speed_bps") or 0)
+    if local_phase == "fetching":
+        speed = local_speed or speed
+    local_eta = None
+    if local_phase == "fetching" and local_speed > 0 and local_total > local_downloaded:
+        local_eta = int((local_total - local_downloaded) / local_speed)
+    progress_pct = round(progress * 100.0, 1)
+    try:
+        last_checked_epoch = float(db.get_setting("torbox_last_poll_at", "0") or 0)
+    except (TypeError, ValueError):
+        last_checked_epoch = 0.0
+    last_checked_iso = (
+        datetime.fromtimestamp(last_checked_epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if last_checked_epoch else ""
+    )
+    last_checked_seconds_ago = (
+        max(0, int(time.time() - last_checked_epoch)) if last_checked_epoch else None
+    )
     eta = info.get("eta") if isinstance(info.get("eta"), (int, float)) else None
     speed = int(info.get("download_speed") or 0)
     try:
@@ -521,6 +552,14 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
         "can_retry": can_retry,
         "attempts": int(release.get("download_attempts") or 0),
         "download_status": db_status,
+        "phase": local_phase or ("done" if db_status == "COMPLETED" else "ready" if state == "ready" else ""),
+        "progress_pct": progress_pct,
+        "downloaded_bytes": local_downloaded if local_phase == "fetching" else int(round(size * progress)),
+        "total_bytes": local_total,
+        "speed_bps": local_speed if local_phase == "fetching" else 0,
+        "eta_seconds": local_eta,
+        "last_checked_at": last_checked_iso,
+        "last_checked_seconds_ago": last_checked_seconds_ago,
         "raw_state": str(info.get("raw_state") or ""),
         "engine": "torbox",
         "cached": bool(info.get("cached")),
@@ -615,6 +654,17 @@ def _build_torbox_downloader_status(payload: Dict[str, Any], timeout: float) -> 
     active = [torrent for torrent in torrents if torrent["is_active"]]
     total_size = sum(torrent["size_bytes"] for torrent in active)
     downloaded = sum(torrent["downloaded_bytes"] for torrent in active)
+    try:
+        last_checked_epoch = float(db.get_setting("torbox_last_poll_at", "0") or 0)
+    except (TypeError, ValueError):
+        last_checked_epoch = 0.0
+    payload["downloader"]["last_checked_at"] = (
+        datetime.fromtimestamp(last_checked_epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if last_checked_epoch else ""
+    )
+    payload["downloader"]["last_checked_seconds_ago"] = (
+        max(0, int(time.time() - last_checked_epoch)) if last_checked_epoch else None
+    )
     payload.update({
         "status": "success",
         "degraded": bool(payload["degraded"]),
@@ -1008,6 +1058,7 @@ async def downloads_view(request: Request):
             "qbit_status": qbit_status,
             "engine": download_status.get("engine") or "qbit",
             "torrents": torrents,
+            "torbox_last_checked_seconds_ago": (download_status.get("downloader") or {}).get("last_checked_seconds_ago"),
             "staging_dir": staging_dir,
             "downloads_dir": downloads_dir,
             "storage_health": _storage_health_payload(),
@@ -1237,6 +1288,26 @@ async def api_downloads_status(timeout: float = Query(default=_DEFAULT_DOWNLOADE
     """
     payload = await asyncio.to_thread(_build_downloader_status, timeout)
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/downloads/torbox/poll")
+async def api_torbox_poll_now():
+    """Check now: run one Torbox poll pass immediately and return fresh counters."""
+    if resolve_downloader_engine(db) != "torbox":
+        raise HTTPException(status_code=409, detail="Torbox is not the active downloader engine")
+    result = await asyncio.to_thread(scheduler.torbox_poll_now)
+    status_payload = await asyncio.to_thread(_build_downloader_status, 1.2)
+    return JSONResponse({
+        "status": result.get("status") or "ok",
+        "checked": result.get("processed", 0),
+        "completed": result.get("completed", 0),
+        "failed": result.get("failed", 0),
+        "queued_fetch": result.get("queued_fetch", 0),
+        "fetching": result.get("fetching", 0),
+        "last_checked_at": result.get("last_checked_at") or "",
+        "torrents": status_payload.get("torrents") or [],
+        "downloader": status_payload.get("downloader") or {},
+    })
 
 
 # --- Tagger: preview / manual tagging (PROJECT.md feature 16) ---

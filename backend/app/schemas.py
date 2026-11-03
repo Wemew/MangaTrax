@@ -728,7 +728,7 @@ class SettingsUpdateRequest(BaseModel):
     @classmethod
     def _validate_torbox_poll_seconds(cls, value):
         if value is None or not str(value).strip():
-            return "10"
+            return "5"
         try:
             seconds = int(str(value).strip())
         except ValueError:

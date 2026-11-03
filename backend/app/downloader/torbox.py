@@ -797,6 +797,11 @@ class TorboxDownloader:
                         f"Refusing {label or 'file'}: {expected} bytes exceeds the size cap."
                     )
                 written = 0
+                progress_step = max(
+                    TORBOX_STREAM_CHUNK_BYTES,
+                    (expected // 100) if expected else 1024 * 1024,
+                )
+                last_reported = 0
                 try:
                     with open(dest_path, "wb") as handle:
                         while True:
@@ -807,6 +812,12 @@ class TorboxDownloader:
                             if written > self.max_file_bytes:
                                 raise DownloaderFileError(f"{label or 'file'} exceeded the size cap while streaming.")
                             handle.write(chunk)
+                            if progress_cb and (written - last_reported) >= progress_step:
+                                last_reported = written
+                                try:
+                                    progress_cb(label, written)
+                                except Exception:
+                                    pass
                 except OSError as exc:
                     raise _filesystem_error("write", dest_path, exc) from exc
                 if expected and written < expected:

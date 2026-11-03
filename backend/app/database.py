@@ -4,6 +4,7 @@ import sqlite3
 import json
 import time
 import urllib.parse
+from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, Set
 
 import logging
@@ -517,6 +518,11 @@ class MangaDatabase:
                 cur.execute("ALTER TABLE releases ADD COLUMN download_error TEXT DEFAULT '';")
             if "download_attempts" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN download_attempts INTEGER DEFAULT 0;")
+            # Torbox local fetch phase/progress/timings (task-29): JSON blob with
+            # phase, downloaded_bytes, total_bytes, speed_bps and ready/fetch/route
+            # timestamps so the UI can show real local progress.
+            if "torbox_progress_json" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN torbox_progress_json TEXT DEFAULT '{}';")
 
             # Backfill is_complete for existing releases matching complete indicators (local SQL/regex only, NO network calls)
             try:
@@ -734,7 +740,7 @@ class MangaDatabase:
                     "torbox_delete_after_download": os.getenv(
                         "MANGATRAX_TORBOX_DELETE_AFTER_DOWNLOAD", "true"
                     ),
-                    "torbox_poll_seconds": os.getenv("MANGATRAX_TORBOX_POLL_SECONDS", "10"),
+                    "torbox_poll_seconds": os.getenv("MANGATRAX_TORBOX_POLL_SECONDS", "5"),
                     "torbox_max_concurrent": os.getenv("MANGATRAX_TORBOX_MAX_CONCURRENT", "2"),
         "torbox_max_download_gb": os.getenv("MANGATRAX_TORBOX_MAX_DOWNLOAD_GB", "64"),
         "torbox_delete_on_failure": os.getenv("MANGATRAX_TORBOX_DELETE_ON_FAILURE", "true"),
@@ -771,7 +777,7 @@ class MangaDatabase:
                 ("torbox_enabled", os.getenv("MANGATRAX_TORBOX_ENABLED", "false")),
                 ("torbox_api_key", os.getenv("MANGATRAX_TORBOX_API_KEY", "")),
                 ("torbox_delete_after_download", os.getenv("MANGATRAX_TORBOX_DELETE_AFTER_DOWNLOAD", "true")),
-                ("torbox_poll_seconds", os.getenv("MANGATRAX_TORBOX_POLL_SECONDS", "10")),
+                ("torbox_poll_seconds", os.getenv("MANGATRAX_TORBOX_POLL_SECONDS", "5")),
                 ("torbox_max_concurrent", os.getenv("MANGATRAX_TORBOX_MAX_CONCURRENT", "2")),
                 ("torbox_max_download_gb", os.getenv("MANGATRAX_TORBOX_MAX_DOWNLOAD_GB", "64")),
                 ("torbox_delete_on_failure", os.getenv("MANGATRAX_TORBOX_DELETE_ON_FAILURE", "true")),
@@ -1604,6 +1610,39 @@ class MangaDatabase:
                 )
             conn.commit()
             self._invalidate_grouped_cache()
+
+    def update_torbox_progress(self, release_id: int, **fields) -> Dict[str, Any]:
+        """Merge the Torbox phase/progress/timing fields into the release row."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT torbox_progress_json FROM releases WHERE id = ?;", (release_id,))
+            row = cur.fetchone()
+            try:
+                data = json.loads((row["torbox_progress_json"] if row else "") or "{}")
+            except (TypeError, ValueError):
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data.update({key: value for key, value in fields.items() if value is not None})
+            data["updated_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            cur.execute(
+                "UPDATE releases SET torbox_progress_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (json.dumps(data), release_id),
+            )
+            conn.commit()
+            self._invalidate_grouped_cache()
+            return data
+
+    def get_torbox_progress(self, release_id: int) -> Dict[str, Any]:
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT torbox_progress_json FROM releases WHERE id = ?;", (release_id,))
+            row = cur.fetchone()
+        try:
+            data = json.loads((row["torbox_progress_json"] if row else "") or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def increment_download_attempt(self, release_id: int) -> int:
         """Bump the failure attempt counter and return the new value."""

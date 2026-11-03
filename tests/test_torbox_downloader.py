@@ -1052,7 +1052,7 @@ def test_schema_and_settings_defaults():
         assert settings.get("downloader_engine") == "qbit", settings.get("downloader_engine")
         assert settings.get("torbox_enabled") == "false", settings.get("torbox_enabled")
         assert settings.get("torbox_delete_after_download") == "true", settings.get("torbox_delete_after_download")
-        assert settings.get("torbox_poll_seconds") == "10", settings.get("torbox_poll_seconds")
+        assert settings.get("torbox_poll_seconds") == "5", settings.get("torbox_poll_seconds")
         assert settings.get("torbox_max_concurrent") == "2", settings.get("torbox_max_concurrent")
         assert settings.get("torbox_timeout_hours") == "6", settings.get("torbox_timeout_hours")
         assert settings.get("torbox_api_key") == "", settings.get("torbox_api_key")

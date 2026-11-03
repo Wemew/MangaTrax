@@ -2,6 +2,7 @@ import time
 import logging
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import re
 import json
 import shutil
@@ -92,6 +93,17 @@ class MangaScheduler:
         self._torbox_notified: Dict[int, str] = {}
         # JPEG XL throw-away filter: audit once per release guid (feeds re-poll often).
         self._jpegxl_discard_notified: set = set()
+        # task-29: separate Torbox poller + bounded fetch executor (off the main loop).
+        self._torbox_poll_thread: Optional[threading.Thread] = None
+        self._torbox_poll_stop = threading.Event()
+        self._torbox_poll_wakeup = threading.Event()
+        self._torbox_poll_lock = threading.Lock()
+        self._torbox_fetch_lock = threading.Lock()
+        self._torbox_fetch_locks: Dict[int, threading.Lock] = {}
+        self._torbox_fetching: set = set()
+        self._torbox_fetch_futures: Dict[int, Any] = {}
+        self._torbox_fetch_executor: Optional[ThreadPoolExecutor] = None
+        self._torbox_last_poll_monotonic: float = 0.0
         # Startup work (legacy key repair + initial Calibre sync) runs as the FIRST
         # action of the worker thread so the web UI can serve immediately; see
         # perform_initial_sync().
@@ -951,6 +963,7 @@ class MangaScheduler:
                 + (f"; Source: {source}" if source else "")
                 + (f"; wantedVolumes={wanted}" if wanted else ""),
             )
+            self.request_torbox_poll()
             return {
                 "success": True,
                 "engine": engine,
@@ -975,6 +988,7 @@ class MangaScheduler:
             f"Sent to Torbox{' (cached)' if cached else ''}: '{title}'",
             "; ".join(detail_parts),
         )
+        self.request_torbox_poll()
         return {"success": True, "engine": engine, "handle": handle, "cached": cached, "queued": False}
 
     # --- Torbox polling worker (task-20, Phase 1+2; queued slots task-21) ---
@@ -1467,16 +1481,414 @@ class MangaScheduler:
             )
         return summary
 
-    def poll_torbox_downloads(self) -> Dict[str, Any]:
-        """Advance Torbox releases: poll → fetch when ready → complete → optional delete.
 
+    # --- Torbox poller/fetch threads (task-29) ------------------------------
+    @staticmethod
+    def _utc_iso() -> str:
+        return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _seconds_between(start_iso: Optional[str], end_iso: Optional[str]) -> float:
+        """Seconds between two stored UTC timestamps (0.0 when unparseable)."""
+        if not start_iso or not end_iso:
+            return 0.0
+        try:
+            start = datetime.fromisoformat(str(start_iso))
+            end = datetime.fromisoformat(str(end_iso))
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, (end - start).total_seconds())
+
+    def _ensure_torbox_fetch_executor(self) -> ThreadPoolExecutor:
+        if self._torbox_fetch_executor is None:
+            try:
+                max_workers = int(self.db.get_setting("torbox_max_concurrent", "2") or 2)
+            except (TypeError, ValueError):
+                max_workers = 2
+            self._torbox_fetch_executor = ThreadPoolExecutor(
+                max_workers=max(1, max_workers), thread_name_prefix="torbox-fetch",
+            )
+        return self._torbox_fetch_executor
+
+    def _torbox_progress_callback(self, release_id: int, total_bytes: int):
+        """Throttled progress callback: persists at most every 2 s / 1 %."""
+        tracker = {
+            "label": "", "file_written": 0, "done": 0,
+            "started": time.monotonic(), "last_save": 0.0, "last_pct": -1.0,
+        }
+
+        def _callback(label, written):
+            now = time.monotonic()
+            try:
+                written = int(written or 0)
+            except (TypeError, ValueError):
+                return
+            name = str(label or "")
+            if name != tracker["label"]:
+                if tracker["label"]:
+                    tracker["done"] += tracker["file_written"]
+                tracker["label"] = name
+                tracker["file_written"] = 0
+            tracker["file_written"] = max(tracker["file_written"], written)
+            total = int(total_bytes or 0)
+            downloaded = tracker["done"] + tracker["file_written"]
+            if total:
+                downloaded = min(downloaded, total)
+            pct = (downloaded / total * 100.0) if total else 0.0
+            final = bool(total) and downloaded >= total
+            if (not final and now - tracker["last_save"] < 2.0
+                    and (not total or pct - tracker["last_pct"] < 1.0)):
+                return
+            tracker["last_save"] = now
+            tracker["last_pct"] = pct
+            elapsed = max(0.001, now - tracker["started"])
+            speed = int(downloaded / elapsed) if downloaded else 0
+            try:
+                self.db.update_torbox_progress(
+                    release_id,
+                    phase="fetching",
+                    downloaded_bytes=downloaded,
+                    total_bytes=total or None,
+                    speed_bps=speed,
+                    progress_pct=round(pct, 1),
+                )
+            except Exception as exc:  # progress must never abort a download
+                logger.debug("Could not persist Torbox progress for release %s: %s", release_id, exc)
+
+        return _callback
+
+    def _torbox_fail_contained(self, release_id: int, title: str, message: str, downloader, handle) -> None:
+        """Contain one release's failure: cleanup, persist, audit, fallback state."""
+        try:
+            self._cleanup_torbox_partials(
+                os.path.join(self.get_downloads_dir(), self._safe_torrent_dirname(title))
+            )
+        except Exception:
+            pass
+        try:
+            self._torbox_fail_release(
+                release_id, title, message, downloader=downloader, handle=handle,
+            )
+        except Exception as fail_exc:
+            logger.error("Could not persist Torbox failure for release %s: %s", release_id, fail_exc)
+            try:
+                self.db.set_download_error(release_id, message)
+                self.db.update_downloader_state(release_id, "FAILED", "torbox")
+            except Exception:
+                pass
+        self._torbox_notified.pop(release_id, None)
+
+    def _fetch_torbox_release(self, release: Dict[str, Any], downloader, handle: Dict[str, Any], info: Dict[str, Any]) -> Dict[str, Any]:
+        """Fetch/complete/route ONE ready release (runs in its own fetch thread)."""
+        release_id = int(release.get("id") or 0)
+        title = str(release.get("title") or "")
+        downloads_dir = self.get_downloads_dir()
+        delete_after = as_bool(self.db.get_setting("torbox_delete_after_download", "true"), default=True)
+        progress = self.db.get_torbox_progress(release_id)
+        ready_at = progress.get("ready_detected_at") or self._utc_iso()
+        total_bytes = int(info.get("size") or 0)
+        dest_dir = os.path.join(downloads_dir, self._safe_torrent_dirname(title))
+        reason = ""
+        try:
+            files = info.get("files") or []
+            wanted = self.resolve_release_missing_volumes(release)
+            try:
+                plan = self._plan_torbox_selection(
+                    release, files, wanted, total_size=total_bytes,
+                )
+            except DownloaderFileError as exc:
+                self._torbox_fail_contained(release_id, title, str(exc), downloader, handle)
+                self.db.update_torbox_progress(release_id, phase="failed")
+                return {"status": "failed", "error": str(exc)}
+            if plan["action"] == "skip":
+                try:
+                    downloader.cancel(handle)
+                except Exception as exc:
+                    logger.debug("Could not cancel skipped Torbox job: %s", exc)
+                self.db.update_downloader_state(release_id, "IDLE", "torbox")
+                self.db.update_torbox_progress(release_id, phase="done")
+                self._log_activity(
+                    "SELECTIVE_DOWNLOAD",
+                    f"Torbox skipped '{title}': {plan['reason']}.",
+                    json.dumps({"wanted_volumes": [], "torrent_id": handle.get("torrent_id")}),
+                )
+                return {"status": "skipped"}
+            selection = plan["files"] if plan["action"] == "files" else None
+            reason = plan["reason"]
+            if plan.get("strict"):
+                logger.info(
+                    "Torbox selection for '%s' (torrent %s): wanted %s volume(s), selected %s/%s file(s), "
+                    "skipped %s volume(s).",
+                    title, handle.get("torrent_id"), len(plan.get("wanted_volumes") or []),
+                    plan.get("selected_count"), plan.get("total_files"),
+                    len(plan.get("skipped_volumes") or []),
+                )
+                logger.debug(
+                    "Torbox file->volume mapping for '%s': %s",
+                    title, json.dumps(plan.get("mapping") or []),
+                )
+                self._log_activity(
+                    "SELECTIVE_DOWNLOAD",
+                    f"Torbox selective download for '{title}': {reason}.",
+                    json.dumps({
+                        "wanted_count": len(plan.get("wanted_volumes") or []),
+                        "selected_count": plan.get("selected_count"),
+                        "skipped_count": len(plan.get("skipped_volumes") or []),
+                        "torrent_id": handle.get("torrent_id"),
+                    }),
+                )
+            if selection:
+                try:
+                    selected_total = sum(int((item or {}).get("size") or 0) for item in selection)
+                except (TypeError, ValueError):
+                    selected_total = 0
+                if selected_total:
+                    total_bytes = selected_total
+            fetch_started_mono = time.monotonic()
+            fetch_started_iso = self._utc_iso()
+            self.db.update_torbox_progress(
+                release_id, phase="fetching", ready_detected_at=ready_at,
+                fetch_started_at=fetch_started_iso, total_bytes=total_bytes or None,
+                downloaded_bytes=0, speed_bps=0, progress_pct=0.0,
+            )
+            fetch_handle = dict(handle)
+            fetch_handle["size"] = int(total_bytes or 0)
+            try:
+                saved = downloader.fetch_files(
+                    fetch_handle, selection, dest_dir,
+                    progress_cb=self._torbox_progress_callback(release_id, total_bytes),
+                )
+            except (DownloaderFileError, DownloaderError) as exc:
+                self._torbox_fail_contained(
+                    release_id, title, f"Fetch failed ({reason}): {exc}", downloader, handle,
+                )
+                self.db.update_torbox_progress(release_id, phase="failed")
+                return {"status": "failed", "error": str(exc)}
+            fetch_finished_mono = time.monotonic()
+            fetch_finished_iso = self._utc_iso()
+            fetch_seconds = max(0.001, fetch_finished_mono - fetch_started_mono)
+            try:
+                downloaded_bytes = sum(int(item.get("size") or 0) for item in (saved or []))
+            except (TypeError, ValueError):
+                downloaded_bytes = 0
+            if not downloaded_bytes:
+                downloaded_bytes = total_bytes
+            total_bytes = total_bytes or downloaded_bytes
+            speed_bps = int(downloaded_bytes / fetch_seconds) if downloaded_bytes else 0
+            self.db.update_torbox_progress(
+                release_id, phase="routing", downloaded_bytes=downloaded_bytes,
+                total_bytes=total_bytes or None, speed_bps=speed_bps,
+                fetch_finished_at=fetch_finished_iso, progress_pct=100.0,
+            )
+            self.db.clear_download_error(release_id)
+            self.db.update_downloader_state(release_id, "COMPLETED", "torbox")
+            try:
+                rel_row = self.db.get_release_by_id(release_id)
+                if rel_row:
+                    self.get_notifier().notify_acquired(rel_row)
+            except Exception as exc:
+                logger.debug("Webhook notification failed for acquired release: %s", exc)
+            routing_started_mono = time.monotonic()
+            routing_error = ""
+            try:
+                self.process_downloads_to_staging(actor="scheduler")
+            except Exception as exc:
+                routing_error = str(exc)
+                logger.debug("Downloads routing after Torbox completion failed: %s", exc)
+            routed_mono = time.monotonic()
+            routed_iso = self._utc_iso()
+            self.db.update_torbox_progress(release_id, phase="done", routed_at=routed_iso)
+            latency = {
+                "ready_detected_at": ready_at,
+                "fetch_started_at": fetch_started_iso,
+                "fetch_finished_at": fetch_finished_iso,
+                "routed_at": routed_iso,
+                "ready_to_fetch_seconds": round(self._seconds_between(ready_at, fetch_started_iso), 1),
+                "fetch_seconds": round(fetch_seconds, 1),
+                "route_seconds": round(max(0.0, routed_mono - routing_started_mono), 1),
+                "downloaded_bytes": downloaded_bytes,
+                "total_bytes": total_bytes,
+                "speed_bps": speed_bps,
+            }
+            logger.info(
+                "Torbox latency for '%s': ready→fetch %.1fs, fetch %.1fs (%.2f GiB at %.1f MiB/s), route %.1fs",
+                title,
+                latency["ready_to_fetch_seconds"],
+                latency["fetch_seconds"],
+                downloaded_bytes / (1024 ** 3),
+                speed_bps / (1024 ** 2),
+                latency["route_seconds"],
+            )
+            detail = (
+                f"Saved {len(saved or [])} file(s) to {dest_dir} ({reason}); "
+                f"latency: ready→fetch {latency['ready_to_fetch_seconds']:.1f}s, "
+                f"fetch {latency['fetch_seconds']:.1f}s "
+                f"({downloaded_bytes / (1024 ** 3):.2f} GiB at {speed_bps / (1024 ** 2):.1f} MiB/s), "
+                f"route {latency['route_seconds']:.1f}s"
+            )
+            if routing_error:
+                detail += f"; routing error: {routing_error}"
+            deleted = ""
+            if delete_after:
+                deleted = " Torbox torrent deleted." if downloader.cancel(handle) else " Torbox delete failed."
+            self._log_activity(
+                "TORBOX_DOWNLOADED", f"Torbox download complete: '{title}'",
+                json.dumps({
+                    "message": detail + deleted,
+                    "latency": latency,
+                    "files": len(saved or []),
+                }),
+            )
+            return {"status": "completed", "latency": latency}
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "Torbox fetch failed for release %s (%s): %s",
+                release_id, title, message, exc_info=True,
+            )
+            self._torbox_fail_contained(release_id, title, message, downloader, handle)
+            try:
+                self.db.update_torbox_progress(release_id, phase="failed")
+            except Exception:
+                pass
+            return {"status": "failed", "error": message}
+
+    def _submit_torbox_fetch(self, release: Dict[str, Any], downloader, handle: Dict[str, Any], info: Dict[str, Any]) -> bool:
+        """Schedule one release on the bounded fetch executor (deduplicated)."""
+        release_id = int(release.get("id") or 0)
+        if not release_id:
+            return False
+        with self._torbox_fetch_lock:
+            if release_id in self._torbox_fetching:
+                return False
+            lock = self._torbox_fetch_locks.setdefault(release_id, threading.Lock())
+            if not lock.acquire(blocking=False):
+                return False
+            self._torbox_fetching.add(release_id)
+        try:
+            executor = self._ensure_torbox_fetch_executor()
+            future = executor.submit(self._torbox_fetch_thread, release, downloader, handle, info, lock)
+        except Exception:
+            with self._torbox_fetch_lock:
+                self._torbox_fetching.discard(release_id)
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
+            raise
+        with self._torbox_fetch_lock:
+            self._torbox_fetch_futures[release_id] = future
+        return True
+
+    def _torbox_fetch_thread(self, release: Dict[str, Any], downloader, handle: Dict[str, Any], info: Dict[str, Any], lock) -> None:
+        release_id = int(release.get("id") or 0)
+        try:
+            self._fetch_torbox_release(release, downloader, handle, info)
+        except Exception as exc:  # _fetch_torbox_release contains its own failures
+            logger.warning("Torbox fetch thread crashed for release %s: %s", release_id, exc, exc_info=True)
+            self._torbox_fail_contained(
+                release_id, str(release.get("title") or ""), f"{type(exc).__name__}: {exc}", downloader, handle,
+            )
+        finally:
+            with self._torbox_fetch_lock:
+                self._torbox_fetching.discard(release_id)
+                self._torbox_fetch_futures.pop(release_id, None)
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
+
+    def _torbox_next_poll_interval(self) -> float:
+        """Adaptive poll cadence: short while ready/fetching/routing, backed off when idle."""
+        try:
+            floor = max(5.0, float(self.db.get_setting("torbox_poll_seconds", "5") or 5))
+        except (TypeError, ValueError):
+            floor = 5.0
+        busy = bool(self._torbox_fetching)
+        if not busy:
+            try:
+                rows = self.db.get_active_torbox_downloads()
+            except Exception:
+                rows = []
+            for row in rows:
+                try:
+                    data = json.loads(row.get("torbox_progress_json") or "{}")
+                except (TypeError, ValueError):
+                    data = {}
+                if isinstance(data, dict) and data.get("phase") in ("ready", "fetching", "routing"):
+                    busy = True
+                    break
+        return floor if busy else min(30.0, max(15.0, floor * 3))
+
+    def _torbox_poller_loop(self) -> None:
+        logger.info("Torbox poller thread started.")
+        while self.running:
+            interval = self._torbox_next_poll_interval()
+            self._torbox_poll_wakeup.wait(interval)
+            self._torbox_poll_wakeup.clear()
+            if not self.running:
+                break
+            try:
+                self.poll_torbox_downloads()
+            except Exception as exc:
+                logger.warning("Torbox poller pass failed: %s", exc, exc_info=True)
+        logger.info("Torbox poller thread stopped.")
+
+    def request_torbox_poll(self) -> None:
+        """Wake the Torbox poller immediately (e.g. right after a submit)."""
+        try:
+            self._torbox_poll_wakeup.set()
+        except Exception:
+            pass
+
+    def torbox_poll_now(self) -> Dict[str, Any]:
+        """Check-now action: run one poll pass and return fresh counters."""
+        self.request_torbox_poll()
+        result = self.poll_torbox_downloads()
+        try:
+            result["last_checked_at"] = self.db.get_setting("torbox_last_poll_at", "")
+        except Exception:
+            result["last_checked_at"] = ""
+        result["fetching"] = len(self._torbox_fetching)
+        return result
+
+    def wait_for_torbox_fetches(self, timeout: float = 10.0) -> None:
+        """Test/API helper: wait for in-flight fetch futures to finish."""
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while time.monotonic() < deadline:
+            with self._torbox_fetch_lock:
+                futures = list(self._torbox_fetch_futures.values())
+            if not futures:
+                return
+            for future in futures:
+                try:
+                    future.result(timeout=max(0.01, deadline - time.monotonic()))
+                except Exception:
+                    pass
+            if not futures:
+                return
+            time.sleep(0.01)
+
+    def poll_torbox_downloads(self, async_fetch: Optional[bool] = None) -> Dict[str, Any]:
+        """Advance Torbox releases: poll → fetch when ready → complete → route.
+
+        ``async_fetch`` defaults to True when the dedicated poller thread is running
+        (real runs): ready releases are handed to the bounded fetch executor so a slow
+        download never blocks polling/Calibre/feeds.  Direct callers/tests without the
+        poller thread keep the historical synchronous behaviour.
         Bounded by ``torbox_max_concurrent`` at submission time and by
         ``torbox_timeout_hours`` here; stalled/no-seed torrents are surfaced as
         activity events instead of being retried silently forever.
         """
+        if async_fetch is None:
+            async_fetch = bool(self._torbox_poll_thread and self._torbox_poll_thread.is_alive())
+        try:
+            self.db.set_setting("torbox_last_poll_at", str(time.time()))
+        except Exception:
+            pass
         downloader = build_downloader(self.db, engine="torbox")
         if not getattr(downloader, "enabled", False):
-            return {"status": "disabled", "processed": 0, "completed": 0, "failed": 0}
+            return {"status": "disabled", "processed": 0, "completed": 0, "failed": 0, "queued_fetch": 0}
 
         try:
             timeout_hours = float(self.db.get_setting("torbox_timeout_hours", "6") or 6)
@@ -1484,12 +1896,12 @@ class MangaScheduler:
             timeout_hours = 6.0
         rows = self.db.get_active_torbox_downloads()
         if not rows:
-            return {"status": "idle", "processed": 0, "completed": 0, "failed": 0}
+            return {"status": "idle", "processed": 0, "completed": 0, "failed": 0, "queued_fetch": 0}
 
         downloads_dir = self.get_downloads_dir()
         delete_after = as_bool(self.db.get_setting("torbox_delete_after_download", "true"), default=True)
 
-        processed = completed = failed = 0
+        processed = completed = failed = queued_fetch = 0
         rate_limited = False
 
         for release in rows:
@@ -1613,86 +2025,22 @@ class MangaScheduler:
 
                 files = info.get("files") or []
                 wanted = self.resolve_release_missing_volumes(release)
-                dest_dir = os.path.join(downloads_dir, self._safe_torrent_dirname(title))
-                try:
-                    plan = self._plan_torbox_selection(
-                        release, files, wanted, total_size=int(info.get("size") or 0),
+                progress = self.db.get_torbox_progress(release_id)
+                if not progress.get("ready_detected_at"):
+                    self.db.update_torbox_progress(
+                        release_id, phase="ready", ready_detected_at=self._utc_iso(),
+                        total_bytes=int(info.get("size") or 0), progress_pct=0.0,
                     )
-                except DownloaderFileError as exc:
-                    # Strict selection refused (unmappable names / absent volumes): fail the
-                    # release with an actionable reason and leave no partial output behind.
-                    self._cleanup_torbox_partials(dest_dir)
-                    self._torbox_fail_release(
-                        release_id, title, str(exc), downloader=downloader, handle=handle,
-                    )
+                if async_fetch:
+                    if self._submit_torbox_fetch(release, downloader, handle, info):
+                        queued_fetch += 1
+                    continue
+                outcome = self._fetch_torbox_release(release, downloader, handle, info)
+                if outcome.get("status") == "completed":
+                    completed += 1
+                elif outcome.get("status") == "failed":
                     failed += 1
-                    continue
-                if plan["action"] == "skip":
-                    # Nothing missing anymore: free the remote job instead of downloading.
-                    try:
-                        downloader.cancel(handle)
-                    except Exception as exc:  # pragma: no cover - cancel already swallows
-                        logger.debug("Could not cancel skipped Torbox job: %s", exc)
-                    self.db.update_downloader_state(release_id, "IDLE", "torbox")
-                    self._log_activity(
-                        "SELECTIVE_DOWNLOAD",
-                        f"Torbox skipped '{title}': {plan['reason']}.",
-                        json.dumps({"wanted_volumes": [], "torrent_id": handle.get("torrent_id")}),
-                    )
-                    continue
-                selection = plan["files"] if plan["action"] == "files" else None
-                reason = plan["reason"]
-                if plan.get("strict"):
-                    logger.info(
-                        "Torbox selection for '%s' (torrent %s): wanted %s volume(s), selected %s/%s file(s), "
-                        "skipped %s volume(s).",
-                        title, handle.get("torrent_id"), len(plan.get("wanted_volumes") or []),
-                        plan.get("selected_count"), plan.get("total_files"),
-                        len(plan.get("skipped_volumes") or []),
-                    )
-                    logger.debug(
-                        "Torbox file->volume mapping for '%s': %s",
-                        title, json.dumps(plan.get("mapping") or []),
-                    )
-                    self._log_activity(
-                        "SELECTIVE_DOWNLOAD",
-                        f"Torbox selective download for '{title}': {reason}.",
-                        json.dumps({
-                            "wanted_count": len(plan.get("wanted_volumes") or []),
-                            "selected_count": plan.get("selected_count"),
-                            "skipped_count": len(plan.get("skipped_volumes") or []),
-                            "torrent_id": handle.get("torrent_id"),
-                        }),
-                    )
-                fetch_handle = dict(handle)
-                fetch_handle["size"] = int(info.get("size") or 0)
-                try:
-                    saved = downloader.fetch_files(fetch_handle, selection, dest_dir)
-                except (DownloaderFileError, DownloaderError) as exc:
-                    self._cleanup_torbox_partials(dest_dir)
-                    self._torbox_fail_release(
-                        release_id, title, f"Fetch failed ({reason}): {exc}",
-                        downloader=downloader, handle=handle,
-                    )
-                    failed += 1
-                    continue
-
-                self.db.clear_download_error(release_id)
-                self.db.update_downloader_state(release_id, "COMPLETED", "torbox")
-                try:
-                    rel_row = self.db.get_release_by_id(release_id)
-                    if rel_row:
-                        self.get_notifier().notify_acquired(rel_row)
-                except Exception as e:
-                    logger.debug(f"Webhook notification failed for acquired release: {e}")
-                detail = f"Saved {len(saved)} file(s) to {dest_dir} ({reason})."
-                deleted = ""
-                if delete_after:
-                    deleted = " Torbox torrent deleted." if downloader.cancel(handle) else " Torbox delete failed."
-                self._log_activity("TORBOX_DOWNLOADED", f"Torbox download complete: '{title}'", detail + deleted)
-                completed += 1
-                self._torbox_notified.pop(release_id, None)
-                # A finished download is immediately eligible for tag+route to staging.
+                continue
 
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"
@@ -1729,6 +2077,8 @@ class MangaScheduler:
             "processed": processed,
             "completed": completed,
             "failed": failed,
+            "queued_fetch": queued_fetch,
+            "fetching": len(self._torbox_fetching),
         }
 
 
@@ -3549,7 +3899,6 @@ class MangaScheduler:
         last_feed_check = 0
         last_tag_check = 0
         last_dl_check = 0
-        last_torbox_poll = 0
         last_dedupe_sweep = 0
         last_complete_check = time.time()
 
@@ -3594,16 +3943,6 @@ class MangaScheduler:
                     self.check_and_filter_active_downloads()
                     last_dl_check = time.time()
 
-                # Advance Torbox downloads (cadence: torbox_poll_seconds, min 5s)
-                try:
-                    torbox_poll_seconds = float(self.db.get_setting("torbox_poll_seconds", "10") or 10)
-                except ValueError:
-                    torbox_poll_seconds = 10.0
-                torbox_poll_seconds = max(5.0, torbox_poll_seconds)
-                if now - last_torbox_poll >= torbox_poll_seconds:
-                    self.poll_torbox_downloads()
-                    last_torbox_poll = time.time()
-
                 # Retry duplicates suppressed by in-flight dedupe (light, batch-capped).
                 if now - last_dedupe_sweep >= 60:
                     try:
@@ -3628,11 +3967,28 @@ class MangaScheduler:
             if self.running:
                 return
             self.running = True
+            self._torbox_poll_stop.clear()
+            self._torbox_poll_wakeup.clear()
             self.thread = threading.Thread(target=self._worker_loop, daemon=True, name="MangaTraxScheduler")
             self.thread.start()
+            if not (self._torbox_poll_thread and self._torbox_poll_thread.is_alive()):
+                self._torbox_poll_thread = threading.Thread(
+                    target=self._torbox_poller_loop, daemon=True, name="MangaTraxTorboxPoller",
+                )
+                self._torbox_poll_thread.start()
 
     def stop(self):
         with self._lock:
             self.running = False
+            self._torbox_poll_stop.set()
+            self._torbox_poll_wakeup.set()
             if self.thread and self.thread.is_alive():
                 self.thread.join(timeout=2.0)
+            if self._torbox_poll_thread and self._torbox_poll_thread.is_alive():
+                self._torbox_poll_thread.join(timeout=2.0)
+            if self._torbox_fetch_executor is not None:
+                try:
+                    self._torbox_fetch_executor.shutdown(wait=False)
+                except Exception:
+                    pass
+                self._torbox_fetch_executor = None

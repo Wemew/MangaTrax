@@ -130,7 +130,18 @@
                 <i data-lucide="list-ordered" class="w-5 h-5 text-slate-400"></i>
                 Active {{ 'Torbox' if engine == 'torbox' else 'qBittorrent' }} Queue
             </h2>
-            <span class="text-xs text-slate-500">{{ torrents|length }} item(s)</span>
+            <div class="flex items-center gap-3">
+                {% if engine == 'torbox' %}
+                <span id="torbox-last-checked" class="text-[11px] text-slate-500">
+                    {% if torbox_last_checked_seconds_ago is not none %}Last checked {{ torbox_last_checked_seconds_ago }}s ago{% else %}Not checked yet{% endif %}
+                </span>
+                <button type="button" onclick="checkTorboxNow()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition-colors">
+                    <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-cyan-400"></i>
+                    Check now
+                </button>
+                {% endif %}
+                <span class="text-xs text-slate-500">{{ torrents|length }} item(s)</span>
+            </div>
         </div>
 
         <div class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
@@ -148,24 +159,45 @@
                     </thead>
                     <tbody class="divide-y divide-slate-800/60">
                         {% for t in torrents %}
-                        <tr class="hover:bg-slate-850/50 transition-colors">
+                        <tr id="torbox-row-{{ t.release_id }}" data-release-id="{{ t.release_id }}" class="hover:bg-slate-850/50 transition-colors">
                             <td class="py-3 px-4 max-w-xs font-semibold text-white truncate break-words-anywhere" title="{{ t.name }}">
                                 {{ t.name }}
                             </td>
                             <td class="py-3 px-4 text-slate-300">
+                                {% if t.phase == 'fetching' and t.total_bytes %}
+                                {{ (t.total_bytes / 1024 / 1024)|round(1) }} MB
+                                {% else %}
                                 {{ (t.size / 1024 / 1024)|round(1) }} MB
+                                {% endif %}
                             </td>
                             <td class="py-3 px-4">
+                                {% if t.phase == 'fetching' %}
+                                <div class="torbox-progress-text flex items-center justify-between text-[11px] text-cyan-300 mb-1">
+                                    <span>Fetching {{ t.progress_pct }}% · {{ (t.downloaded_bytes / 1024 / 1024)|round(1) }} MB / {{ (t.total_bytes / 1024 / 1024)|round(1) }} MB · {{ (t.speed_bps / 1024 / 1024)|round(1) }} MB/s</span>
+                                </div>
+                                <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                                    <div class="torbox-bar-fill bg-cyan-500 h-1.5 rounded-full" style="width: {{ t.progress_pct }}%"></div>
+                                </div>
+                                {% elif t.phase == 'ready' %}
+                                <div class="torbox-progress-text text-[11px] text-amber-300">Ready — fetch queued</div>
+                                {% elif t.phase == 'routing' %}
+                                <div class="torbox-progress-text text-[11px] text-teal-300">Processing/routing…</div>
+                                {% else %}
                                 <div class="flex items-center justify-between text-[11px] text-slate-400 mb-1">
                                     <span>{{ (t.progress * 100)|round(1) }}%</span>
                                     <span>ETA: {{ (t.eta / 60)|int if t.eta > 0 else 0 }}m</span>
                                 </div>
                                 <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                                    <div class="bg-cyan-500 h-1.5 rounded-full" style="width: {{ (t.progress * 100)|round }}%"></div>
+                                    <div class="torbox-bar-fill bg-cyan-500 h-1.5 rounded-full" style="width: {{ (t.progress * 100)|round }}%"></div>
                                 </div>
+                                {% endif %}
                             </td>
-                            <td class="py-3 px-4 font-mono text-cyan-400">
+                            <td class="py-3 px-4 font-mono text-cyan-400 torbox-speed">
+                                {% if t.phase == 'fetching' %}
+                                {{ (t.speed_bps / 1024 / 1024)|round(1) }} MB/s
+                                {% else %}
                                 {{ (t.dlspeed / 1024 / 1024)|round(2) }} MB/s
+                                {% endif %}
                             </td>
                             <td class="py-3 px-4 capitalize text-slate-300">
                                 {% if t.failed %}
@@ -174,7 +206,9 @@
                                 <div class="text-[10px] text-rose-300/80 max-w-[280px] truncate mt-0.5" title="{{ t.error }}">{{ t.error }}</div>
                                 {% endif %}
                                 {% else %}
-                                {{ t.state }}
+                                <span class="torbox-state {% if t.phase == 'fetching' %}text-cyan-300{% elif t.phase == 'ready' %}text-amber-300{% elif t.phase == 'routing' %}text-teal-300{% endif %}">
+                                    {% if t.phase == 'routing' %}Processing/routing…{% else %}{{ t.state }}{% endif %}
+                                </span>
                                 {% endif %}
                             </td>
                             <td class="py-3 px-4 text-right">
@@ -505,6 +539,61 @@ async function removeTorbox(releaseId) {
         showToast('Error: ' + err, 'error');
     }
 }
+
+async function checkTorboxNow() {
+    try {
+        const res = await fetch('/api/downloads/torbox/poll', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || 'Torbox check failed', 'error');
+            return;
+        }
+        showToast(`Torbox checked: ${data.checked || 0} release(s), ${data.queued_fetch || 0} fetch(es) queued`, 'success');
+        setTimeout(() => location.reload(), 900);
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+
+function _fmtMb(bytes) {
+    return (Number(bytes || 0) / 1024 / 1024).toFixed(1);
+}
+
+async function refreshTorboxProgress() {
+    if (document.hidden) return;
+    try {
+        const res = await fetch('/api/downloads/status', { headers: { 'Accept': 'application/json' } });
+        if (!res.ok) return;
+        const data = await res.json();
+        const last = data.downloader && data.downloader.last_checked_seconds_ago;
+        const header = document.getElementById('torbox-last-checked');
+        if (header && last !== undefined && last !== null) header.textContent = `Last checked ${last}s ago`;
+        for (const t of (data.torrents || [])) {
+            const row = document.getElementById(`torbox-row-${t.release_id}`);
+            if (!row) continue;
+            const text = row.querySelector('.torbox-progress-text');
+            const bar = row.querySelector('.torbox-bar-fill');
+            const speed = row.querySelector('.torbox-speed');
+            const state = row.querySelector('.torbox-state');
+            if (text && t.phase === 'fetching') {
+                text.textContent = `Fetching ${t.progress_pct}% · ${_fmtMb(t.downloaded_bytes)} MB / ${_fmtMb(t.total_bytes)} MB · ${_fmtMb(t.speed_bps)} MB/s`;
+                if (bar) bar.style.width = `${t.progress_pct}%`;
+            } else if (text && t.phase === 'ready') {
+                text.textContent = 'Ready — fetch queued';
+            } else if (text && t.phase === 'routing') {
+                text.textContent = 'Processing/routing…';
+            }
+            if (speed && t.phase === 'fetching') speed.textContent = `${_fmtMb(t.speed_bps)} MB/s`;
+            if (state && t.phase === 'routing') state.textContent = 'Processing/routing…';
+        }
+    } catch (err) {
+        // Progress refresh is best-effort; never bother the user with transient errors.
+    }
+}
+
+{% if engine == 'torbox' %}
+setInterval(refreshTorboxProgress, 2000);
+{% endif %}
 
 // --- ComicInfo <Series> audit & explicit repair (M2 data repair) ---
 let _selectedAuditFiles = new Set();
