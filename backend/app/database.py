@@ -704,6 +704,7 @@ class MangaDatabase:
                     "torbox_poll_seconds": os.getenv("MANGATRAX_TORBOX_POLL_SECONDS", "10"),
                     "torbox_max_concurrent": os.getenv("MANGATRAX_TORBOX_MAX_CONCURRENT", "2"),
                     "torbox_timeout_hours": os.getenv("MANGATRAX_TORBOX_TIMEOUT_HOURS", "6"),
+                    "torbox_strict_volume_selection": os.getenv("MANGATRAX_TORBOX_STRICT_VOLUMES", "true"),
                 }
                 for k, v in defaults.items():
                     cur.execute("INSERT INTO app_settings (key, value) VALUES (?, ?);", (k, v))
@@ -738,6 +739,7 @@ class MangaDatabase:
                 ("torbox_poll_seconds", os.getenv("MANGATRAX_TORBOX_POLL_SECONDS", "10")),
                 ("torbox_max_concurrent", os.getenv("MANGATRAX_TORBOX_MAX_CONCURRENT", "2")),
                 ("torbox_timeout_hours", os.getenv("MANGATRAX_TORBOX_TIMEOUT_HOURS", "6")),
+                ("torbox_strict_volume_selection", os.getenv("MANGATRAX_TORBOX_STRICT_VOLUMES", "true")),
             ):
                 cur.execute(
                     "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",

@@ -535,7 +535,9 @@ def test_torbox_submission_forms_and_fallbacks():
         )
         fake = FakeTorboxService(state="downloading")
         with patch("app.scheduler.build_downloader", return_value=fake):
-            submitted = ctx.scheduler.submit_torbox_download(release_id, "Candidate Release", "")
+            submitted = ctx.scheduler.submit_torbox_download(
+                release_id, "Candidate Release", "", missing_volumes=[1],
+            )
         assert submitted["success"] is True, submitted
         release_payload = fake.submit_calls[0][0]
         assert release_payload["guid"] == "candidate-guid", release_payload
@@ -753,7 +755,9 @@ def test_scheduler_submit_and_poll_happy_path():
         }
         release_id2 = _insert_release(ctx.db, "torbox-guid-2", "Cached Release")
         with patch("app.scheduler.build_downloader", return_value=fake_cached):
-            submit2 = ctx.scheduler.submit_torbox_download(release_id2, "Cached Release", f"magnet:?xt=urn:btih:{HASH}")
+            submit2 = ctx.scheduler.submit_torbox_download(
+                release_id2, "Cached Release", f"magnet:?xt=urn:btih:{HASH}", missing_volumes=[1],
+            )
         assert submit2["cached"] is True and submit2["success"] is True, submit2
         assert len(ctx.events("TORBOX_CACHED")) >= 1, ctx.events("TORBOX_CACHED")
         print("    [PASSED] submit persists handle; poll selects missing volume, fetches, completes and deletes.")
@@ -771,6 +775,8 @@ def test_poll_fallback_stalled_timeout():
         ctx.db.set_setting("torbox_enabled", "true")
         ctx.db.set_setting("torbox_api_key", TORBOX_KEY)
         ctx.db.set_setting("torbox_timeout_hours", "6")
+        # This test covers the legacy permissive fallback path explicitly.
+        ctx.db.set_setting("torbox_strict_volume_selection", "false")
 
         # Unmappable file name -> whole-torrent zip fallback (selection None).
         unmappable = FakeTorboxService(
@@ -842,7 +848,7 @@ def test_concurrency_and_delete_setting():
         fake = FakeTorboxService(state="ready")
         with patch("app.scheduler.build_downloader", return_value=fake):
             result = ctx.scheduler.submit_torbox_download(
-                blocked_id, "Blocked Release", f"magnet:?xt=urn:btih:{HASH}",
+                blocked_id, "Blocked Release", f"magnet:?xt=urn:btih:{HASH}", missing_volumes=[1],
             )
         assert result["success"] is False and result["retryable"] is True, result
         assert fake.submit_calls == [], "concurrency limit must prevent the submit call"
@@ -856,11 +862,15 @@ def test_concurrency_and_delete_setting():
         fake2 = FakeTorboxService(state="ready", files=[{"id": 1, "name": "Series Vol. 01.cbz", "size": 1}])
         rid = _insert_release(ctx.db, "keep-guid", "Keep Torbox", downloader="torbox",
                               downloader_id="91", download_status="DOWNLOADING",
-                              downloader_started_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
+                              downloader_started_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                              missing_volumes=[1])
         with patch("app.scheduler.build_downloader", return_value=fake2):
             ctx.scheduler.poll_torbox_downloads()
         assert ctx.db.get_release_by_id(rid)["download_status"] == "COMPLETED"
-        assert fake2.cancelled == [], "delete-after disabled must not cancel remotely"
+        # The separately-seeded DOWNLOADING row with nothing missing is skipped (and its
+        # remote job released); the delete-after=false keep row must not be cancelled.
+        keep_cancels = [h for h in fake2.cancelled if str(h.get("torrent_id")) == "91"]
+        assert keep_cancels == [], "delete-after disabled must not cancel the downloaded torrent"
         print("    [PASSED] concurrency gate blocks submission; delete-after respects the setting.")
     finally:
         ctx.close()
@@ -1120,7 +1130,7 @@ def test_queued_submit_and_pending_poll():
         rid2 = _insert_release(ctx.db, "active-allowed-guid", "Active Allowed")
         with patch("app.scheduler.build_downloader", return_value=active_service):
             allowed = ctx.scheduler.submit_torbox_download(
-                rid2, "Active Allowed", f"magnet:?xt=urn:btih:{HASH}",
+                rid2, "Active Allowed", f"magnet:?xt=urn:btih:{HASH}", missing_volumes=[1],
             )
         assert allowed["success"] is True, allowed
         assert len(active_service.submit_calls) == 1, "queued row must not block a new active slot"

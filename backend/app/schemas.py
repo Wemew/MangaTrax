@@ -367,6 +367,7 @@ SETTINGS_KEYS = (
     "torbox_poll_seconds",
     "torbox_max_concurrent",
     "torbox_timeout_hours",
+    "torbox_strict_volume_selection",
 )
 # Placeholder returned by GET /api/settings and rendered in the Settings UI instead of
 # the real Torbox key.  Saving the placeholder back is a no-op.
@@ -678,6 +679,9 @@ class SettingsUpdateRequest(BaseModel):
     torbox_poll_seconds: Optional[str] = Field(default=None, max_length=20)
     torbox_max_concurrent: Optional[str] = Field(default=None, max_length=20)
     torbox_timeout_hours: Optional[str] = Field(default=None, max_length=20)
+    # Strict exact-missing-volume selection (default true; false restores the old
+    # whole-torrent fallback when file names cannot be mapped).
+    torbox_strict_volume_selection: Optional[str] = Field(default=None, max_length=20)
 
     @field_validator("downloader_engine")
     @classmethod

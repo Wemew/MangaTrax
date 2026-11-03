@@ -441,6 +441,19 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
     size = int(info.get("size") or 0)
     eta = info.get("eta") if isinstance(info.get("eta"), (int, float)) else None
     speed = int(info.get("download_speed") or 0)
+    try:
+        wanted_volumes = sorted(float(v) for v in json.loads(release.get("missing_vols_json") or "[]"))
+    except Exception:
+        wanted_volumes = []
+    strict_volumes = as_bool(db.get_setting("torbox_strict_volume_selection", "true"), default=True)
+    if wanted_volumes:
+        selection = "missing volumes " + ", ".join(
+            str(int(v)) if float(v).is_integer() else str(v) for v in wanted_volumes
+        )
+    elif strict_volumes:
+        selection = "nothing missing"
+    else:
+        selection = "legacy whole-torrent fallback allowed"
     return {
         "hash": str(release.get("torrent_hash") or saved),
         "name": str(release.get("title") or ""),
@@ -449,6 +462,9 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
         "engine": "torbox",
         "cached": bool(info.get("cached")),
         "files": files,
+        "selection": selection,
+        "wanted_volumes": wanted_volumes,
+        "strict_volume_selection": strict_volumes,
         "category": "manga",
         "progress": round(max(0.0, min(1.0, progress)), 4),
         "progress_percent": round(max(0.0, min(1.0, progress)) * 100.0, 1),
@@ -1536,7 +1552,8 @@ async def api_release_download(release_id: int):
 
     download_url = target.get("download_url") or target.get("link")
     downloads_dir = scheduler.get_downloads_dir()
-    missing = target.get("missing_volumes") or json.loads(target.get("missing_vols_json") or "[]")
+    # Accurate wanted volumes at every entry point: stored values, else the matcher.
+    missing = await asyncio.to_thread(scheduler.resolve_release_missing_volumes, target)
     vols = target.get("volumes") or []
 
     if resolve_downloader_engine(db) == "torbox":
@@ -1551,6 +1568,12 @@ async def api_release_download(release_id: int):
             torrent_hash=str(target.get("torrent_hash") or ""),
         )
         if result.get("success"):
+            if result.get("skipped"):
+                return JSONResponse({
+                    "status": "skipped",
+                    "engine": "torbox",
+                    "message": result.get("message") or "Nothing missing; Torbox submit skipped",
+                })
             db.log_activity("MANUAL_DOWNLOAD", f"Sent to Torbox: '{target['title']}'", "Engine: torbox")
             await asyncio.to_thread(scheduler.process_downloads_to_staging, None)
             return JSONResponse({

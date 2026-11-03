@@ -695,6 +695,24 @@ class MangaScheduler:
                 continue
         return volumes
 
+    def resolve_release_missing_volumes(self, release: Dict[str, Any]) -> List[float]:
+        """Accurate wanted volumes for a release (stored values, else the matcher).
+
+        Entry points that may not have a freshly-computed missing set (the manual
+        download route, a polled Torbox row) use this so strict selection never
+        defaults to "everything" just because the stored list is empty.
+        """
+        stored = self._release_missing_volumes(release)
+        if stored:
+            return stored
+        try:
+            matcher = self._series_refresh_matcher()
+            result = matcher.check_release(release, auto_request_monitored=False)
+            return [float(value) for value in (result.get("missing_volumes") or [])]
+        except Exception as exc:
+            logger.debug("Could not compute missing volumes for '%s': %s", release.get("title"), exc)
+            return stored
+
     @staticmethod
     def _parse_db_timestamp(value: Any) -> Optional[datetime]:
         if not value:
@@ -769,6 +787,30 @@ class MangaScheduler:
         an infohash-derived magnet or a derived ``/download/<id>.torrent`` URL.
         """
         engine = "torbox"
+        wanted = [float(v) for v in (missing_volumes or [])]
+        # Strict exact-volume selection: never submit a torrent when nothing is missing.
+        strict_selection = as_bool(
+            self.db.get_setting("torbox_strict_volume_selection", "true"), default=True,
+        )
+        if strict_selection and not wanted:
+            message = (
+                f"Torbox submit skipped for '{title}': nothing missing (all volumes already owned); "
+                "no Torbox slot consumed."
+            )
+            logger.info(message)
+            self._log_activity(
+                "SELECTIVE_DOWNLOAD", message,
+                f"wantedVolumes=[]; Source: {source}" if source else "wantedVolumes=[]",
+            )
+            return {
+                "success": True,
+                "skipped": True,
+                "engine": engine,
+                "handle": {},
+                "queued": False,
+                "cached": False,
+                "message": message,
+            }
         try:
             max_concurrent = int(self.db.get_setting("torbox_max_concurrent", "2") or 2)
         except ValueError:
@@ -800,7 +842,6 @@ class MangaScheduler:
             "guid": guid or release_row.get("guid") or "",
             "torrent_hash": torrent_hash or release_row.get("torrent_hash") or "",
         }
-        wanted = [float(v) for v in (missing_volumes or [])]
         try:
             result = downloader.submit(release, savepath, wanted_volumes=wanted)
         except DownloaderError as exc:
@@ -878,29 +919,65 @@ class MangaScheduler:
         self._log_activity(event_type, f"Torbox {label}: '{title}'", message)
         logger.warning("Torbox %s for '%s': %s", label, title, message)
 
-    def _select_torbox_files(self, release: Dict[str, Any], files: List[Dict[str, Any]], wanted_volumes: List[float]):
-        """Choose the Torbox files for a volume subset.
+    _TORBOX_FILE_RANGE_RES = (
+        re.compile(r"(?i)(?:vol(?:ume)?s?\.?\s*|(?<![a-z])v\s*)(\d{1,3}(?:\.\d+)?)\s*[-–—~]\s*(?:v\s*)?(\d{1,3}(?:\.\d+)?)"),
+        re.compile(r"(?i)\[\s*(?:vol(?:ume)?s?\.?\s*|v\s*)(\d{1,3}(?:\.\d+)?)\s*[-–—~]\s*(?:v\s*)?(\d{1,3}(?:\.\d+)?)\s*\]"),
+        re.compile(r"(?i)\(\s*(?:v\s*)?(\d{1,3}(?:\.\d+)?)\s*[-–—~]\s*(?:v\s*)?(\d{1,3}(?:\.\d+)?)\s*\)"),
+    )
 
-        Returns ``(selection, reason)`` where ``selection is None`` means "download the
-        whole torrent as a zip".  If ANY file name cannot be mapped to volumes, the
-        whole torrent is downloaded (logged) instead of risking a missing volume.
+    @staticmethod
+    def _parse_torbox_file_volumes(file_name: str) -> List[float]:
+        """Map one Torbox file name to its volume numbers (ranges expanded).
+
+        The release parser covers ``v01``/``Vol. 3``/``v01-03``; explicit range
+        patterns additionally cover bracket/parenthesised forms such as
+        ``[Vol 1-3]`` and ``(v1-v3)``.  Returns ``[]`` when nothing is parseable,
+        which strict selection treats as an unmappable file.
         """
-        if not wanted_volumes:
+        base = os.path.basename(str(file_name or "").replace("\\", "/").strip())
+        if not base:
+            return []
+        volumes: Set[float] = set()
+        try:
+            parsed = extract_manga_bundle_and_volumes(base)
+            volumes.update(float(value) for value in (parsed.get("volumes") or []))
+            start = parsed.get("volume_start")
+            end = parsed.get("volume_end")
+            if start is not None:
+                volumes.add(float(start))
+                if end is not None and float(end) > float(start) and float(end) - float(start) <= 200:
+                    if float(start).is_integer() and float(end).is_integer():
+                        volumes.update(float(v) for v in range(int(start), int(end) + 1))
+                    else:
+                        volumes.add(float(end))
+        except Exception:
+            pass
+        for pattern in MangaScheduler._TORBOX_FILE_RANGE_RES:
+            for match in pattern.finditer(base):
+                try:
+                    first = float(match.group(1))
+                    last = float(match.group(2))
+                except (TypeError, ValueError):
+                    continue
+                if last < first or last - first > 200:
+                    continue
+                if first.is_integer() and last.is_integer():
+                    volumes.update(float(v) for v in range(int(first), int(last) + 1))
+                else:
+                    volumes.update({first, last})
+        return sorted(volumes)
+
+    def _legacy_torbox_selection(self, files: List[Dict[str, Any]], wanted: Set[float]):
+        """Old permissive behaviour used when torbox_strict_volume_selection=false."""
+        if not wanted:
             return None, "all volumes wanted: whole-torrent zip"
         if not files:
             return None, "Torbox returned no file list: whole-torrent zip fallback"
-        wanted = {float(value) for value in wanted_volumes}
         file_volumes: Dict[int, Set[float]] = {}
         unmapped: List[str] = []
         for index, item in enumerate(files):
-            name = str((item or {}).get("name") or "")
-            try:
-                parsed = extract_manga_bundle_and_volumes(name)
-                volumes = {float(value) for value in (parsed.get("volumes") or [])}
-                if not volumes and parsed.get("volume_start") is not None:
-                    volumes = {float(parsed["volume_start"])}
-            except Exception:
-                volumes = set()
+            name = str((item or {}).get("name") or (item or {}).get("short_name") or "")
+            volumes = set(self._parse_torbox_file_volumes(name))
             if not volumes:
                 unmapped.append(name or f"file #{index}")
                 continue
@@ -917,6 +994,142 @@ class MangaScheduler:
         if len(selected) == len(files):
             return None, "subset selects every file: whole-torrent zip"
         return selected, f"subset: {len(selected)}/{len(files)} file(s) for volumes {sorted(wanted)}"
+
+    def _plan_torbox_selection(
+        self, release: Dict[str, Any], files: List[Dict[str, Any]], wanted_volumes: List[float],
+    ) -> Dict[str, Any]:
+        """Decide exactly which Torbox files to fetch (strict by default).
+
+        Decision rule (strict=true, setting ``torbox_strict_volume_selection``):
+          * no wanted volumes -> ``skip`` (do not fetch/submit; nothing to download);
+          * no file list, any unmappable file name, or any wanted volume absent from
+            the torrent -> typed DownloaderFileError (never download everything);
+          * every file needed and all wanted covered -> ``zip`` (equivalent);
+          * otherwise -> ``files`` with only the files whose parsed volume set
+            intersects the wanted set (per-file requestdl).
+        strict=false restores the legacy whole-torrent fallback.
+        """
+        title = str(release.get("title") or "")
+        strict = as_bool(self.db.get_setting("torbox_strict_volume_selection", "true"), default=True)
+        wanted = {float(value) for value in (wanted_volumes or [])}
+        logger.info(
+            "Torbox selection for '%s': strict=%s wanted volumes %s", title, strict, sorted(wanted),
+        )
+        if not strict:
+            selection, reason = self._legacy_torbox_selection(files, wanted)
+            return {
+                "action": "zip" if selection is None else "files",
+                "files": selection,
+                "reason": reason,
+                "mapping": [],
+                "strict": False,
+                "wanted_volumes": sorted(wanted),
+                "selected_volumes": [],
+                "skipped_volumes": [],
+                "selected_count": len(selection or []),
+                "total_files": len(files or []),
+            }
+        if not wanted:
+            return {
+                "action": "skip",
+                "files": None,
+                "reason": "nothing missing: all volumes already owned",
+                "mapping": [],
+                "strict": True,
+                "wanted_volumes": [],
+                "selected_volumes": [],
+                "skipped_volumes": [],
+                "selected_count": 0,
+                "total_files": len(files or []),
+            }
+        if not files:
+            raise DownloaderFileError(
+                f"Torbox strict volume selection for '{title}' failed: the torrent returned no "
+                "file list; refusing to download the whole torrent."
+            )
+        mapping: List[Dict[str, Any]] = []
+        unmapped: List[str] = []
+        for index, item in enumerate(files):
+            item = item if isinstance(item, dict) else {}
+            name = str(item.get("name") or item.get("short_name") or "")
+            volumes = self._parse_torbox_file_volumes(name)
+            mapping.append({"index": index, "id": item.get("id"), "name": name, "volumes": volumes})
+            if not volumes:
+                unmapped.append(name or f"file #{index}")
+            logger.info(
+                "Torbox selection for '%s': file '%s' (id=%s) -> volumes %s",
+                title, name or f"file #{index}", item.get("id"), volumes,
+            )
+        if unmapped:
+            raise DownloaderFileError(
+                f"Torbox strict volume selection for '{title}' failed: {len(unmapped)} file name(s) "
+                f"cannot be mapped to volumes ({', '.join(unmapped[:5])}); refusing to download the whole torrent."
+            )
+        available: Set[float] = set()
+        for entry in mapping:
+            available.update(entry["volumes"])
+        absent = sorted(wanted - available)
+        if absent:
+            raise DownloaderFileError(
+                f"Torbox strict volume selection for '{title}' failed: wanted volume(s) {absent} "
+                f"are absent from the torrent (available volumes: {sorted(available)})."
+            )
+        selected_indices = [
+            entry["index"] for entry in mapping if set(entry["volumes"]) & wanted
+        ]
+        selected_files = [files[index] for index in selected_indices]
+        covered: Set[float] = set()
+        for index in selected_indices:
+            covered.update(mapping[index]["volumes"])
+        all_needed = bool(selected_indices) and len(selected_indices) == len(files) and all(
+            set(entry["volumes"]) <= wanted for entry in mapping
+        ) and (covered & wanted) == wanted
+        skipped_volumes = sorted(available - wanted)
+        result = {
+            "mapping": mapping,
+            "strict": True,
+            "wanted_volumes": sorted(wanted),
+            "skipped_volumes": skipped_volumes,
+            "selected_volumes": sorted(covered & wanted),
+            "selected_count": len(selected_files),
+            "total_files": len(files),
+        }
+        if all_needed:
+            return {
+                "action": "zip",
+                "files": None,
+                "reason": f"all {len(files)} file(s) needed: whole-torrent zip",
+                **result,
+            }
+        return {
+            "action": "files",
+            "files": selected_files,
+            "reason": (
+                f"strict subset: {len(selected_files)}/{len(files)} file(s) for volumes "
+                f"{sorted(wanted)} (skipped volumes {skipped_volumes})"
+            ),
+            **result,
+        }
+
+    def _select_torbox_files(self, release: Dict[str, Any], files: List[Dict[str, Any]], wanted_volumes: List[float]):
+        """Backwards-compatible wrapper: ``(selection, reason)`` with None = zip."""
+        plan = self._plan_torbox_selection(release, files, wanted_volumes)
+        if plan["action"] in ("zip", "skip"):
+            return None, plan["reason"]
+        return plan["files"], plan["reason"]
+
+    @staticmethod
+    def _cleanup_torbox_partials(dest_dir: str) -> None:
+        """Remove temp/partial files from a failed strict-selection job (never user files)."""
+        if not dest_dir or not os.path.isdir(dest_dir):
+            return
+        for root, _dirs, files in os.walk(dest_dir):
+            for filename in files:
+                if filename.lower().endswith((".part", ".mangatrax-part")):
+                    try:
+                        os.remove(os.path.join(root, filename))
+                    except OSError:
+                        pass
 
     def poll_torbox_downloads(self) -> Dict[str, Any]:
         """Advance Torbox releases: poll → fetch when ready → complete → optional delete.
@@ -1054,12 +1267,48 @@ class MangaScheduler:
                 continue
 
             files = info.get("files") or []
-            wanted = self._release_missing_volumes(release)
-            selection, reason = self._select_torbox_files(release, files, wanted)
+            wanted = self.resolve_release_missing_volumes(release)
             dest_dir = os.path.join(downloads_dir, self._safe_torrent_dirname(title))
+            try:
+                plan = self._plan_torbox_selection(release, files, wanted)
+            except DownloaderFileError as exc:
+                # Strict selection refused (unmappable names / absent volumes): fail the
+                # release with an actionable reason and leave no partial output behind.
+                self._cleanup_torbox_partials(dest_dir)
+                self._torbox_fail_release(release_id, title, str(exc))
+                failed += 1
+                continue
+            if plan["action"] == "skip":
+                # Nothing missing anymore: free the remote job instead of downloading.
+                try:
+                    downloader.cancel(handle)
+                except Exception as exc:  # pragma: no cover - cancel already swallows
+                    logger.debug("Could not cancel skipped Torbox job: %s", exc)
+                self.db.update_downloader_state(release_id, "IDLE", "torbox")
+                self._log_activity(
+                    "SELECTIVE_DOWNLOAD",
+                    f"Torbox skipped '{title}': {plan['reason']}.",
+                    json.dumps({"wanted_volumes": [], "torrent_id": handle.get("torrent_id")}),
+                )
+                continue
+            selection = plan["files"] if plan["action"] == "files" else None
+            reason = plan["reason"]
+            if plan.get("strict"):
+                self._log_activity(
+                    "SELECTIVE_DOWNLOAD",
+                    f"Torbox selective download for '{title}': {reason}; "
+                    f"skipped volumes {plan.get('skipped_volumes')}.",
+                    json.dumps({
+                        "mapping": plan.get("mapping"),
+                        "wanted_volumes": plan.get("wanted_volumes"),
+                        "selected_volumes": plan.get("selected_volumes"),
+                        "torrent_id": handle.get("torrent_id"),
+                    }),
+                )
             try:
                 saved = downloader.fetch_files(handle, selection, dest_dir)
             except (DownloaderFileError, DownloaderError) as exc:
+                self._cleanup_torbox_partials(dest_dir)
                 self._torbox_fail_release(release_id, title, f"Fetch failed ({reason}): {exc}")
                 failed += 1
                 continue
@@ -1601,7 +1850,7 @@ class MangaScheduler:
                                     source=feed_name,
                                     guid=getattr(rel, "guid", "") or "",
                                 )
-                                if result.get("success"):
+                                if result.get("success") and not result.get("skipped"):
                                     total_sent_to_downloader += 1
                             else:
                                 success = qbit.add_torrent(
@@ -2358,7 +2607,7 @@ class MangaScheduler:
                             source=f"Nyaa: {primary_title}",
                             guid=getattr(rel, "guid", "") or "",
                         )
-                        if result.get("success"):
+                        if result.get("success") and not result.get("skipped"):
                             total_sent_to_downloader += 1
                     else:
                         success = qbit.add_torrent(

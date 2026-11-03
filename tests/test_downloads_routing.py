@@ -313,9 +313,12 @@ def test_engine_savepaths_use_downloads_dir():
             "guid": "savepath-guid", "title": "Savepath Vol. 01",
             "download_url": "magnet:?xt=urn:btih:" + "0" * 40,
             "status": "REQUESTED", "download_status": "IDLE",
+            "volumes": [1], "missing_volumes": [1],
         })[1]
         with patch("app.scheduler.build_downloader", return_value=fake):
-            result = ctx.scheduler.submit_torbox_download(release_id, "Savepath Vol. 01", "magnet:?xt=urn:btih:" + "0" * 40)
+            result = ctx.scheduler.submit_torbox_download(
+                release_id, "Savepath Vol. 01", "magnet:?xt=urn:btih:" + "0" * 40, missing_volumes=[1],
+            )
         assert result["success"] is True, result
         savepath = fake.submit.call_args[0][1]
         assert os.path.realpath(savepath).startswith(os.path.realpath(ctx.downloads)), savepath
