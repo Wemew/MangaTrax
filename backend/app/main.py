@@ -19,7 +19,7 @@ from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
-from app import storage_health
+from app import downloads_inventory, storage_health
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
 from app.downloader.base import DownloaderError, parse_queued_handle_id
 from app.downloader.torbox import TorboxDownloader
@@ -477,6 +477,14 @@ def _build_downloader_status(timeout: Optional[float] = None) -> Dict[str, Any]:
     return payload
 
 
+def _safe_json_list(raw: Any) -> list:
+    try:
+        values = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    return values if isinstance(values, list) else []
+
+
 def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Normalise a Torbox release row (+optional live status) for the status API."""
     info = info or {}
@@ -560,6 +568,9 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
         "eta_seconds": local_eta,
         "last_checked_at": last_checked_iso,
         "last_checked_seconds_ago": last_checked_seconds_ago,
+        "downloaded_at": str(release.get("downloaded_at") or ""),
+        "routed_at": str(release.get("routed_at") or ""),
+        "download_files": _safe_json_list(release.get("download_files_json")),
         "raw_state": str(info.get("raw_state") or ""),
         "engine": "torbox",
         "cached": bool(info.get("cached")),
@@ -1020,6 +1031,16 @@ async def downloads_view(request: Request):
     # Short, explicit timeout + graceful degradation: an unreachable downloader
     # renders the page with a "degraded" banner instead of blocking on sockets.
     download_status = await asyncio.to_thread(_build_downloader_status, 1.2)
+    try:
+        inventory = await asyncio.to_thread(downloads_inventory.refresh_inventory, db, scheduler.get_downloads_dir(create=False))
+    except Exception as exc:  # pragma: no cover - page must render even if the scan fails
+        logger.debug("Downloads inventory scan for page failed: %s", exc)
+        inventory = downloads_inventory.load_inventory(db)
+    try:
+        scanned_at = datetime.strptime(inventory.get("scanned_at") or "", "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        inventory_scanned_seconds = max(0, int((datetime.now(timezone.utc) - scanned_at).total_seconds()))
+    except (TypeError, ValueError):
+        inventory_scanned_seconds = None
     qbit_status = {
         "success": download_status["downloader"]["connected"],
         "message": download_status["downloader"]["message"],
@@ -1062,6 +1083,8 @@ async def downloads_view(request: Request):
             "staging_dir": staging_dir,
             "downloads_dir": downloads_dir,
             "storage_health": _storage_health_payload(),
+            "downloads_inventory": inventory,
+            "downloads_inventory_scanned_seconds": inventory_scanned_seconds,
             "staging_files": staging_files,
             "awaiting_series": awaiting_series,
             "awaiting_total": awaiting_total,
@@ -1287,6 +1310,14 @@ async def api_downloads_status(timeout: float = Query(default=_DEFAULT_DOWNLOADE
     runs in a worker thread, so a hung downloader cannot stall the event loop.
     """
     payload = await asyncio.to_thread(_build_downloader_status, timeout)
+    try:
+        inventory = downloads_inventory.load_inventory(db)
+        payload["inventory"] = inventory
+        payload["last_scanned_at"] = inventory.get("scanned_at") or db.get_setting("downloads_scanned_at", "")
+    except Exception as exc:  # pragma: no cover - status must never fail on inventory
+        logger.debug("Could not attach downloads inventory: %s", exc)
+        payload["inventory"] = {"entries": [], "scanned_at": ""}
+        payload["last_scanned_at"] = ""
     return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
@@ -1307,6 +1338,20 @@ async def api_torbox_poll_now():
         "last_checked_at": result.get("last_checked_at") or "",
         "torrents": status_payload.get("torrents") or [],
         "downloader": status_payload.get("downloader") or {},
+    })
+
+
+@app.post("/api/downloads/scan")
+async def api_downloads_scan():
+    """Rescan the raw downloads folder and return the fresh inventory."""
+    inventory = await asyncio.to_thread(
+        downloads_inventory.refresh_inventory, db, scheduler.get_downloads_dir(create=False),
+    )
+    return JSONResponse({
+        "status": "success",
+        "inventory": inventory,
+        "last_scanned_at": inventory.get("scanned_at") or "",
+        "entries": inventory.get("entries") or [],
     })
 
 
@@ -2065,6 +2110,10 @@ async def api_save_settings(payload: Dict[str, Any]):
             storage = _refresh_storage_health("settings")
         except Exception as exc:  # pragma: no cover - save must succeed regardless
             logger.debug("Storage probe after settings save failed: %s", exc)
+        try:
+            await asyncio.to_thread(scheduler.periodic_downloads_inventory_and_route)
+        except Exception as exc:  # pragma: no cover - save must succeed regardless
+            logger.debug("Routing/inventory pass after settings save failed: %s", exc)
     return JSONResponse({"status": "success", "storage": storage})
 
 @app.post("/api/settings/test-webhook")

@@ -46,6 +46,9 @@
             {{ r.title }}
         </div>
         {% endif %}
+        {% if r.download_status == 'COMPLETED' and r.status != 'IN_CALIBRE' %}
+        <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-teal-500/15 border border-teal-500/40 text-teal-300 text-[10px] font-bold mt-1" title="Downloaded to the raw downloads folder — waiting for Calibre/route: {{ r.download_files_json }}">Downloaded — waiting for Calibre/route</span>
+        {% endif %}
         {% if r.media_type == 'jpegxl' %}
         <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-fuchsia-500/15 border border-fuchsia-500/40 text-fuchsia-300 text-[10px] font-bold mt-1" title="JPEG XL release (throw-away filter: never auto-downloaded)">[JPEGXL]</span>
         {% endif %}

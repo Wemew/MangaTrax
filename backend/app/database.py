@@ -523,6 +523,14 @@ class MangaDatabase:
             # timestamps so the UI can show real local progress.
             if "torbox_progress_json" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN torbox_progress_json TEXT DEFAULT '{}';")
+            # Downloaded-file tracking (task-30): files fetched by an engine, when they
+            # arrived, and when routing moved them out of the raw downloads folder.
+            if "download_files_json" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN download_files_json TEXT DEFAULT '[]';")
+            if "downloaded_at" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN downloaded_at TEXT DEFAULT '';")
+            if "routed_at" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN routed_at TEXT DEFAULT '';")
 
             # Backfill is_complete for existing releases matching complete indicators (local SQL/regex only, NO network calls)
             try:
@@ -1610,6 +1618,46 @@ class MangaDatabase:
                 )
             conn.commit()
             self._invalidate_grouped_cache()
+
+    def set_download_files(self, release_id: int, paths: List[str]) -> None:
+        """Persist the files fetched for a release and mark when they arrived."""
+        clean = [str(path) for path in (paths or [])]
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET download_files_json = ?, "
+                "downloaded_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (json.dumps(clean), release_id),
+            )
+            conn.commit()
+            self._invalidate_grouped_cache()
+
+    def mark_release_routed(self, release_id: int) -> None:
+        """Mark that the release's files have left the raw downloads folder."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET routed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?;",
+                (release_id,),
+            )
+            conn.commit()
+            self._invalidate_grouped_cache()
+
+    def get_tracked_downloads(self, limit: int = 500) -> List[Dict[str, Any]]:
+        """Releases with recorded download files (for inventory matching)."""
+        try:
+            limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            limit = 500
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM releases WHERE COALESCE(download_files_json, '[]') NOT IN ('', '[]') "
+                "ORDER BY id DESC LIMIT ?;",
+                (limit,),
+            )
+            return [dict(row) for row in cur.fetchall()]
 
     def update_torbox_progress(self, release_id: int, **fields) -> Dict[str, Any]:
         """Merge the Torbox phase/progress/timing fields into the release row."""

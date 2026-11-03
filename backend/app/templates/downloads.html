@@ -252,6 +252,85 @@
         </div>
     </div>
 
+    <!-- Raw Downloads Folder Inventory (task-30) -->
+    <div id="raw-downloads-card" data-scanned-at="{{ downloads_inventory.scanned_at if downloads_inventory else '' }}" class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+        <div class="flex items-center justify-between px-6 py-4 border-b border-slate-800">
+            <div>
+                <h2 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                    <i data-lucide="folder-down" class="w-4 h-4 text-cyan-400"></i>
+                    Downloads Folder (raw)
+                </h2>
+                <p class="text-[11px] text-slate-500 mt-1">
+                    Files fetched by the downloader before tagging. A finished download appears here automatically.
+                    <span id="inventory-last-scan">{% if downloads_inventory_scanned_seconds is not none %}Last scanned {{ downloads_inventory_scanned_seconds }}s ago{% else %}Not scanned yet{% endif %}</span>
+                </p>
+            </div>
+            <div class="flex items-center gap-2">
+                <button type="button" onclick="rescanDownloads()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                    <i data-lucide="search" class="w-3.5 h-3.5 text-cyan-400"></i> Rescan
+                </button>
+                <button type="button" onclick="tagMoveNow()" class="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5">
+                    <i data-lucide="tag" class="w-3.5 h-3.5"></i> Tag & move now
+                </button>
+            </div>
+        </div>
+        {% if downloads_inventory and downloads_inventory.entries %}
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-xs">
+                <thead>
+                    <tr class="bg-slate-900 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
+                        <th class="py-3 px-4">Name</th>
+                        <th class="py-3 px-4">Files</th>
+                        <th class="py-3 px-4">Size</th>
+                        <th class="py-3 px-4">Age</th>
+                        <th class="py-3 px-4">Series / Volumes</th>
+                        <th class="py-3 px-4">State</th>
+                        <th class="py-3 px-4">Matched release</th>
+                        <th class="py-3 px-4 text-right">Action</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/60">
+                    {% for e in downloads_inventory.entries %}
+                    <tr class="hover:bg-slate-850/50 transition-colors">
+                        <td class="py-3 px-4 font-semibold text-white max-w-xs truncate break-words-anywhere" title="{{ e.relative }}">{{ e.name }}</td>
+                        <td class="py-3 px-4 text-slate-300">{{ e.file_count }}{% if e.cbz_count %} ({{ e.cbz_count }} cbz){% endif %}</td>
+                        <td class="py-3 px-4 text-slate-300">{{ (e.size_bytes / 1024 / 1024)|round(1) }} MB</td>
+                        <td class="py-3 px-4 text-slate-400">{% if e.age_seconds is not none %}{{ (e.age_seconds // 60) }}m{% else %}-{% endif %}</td>
+                        <td class="py-3 px-4 text-slate-300">
+                            {% if e.series_name %}{{ e.series_name }}{% if e.volumes %} · v{{ e.volumes|join(', ') }}{% endif %}{% else %}-{% endif %}
+                        </td>
+                        <td class="py-3 px-4">
+                            {% if e.state == 'ready' %}
+                            <span class="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-[10px] font-bold">Ready to move</span>
+                            {% elif e.state == 'awaiting_calibre' %}
+                            <span class="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 text-[10px] font-bold">Awaiting Calibre</span>
+                            {% elif e.state == 'partial' %}
+                            <span class="px-1.5 py-0.5 rounded bg-slate-700/40 border border-slate-600 text-slate-300 text-[10px] font-bold">Partial / still downloading</span>
+                            {% else %}
+                            <span class="px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/40 text-rose-300 text-[10px] font-bold">Unmatched</span>
+                            {% endif %}
+                        </td>
+                        <td class="py-3 px-4 text-slate-400 max-w-xs truncate" title="{% if e.release %}{{ e.release.title }}{% endif %}">
+                            {% if e.release %}{{ e.release.title }} <span class="text-slate-500">({{ e.release.download_status }})</span>{% else %}-{% endif %}
+                        </td>
+                        <td class="py-3 px-4 text-right">
+                            {% if e.state == 'ready' %}
+                            <button type="button" onclick="tagMoveNow()" class="px-2 py-1 rounded bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-[10px] font-bold" title="Tag and move this entry to staging">Tag & move now</button>
+                            {% else %}<span class="text-[10px] text-slate-600">-</span>{% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="px-6 py-8 text-center text-slate-500 text-xs">
+            Downloads folder is empty{% if downloads_inventory and not downloads_inventory.exists %} or not configured{% endif %}.
+            <span class="text-slate-600">Last scanned {% if downloads_inventory_scanned_seconds is not none %}{{ downloads_inventory_scanned_seconds }}s ago{% else %}never{% endif %}.</span>
+        </div>
+        {% endif %}
+    </div>
+
     <!-- Staging Directory Files & ComicInfo.xml Status -->
     <div class="space-y-4">
         <div class="flex items-center justify-between">
@@ -594,6 +673,47 @@ async function refreshTorboxProgress() {
 {% if engine == 'torbox' %}
 setInterval(refreshTorboxProgress, 2000);
 {% endif %}
+
+async function rescanDownloads() {
+    try {
+        const res = await fetch('/api/downloads/scan', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || 'Rescan failed', 'error');
+            return;
+        }
+        showToast(`Downloads scanned: ${(data.entries || []).length} entr(ies)`, 'success');
+        setTimeout(() => location.reload(), 700);
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+
+function tagMoveNow() {
+    triggerStagingTag();
+}
+
+(function autoRefreshDownloadsInventory() {
+    const card = document.getElementById('raw-downloads-card');
+    if (!card) return;
+    setInterval(async () => {
+        if (document.hidden) return;
+        try {
+            const res = await fetch('/api/downloads/status', { headers: { 'Accept': 'application/json' } });
+            if (!res.ok) return;
+            const data = await res.json();
+            if (data.last_scanned_at && card.dataset.scannedAt && data.last_scanned_at !== card.dataset.scannedAt) {
+                location.reload();
+                return;
+            }
+            const label = document.getElementById('inventory-last-scan');
+            if (label && data.last_scanned_at) {
+                const seconds = Math.max(0, Math.round((Date.now() - Date.parse(data.last_scanned_at)) / 1000));
+                label.textContent = `Last scanned ${seconds}s ago`;
+            }
+        } catch (err) { /* best-effort */ }
+    }, 5000);
+})();
 
 // --- ComicInfo <Series> audit & explicit repair (M2 data repair) ---
 let _selectedAuditFiles = new Set();

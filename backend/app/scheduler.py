@@ -20,6 +20,7 @@ from app.nyaa_source import DEFAULT_NYAA_BASE_URL, NyaaBaseURLError, normalize_n
 from app.calibre.scanner import CalibreMangaScanner
 from app.calibre.matcher import MangaCalibreMatcher
 from app.downloader.qbit import QBitClient
+from app import downloads_inventory
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
 from app.downloader.torbox import TORBOX_ZIP_MAX_FILES, TORBOX_ZIP_SAFETY_RATIO
 from app.downloader.base import (
@@ -1353,6 +1354,29 @@ class MangaScheduler:
                     except OSError:
                         pass
 
+    def refresh_downloads_inventory(self) -> Dict[str, Any]:
+        """Scan the raw downloads folder and persist the result (task-30)."""
+        try:
+            return downloads_inventory.refresh_inventory(self.db, self.get_downloads_dir(create=False))
+        except Exception as exc:
+            logger.debug("Downloads inventory scan failed: %s", exc)
+            return {}
+
+    def periodic_downloads_inventory_and_route(self) -> Dict[str, Any]:
+        """Cheap frequent pass: inventory + tag/move eligible raw downloads."""
+        inventory = self.refresh_downloads_inventory()
+        routed = {}
+        try:
+            routed = self.process_downloads_to_staging(actor="scheduler")
+        except Exception as exc:
+            logger.debug("Frequent downloads routing failed: %s", exc)
+        moved = int((routed or {}).get("tagged_and_moved") or 0)
+        if moved:
+            logger.info(
+                "Frequent routing pass: moved %s file(s) from downloads to staging.", moved,
+            )
+        return {"inventory": inventory, "routing": routed}
+
     def sweep_pending_dedupe(self, limit: int = 50) -> Dict[str, Any]:
         """Retry auto-downloads that were suppressed by in-flight dedupe.
 
@@ -1675,6 +1699,12 @@ class MangaScheduler:
                 downloaded_bytes = total_bytes
             total_bytes = total_bytes or downloaded_bytes
             speed_bps = int(downloaded_bytes / fetch_seconds) if downloaded_bytes else 0
+            try:
+                self.db.set_download_files(
+                    release_id, [str(item.get("path") or "") for item in (saved or [])],
+                )
+            except Exception as exc:
+                logger.debug("Could not persist download files for release %s: %s", release_id, exc)
             self.db.update_torbox_progress(
                 release_id, phase="routing", downloaded_bytes=downloaded_bytes,
                 total_bytes=total_bytes or None, speed_bps=speed_bps,
@@ -1698,6 +1728,16 @@ class MangaScheduler:
             routed_mono = time.monotonic()
             routed_iso = self._utc_iso()
             self.db.update_torbox_progress(release_id, phase="done", routed_at=routed_iso)
+            try:
+                saved_paths = [str(item.get("path") or "") for item in (saved or [])]
+                if saved_paths and all(not os.path.exists(path) for path in saved_paths if path):
+                    self.db.mark_release_routed(release_id)
+            except Exception as exc:
+                logger.debug("Could not mark release %s routed: %s", release_id, exc)
+            try:
+                self.refresh_downloads_inventory()
+            except Exception as exc:
+                logger.debug("Inventory refresh after download failed: %s", exc)
             latency = {
                 "ready_detected_at": ready_at,
                 "fetch_started_at": fetch_started_iso,
@@ -3900,6 +3940,7 @@ class MangaScheduler:
         last_tag_check = 0
         last_dl_check = 0
         last_dedupe_sweep = 0
+        last_dedupe_inventory = 0
         last_complete_check = time.time()
 
         while self.running:
@@ -3937,6 +3978,15 @@ class MangaScheduler:
                     except Exception as exc:
                         logger.debug("Periodic downloads routing failed: %s", exc)
                     last_tag_check = time.time()
+
+                # task-30: frequent (45 s) inventory + routing pass so finished files
+                # are visible and eligible for staging without pressing anything.
+                if now - last_dedupe_inventory >= 45:
+                    try:
+                        self.periodic_downloads_inventory_and_route()
+                    except Exception as exc:
+                        logger.debug("Frequent inventory/routing pass failed: %s", exc)
+                    last_dedupe_inventory = time.time()
 
                 # Check and optimize bundle downloads every 30 seconds
                 if now - last_dl_check >= 30:
