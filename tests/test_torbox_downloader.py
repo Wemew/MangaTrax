@@ -102,6 +102,7 @@ class FakeApi:
     def __init__(self):
         self.routes = []
         self.calls = []
+        self.requests = []
 
     def add(self, path_part, data=None, status=200, headers=None, body=None):
         self.routes.append((path_part, data, status, headers, body))
@@ -110,6 +111,7 @@ class FakeApi:
     def __call__(self, request, timeout=None):
         url = request.full_url if hasattr(request, "full_url") else str(request)
         self.calls.append(url)
+        self.requests.append(request)
         for path_part, data, status, headers, body in self.routes:
             if path_part in url:
                 if status >= 400:
@@ -121,6 +123,24 @@ class FakeApi:
 
     def urls_for(self, path_part):
         return [url for url in self.calls if path_part in url]
+
+    def requests_for(self, path_part):
+        return [
+            request for request in self.requests
+            if path_part in (request.full_url if hasattr(request, "full_url") else str(request))
+        ]
+
+    @staticmethod
+    def body_of(request):
+        return request.data or b""
+
+    @staticmethod
+    def content_type(request):
+        headers = getattr(request, "headers", {}) or {}
+        for key, value in headers.items():
+            if key.lower() == "content-type":
+                return value
+        return ""
 
 
 class FakeStream:
@@ -136,6 +156,27 @@ class FakeStream:
         self.urls.append(url)
         return _Response(self.status, self.body)
 
+
+class ScriptedStream:
+    """Stream double with scripted responses (bytes | (status,) | Exception)."""
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.urls = []
+
+    def __call__(self, request, timeout):
+        url = request.full_url if hasattr(request, "full_url") else str(request)
+        self.urls.append(url)
+        outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
+        if isinstance(outcome, Exception):
+            raise outcome
+        if isinstance(outcome, tuple):
+            status = outcome[0]
+            raise urllib.error.HTTPError(url, status, f"HTTP {status}", _headers(), None)
+        return _Response(200, outcome)
+
+
+BENCODED_TORRENT = b"d8:announce4:http4:infod4:name4:testee"
 
 def _zip_bytes(entries):
     buffer = io.BytesIO()
@@ -336,6 +377,20 @@ def test_torbox_submit_and_status():
         assert "format=list" in cached_calls[0] and "list_files=true" in cached_calls[0]
         assert api.urls_for("/torrents/createtorrent")
 
+        # Wire format regression (task-23): Torbox createtorrent is multipart/form-data
+        # with a `magnet` field — never a query parameter (that caused live HTTP 400).
+        create_requests = api.requests_for("/torrents/createtorrent")
+        create_request = create_requests[0]
+        assert "?" not in create_request.full_url, create_request.full_url
+        assert create_request.method == "POST", create_request.method
+        content_type = FakeApi.content_type(create_request)
+        assert content_type.startswith("multipart/form-data; boundary="), content_type
+        create_body = FakeApi.body_of(create_request)
+        assert b'name="magnet"' in create_body, create_body[:400]
+        assert HASH.encode() in create_body, create_body[:400]
+        assert b'name="file"' not in create_body, create_body[:400]
+        assert b"application/json" not in content_type.encode(), content_type
+
         status = downloader.status({"torrent_id": 55})
         assert status["state"] == "ready", status
         assert status["files"][0]["id"] == 7, status
@@ -357,6 +412,138 @@ def test_torbox_submit_and_status():
     assert result2["cached"] is False and result2["handle"]["torrent_id"] == 56, result2
     assert api2.urls_for("/torrents/createtorrent"), api2.calls
     print("    [PASSED] checkcached -> createtorrent -> mylist(bypass_cache) with typed states.")
+
+
+# ===========================================================================
+# 2b. Submission forms: infohash magnet, /view-derived torrent, retries, HTML reject
+# ===========================================================================
+def test_torbox_submission_forms_and_fallbacks():
+    print("--> Testing Torbox submission forms and robust torrent fallback...")
+    downloader = TorboxDownloader(api_key=TORBOX_KEY, enabled=True)
+
+    # 1. Infohash-only release -> synthesised magnet on the same multipart path.
+    api = FakeApi()
+    api.add("/torrents/checkcached", data=[])
+    api.add("/torrents/createtorrent", data={"torrent_id": 61, "hash": HASH})
+    with patch("app.downloader.torbox.urllib.request.urlopen", side_effect=api):
+        result = downloader.submit(
+            {"title": "Hash Only Release", "download_url": "", "torrent_hash": HASH}, "/downloads",
+        )
+    assert result["handle"]["torrent_id"] == 61, result
+    request = api.requests_for("/torrents/createtorrent")[0]
+    assert "?" not in request.full_url, request.full_url
+    body = FakeApi.body_of(request)
+    assert b'name="magnet"' in body, body[:400]
+    assert f"urn:btih:{HASH}".encode() in body, body[:400]
+
+    # 2. /view/<id> release -> derive <base>/download/<id>.torrent and upload file part.
+    api2 = FakeApi()
+    api2.add("/torrents/checkcached", data=[])
+    api2.add("/torrents/createtorrent", data={"torrent_id": 62, "hash": HASH})
+    stream = ScriptedStream([BENCODED_TORRENT])
+    logged = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            logged.append(record.getMessage())
+
+    logger = logging.getLogger("mangatrax.downloader.torbox")
+    handler = _Capture()
+    previous_level = logger.level
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    try:
+        with patch("app.downloader.torbox.urllib.request.urlopen", side_effect=api2):
+            with patch("app.downloader.torbox._open_no_redirect", side_effect=stream):
+                result2 = downloader.submit({
+                    "title": "View Release",
+                    "download_url": "https://mirror.example/nyaa/view/123",
+                }, "/downloads")
+        assert result2["handle"]["torrent_id"] == 62, result2
+        assert any("nyaa/download/123.torrent" in url for url in stream.urls), stream.urls
+        request2 = api2.requests_for("/torrents/createtorrent")[0]
+        assert "?" not in request2.full_url, request2.full_url
+        body2 = FakeApi.body_of(request2)
+        assert b'name="file"' in body2 and b'filename="release.torrent"' in body2, body2[:500]
+        assert BENCODED_TORRENT in body2, "the fetched bencoded torrent must be uploaded"
+        assert any("derived-torrent-url" in message for message in logged), logged
+
+        # 3. A view URL returning HTML must be rejected before any upload.
+        api3 = FakeApi()
+        api3.add("/torrents/checkcached", data=[])
+        stream_html = ScriptedStream([b"<!DOCTYPE html><html><body>not a torrent</body></html>"])
+        with patch("app.downloader.torbox.urllib.request.urlopen", side_effect=api3):
+            with patch("app.downloader.torbox._open_no_redirect", side_effect=stream_html):
+                try:
+                    downloader.submit({
+                        "title": "HTML Release",
+                        "download_url": "https://mirror.example/view/9",
+                    }, "/downloads")
+                except DownloaderError as exc:
+                    html_error = str(exc)
+                else:
+                    assert False, "HTML payload must be rejected"
+        assert "HTML Release" in html_error, html_error
+        assert "bencoded" in html_error or "HTML" in html_error, html_error
+        assert api3.urls_for("/torrents/createtorrent") == [], api3.calls
+
+        # 4. 504 then 200 -> one retry, succeeds.
+        api4 = FakeApi()
+        api4.add("/torrents/checkcached", data=[])
+        api4.add("/torrents/createtorrent", data={"torrent_id": 63, "hash": HASH})
+        stream_retry = ScriptedStream([(504,), BENCODED_TORRENT])
+        with patch("app.downloader.torbox.urllib.request.urlopen", side_effect=api4):
+            with patch("app.downloader.torbox._open_no_redirect", side_effect=stream_retry):
+                with patch("app.downloader.torbox.time.sleep", side_effect=lambda _s: None):
+                    result4 = downloader.submit({
+                        "title": "Retry Release",
+                        "download_url": "https://mirror.example/view/77",
+                    }, "/downloads")
+        assert len(stream_retry.urls) == 2, stream_retry.urls
+        assert result4["handle"]["torrent_id"] == 63, result4
+
+        # 5. Persistent 504 -> actionable error naming the release.
+        api5 = FakeApi()
+        api5.add("/torrents/checkcached", data=[])
+        stream_fail = ScriptedStream([(504,), (504,)])
+        with patch("app.downloader.torbox.urllib.request.urlopen", side_effect=api5):
+            with patch("app.downloader.torbox._open_no_redirect", side_effect=stream_fail):
+                with patch("app.downloader.torbox.time.sleep", side_effect=lambda _s: None):
+                    try:
+                        downloader.submit({
+                            "title": "Youjo Senki Vol.35",
+                            "download_url": "https://mirror.example/view/35",
+                        }, "/downloads")
+                    except DownloaderError as exc:
+                        gateway_error = str(exc)
+                    else:
+                        assert False, "persistent 504 must raise DownloaderError"
+        assert "Youjo Senki Vol.35" in gateway_error, gateway_error
+        assert "504" in gateway_error, gateway_error
+        assert api5.urls_for("/torrents/createtorrent") == [], api5.calls
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+
+    # 6. Scheduler passes DB guid/torrent_hash candidates to the engine.
+    ctx = Ctx()
+    try:
+        ctx.db.set_setting("torbox_enabled", "true")
+        ctx.db.set_setting("torbox_api_key", TORBOX_KEY)
+        release_id = _insert_release(
+            ctx.db, "candidate-guid", "Candidate Release", torrent_hash=HASH,
+        )
+        fake = FakeTorboxService(state="downloading")
+        with patch("app.scheduler.build_downloader", return_value=fake):
+            submitted = ctx.scheduler.submit_torbox_download(release_id, "Candidate Release", "")
+        assert submitted["success"] is True, submitted
+        release_payload = fake.submit_calls[0][0]
+        assert release_payload["guid"] == "candidate-guid", release_payload
+        assert release_payload["torrent_hash"] == HASH, release_payload
+        assert release_payload["title"] == "Candidate Release", release_payload
+    finally:
+        ctx.close()
+    print("    [PASSED] magnet multipart, infohash magnet, /view-derived torrent, HTML reject, 504 retry, scheduler candidates.")
 
 
 # ===========================================================================
@@ -1073,6 +1260,7 @@ def main():
     tests = [
         test_engine_selection_and_qbit_adapter,
         test_torbox_submit_and_status,
+        test_torbox_submission_forms_and_fallbacks,
         test_torbox_errors_and_secret_hygiene,
         test_torbox_fetch_files_and_zip_safety,
         test_scheduler_submit_and_poll_happy_path,

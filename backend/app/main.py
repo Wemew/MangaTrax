@@ -1547,6 +1547,8 @@ async def api_release_download(release_id: int):
             link=str(target.get("link") or ""),
             missing_volumes=[float(v) for v in (missing or [])],
             source="manual",
+            guid=str(target.get("guid") or ""),
+            torrent_hash=str(target.get("torrent_hash") or ""),
         )
         if result.get("success"):
             db.log_activity("MANUAL_DOWNLOAD", f"Sent to Torbox: '{target['title']}'", "Engine: torbox")

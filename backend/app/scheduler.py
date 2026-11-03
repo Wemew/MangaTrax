@@ -758,8 +758,15 @@ class MangaScheduler:
         link: str = "",
         missing_volumes: Optional[List[float]] = None,
         source: str = "",
+        guid: str = "",
+        torrent_hash: str = "",
     ) -> Dict[str, Any]:
-        """Submit a release to Torbox and persist its handle (used by all entry points)."""
+        """Submit a release to Torbox and persist its handle (used by all entry points).
+
+        All known identifiers are passed to the engine (download_url/link/guid plus the
+        stored torrent_hash) so a release without a magnet can still be submitted via
+        an infohash-derived magnet or a derived ``/download/<id>.torrent`` URL.
+        """
         engine = "torbox"
         try:
             max_concurrent = int(self.db.get_setting("torbox_max_concurrent", "2") or 2)
@@ -781,7 +788,17 @@ class MangaScheduler:
         downloader = build_downloader(self.db, engine=engine)
         downloads_dir = self.get_downloads_dir()
         savepath = os.path.join(downloads_dir, self._safe_torrent_dirname(title))
-        release = {"download_url": download_url, "link": link, "title": title}
+        try:
+            release_row = self.db.get_release_by_id(release_id) or {}
+        except Exception:
+            release_row = {}
+        release = {
+            "download_url": download_url,
+            "link": link,
+            "title": title,
+            "guid": guid or release_row.get("guid") or "",
+            "torrent_hash": torrent_hash or release_row.get("torrent_hash") or "",
+        }
         wanted = [float(v) for v in (missing_volumes or [])]
         try:
             result = downloader.submit(release, savepath, wanted_volumes=wanted)
@@ -1581,6 +1598,7 @@ class MangaScheduler:
                                     link=rel.link,
                                     missing_volumes=[float(v) for v in (missing_vols or [])],
                                     source=feed_name,
+                                    guid=getattr(rel, "guid", "") or "",
                                 )
                                 if result.get("success"):
                                     total_sent_to_downloader += 1
@@ -2007,6 +2025,7 @@ class MangaScheduler:
                             link=rel.link,
                             missing_volumes=[float(v) for v in (missing_vols or [])],
                             source=f"Nyaa: {primary_title}",
+                            guid=getattr(rel, "guid", "") or "",
                         )
                         if result.get("success"):
                             total_sent_to_downloader += 1

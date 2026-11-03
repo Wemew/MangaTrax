@@ -45,6 +45,7 @@ TORBOX_API_TIMEOUT_SECONDS = 30.0
 TORBOX_STREAM_TIMEOUT_SECONDS = 60.0
 TORBOX_STREAM_CHUNK_BYTES = 1024 * 256
 TORBOX_MAX_FILE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB sanity cap for one file
+TORBOX_MAX_TORRENT_BYTES = 10 * 1024 * 1024  # .torrent metadata sanity cap
 TORBOX_MAX_REDIRECTS = 5
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
@@ -247,26 +248,51 @@ class TorboxDownloader:
             return payload.get("data")
         return payload
 
+    @staticmethod
+    def _multipart_body(
+        boundary: str,
+        fields: Optional[Dict[str, str]] = None,
+        file_field: Optional[str] = None,
+        filename: Optional[str] = None,
+        file_bytes: Optional[bytes] = None,
+    ) -> bytes:
+        """Build a multipart/form-data body (text fields and/or one file part)."""
+        parts: List[bytes] = []
+        for key, value in (fields or {}).items():
+            parts.append(
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode("utf-8")
+            )
+        if file_field:
+            parts.append(
+                (
+                    f"--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; "
+                    f"filename=\"{filename or 'release.torrent'}\"\r\n"
+                    "Content-Type: application/x-bittorrent\r\n\r\n"
+                ).encode("utf-8")
+                + (file_bytes or b"")
+                + b"\r\n"
+            )
+        parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+        return b"".join(parts)
+
+    def _post_multipart_fields(self, path: str, fields: Dict[str, str]) -> Any:
+        """POST a fields-only multipart/form-data body (Torbox createtorrent magnet)."""
+        boundary = f"----MangaTrax{int(time.time() * 1000)}"
+        body = self._multipart_body(boundary, fields=fields)
+        return self._request(
+            "POST", path, raw_body=body,
+            content_type=f"multipart/form-data; boundary={boundary}",
+        )
+
     def _post_multipart(
         self, path: str, fields: Dict[str, str], file_field: str, filename: str, file_bytes: bytes,
     ) -> Any:
         boundary = f"----MangaTrax{int(time.time() * 1000)}"
-        parts: List[bytes] = []
-        for key, value in fields.items():
-            parts.append(
-                f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode("utf-8")
-            )
-        parts.append(
-            (
-                f"--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; "
-                f"filename=\"{filename}\"\r\nContent-Type: application/x-bittorrent\r\n\r\n"
-            ).encode("utf-8")
-            + file_bytes
-            + b"\r\n"
+        body = self._multipart_body(
+            boundary, fields=fields, file_field=file_field, filename=filename, file_bytes=file_bytes,
         )
-        parts.append(f"--{boundary}--\r\n".encode("utf-8"))
         return self._request(
-            "POST", path, raw_body=b"".join(parts),
+            "POST", path, raw_body=body,
             content_type=f"multipart/form-data; boundary={boundary}",
         )
 
@@ -285,22 +311,177 @@ class TorboxDownloader:
             return any(str(entry).lower() == infohash for entry in data)
         return False
 
+    def _fetch_torrent_url_once(self, url: str) -> bytes:
+        """Fetch a .torrent body, validating every URL/redirect hop (no key involved)."""
+        current_url = url
+        for _hop in range(TORBOX_MAX_REDIRECTS + 1):
+            try:
+                security.validate_public_url(current_url, resolve_dns=False)
+            except security.UnsafeURLError as exc:
+                raise DownloaderError(f"Unsafe torrent URL ({exc})") from exc
+            request = urllib.request.Request(
+                current_url,
+                headers={"User-Agent": "MangaTrax/1.0", "Accept": "application/x-bittorrent,*/*"},
+            )
+            try:
+                response = _open_no_redirect(request, self.timeout)
+            except urllib.error.HTTPError as exc:
+                location = exc.headers.get("Location") if exc.headers else None
+                try:
+                    exc.close()
+                except Exception:
+                    pass
+                if exc.code in REDIRECT_STATUSES and location:
+                    current_url = urllib.parse.urljoin(current_url, location)
+                    continue
+                raise DownloaderError(f"HTTP {exc.code}") from None
+            except Exception as exc:
+                raise DownloaderError(str(exc)) from exc
+            try:
+                status = getattr(response, "status", None) or 200
+                if status in REDIRECT_STATUSES:
+                    location = response.headers.get("Location") if response.headers else None
+                    if not location:
+                        raise DownloaderError("redirect without a Location header")
+                    current_url = urllib.parse.urljoin(current_url, location)
+                    continue
+                if status != 200:
+                    raise DownloaderError(f"HTTP {status}")
+                data = response.read(TORBOX_MAX_TORRENT_BYTES + 1)
+                if len(data) > TORBOX_MAX_TORRENT_BYTES:
+                    raise DownloaderError("torrent file exceeds the size cap")
+                if not data:
+                    raise DownloaderError("empty response body")
+                return data
+            finally:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+        raise DownloaderError("too many redirects")
+
     def _fetch_torrent_bytes(self, url: str) -> bytes:
-        security.validate_public_url(url, resolve_dns=False)
-        request = urllib.request.Request(url, headers={"User-Agent": "MangaTrax/1.0"})
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                data = response.read()
-        except Exception as exc:
-            raise DownloaderError(f"Could not fetch the .torrent file: {exc}") from exc
-        if not data:
-            raise DownloaderError("The .torrent URL returned an empty body.")
-        return data
+        """Fetch + validate a bencoded torrent; one retry with backoff on failure."""
+        last_error: Optional[DownloaderError] = None
+        for attempt in (1, 2):
+            try:
+                data = self._fetch_torrent_url_once(url)
+            except DownloaderError as exc:
+                last_error = exc
+                if attempt == 1:
+                    logger.warning(
+                        "Torrent fetch from %s failed (attempt 1/2): %s; retrying in 1s.", url, exc,
+                    )
+                    time.sleep(1.0)
+                    continue
+                break
+            if not self._looks_like_torrent(data):
+                raise DownloaderFileError(
+                    f"'{url}' did not return a bencoded .torrent file (likely an HTML/JSON page)."
+                )
+            return data
+        raise DownloaderError(f"Could not fetch the .torrent file from {url} after 2 attempts: {last_error}")
+
+    @staticmethod
+    def _looks_like_torrent(data: bytes) -> bool:
+        """A bencoded torrent starts with ``d`` and contains the ``4:info`` key."""
+        if not data or data[:1] != b"d":
+            return False
+        head = data[:512].lower()
+        if b"<html" in head or b"<!doctype" in head or head.lstrip().startswith(b"{"):
+            return False
+        return b"4:info" in data
+
+    _CANDIDATE_FIELDS = ("download_url", "link", "guid", "magnet", "torrent_url", "torrent_hash")
+
+    def _release_candidates(self, release: Any) -> List[str]:
+        values: List[str] = []
+        for field in self._CANDIDATE_FIELDS:
+            value = _release_value(release, field)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text and text not in values:
+                values.append(text)
+        return values
+
+    @staticmethod
+    def _infohash_from_text(text: str) -> Optional[str]:
+        value = str(text or "").strip()
+        if not value:
+            return None
+        infohash = extract_torrent_hash(value)
+        if infohash:
+            return infohash
+        if re.fullmatch(r"[0-9a-fA-F]{40}", value):
+            return value.lower()
+        if re.fullmatch(r"[A-Za-z2-7]{32}", value):
+            return extract_torrent_hash(f"magnet:?xt=urn:btih:{value}")
+        return None
+
+    def _resolve_submission(self, release: Any) -> Dict[str, Any]:
+        """Resolve a submission form: magnet -> infohash magnet -> torrent URL/file.
+
+        Candidates come from download_url/link/guid/magnet/torrent_url/torrent_hash.
+        A ``/view/<id>`` URL is turned into ``<base>/download/<id>.torrent`` before any
+        fetch, and the fetched bytes must be a real bencoded torrent.
+        """
+        candidates = self._release_candidates(release)
+        title = str(_release_value(release, "title") or "").strip()
+        for candidate in candidates:
+            if candidate.lower().startswith("magnet:"):
+                return {
+                    "form": "magnet", "magnet": candidate,
+                    "infohash": extract_torrent_hash(candidate), "tried": candidates,
+                }
+        for candidate in candidates:
+            infohash = self._infohash_from_text(candidate)
+            if infohash:
+                return {
+                    "form": "magnet", "magnet": f"magnet:?xt=urn:btih:{infohash}",
+                    "infohash": infohash, "tried": candidates,
+                }
+
+        derived_urls: List[str] = []
+        torrent_urls: List[str] = []
+        for candidate in candidates:
+            plain = candidate.split("?", 1)[0]
+            match = re.match(r"^(?P<base>.+?)/view/(?P<id>\d+)$", plain)
+            if match:
+                derived = f"{match.group('base')}/download/{match.group('id')}.torrent"
+                derived_urls.append(derived)
+                torrent_urls.append(derived)
+        for candidate in candidates:
+            plain = candidate.split("?", 1)[0]
+            if plain.lower().endswith(".torrent") and plain not in torrent_urls:
+                torrent_urls.append(plain)
+
+        fetch_errors: List[str] = []
+        for url in torrent_urls:
+            try:
+                data = self._fetch_torrent_bytes(url)
+                form = "derived-torrent-url" if url in derived_urls else "torrent-file"
+                return {"form": form, "torrent_bytes": data, "torrent_url": url, "tried": candidates}
+            except DownloaderError as exc:
+                fetch_errors.append(f"{url}: {exc}")
+
+        detail = "; ".join(fetch_errors[:3]) if fetch_errors else "none"
+        raise DownloaderError(
+            f"Torbox submit for '{title or 'unknown release'}' found no magnet or valid .torrent "
+            f"metadata (candidates: {candidates or 'none'}; derived torrent URLs: "
+            f"{derived_urls or 'none'}; fetch errors: {detail}). "
+            "Attach a magnet link or a working .torrent URL."
+        )
 
     def submit(self, release: Any, savepath: str, wanted_volumes: Optional[List[float]] = None) -> Dict[str, Any]:
         """Create the torrent in Torbox and return the persisted handle dict."""
-        download_url = _release_value(release, "download_url", "link", "magnet") or ""
-        infohash = extract_torrent_hash(str(download_url))
+        title = str(_release_value(release, "title") or "").strip()
+        # Resolve a *real* identifier first: magnet -> infohash magnet -> derived
+        # /download/<id>.torrent (from /view/<id>) -> validated .torrent bytes.  A view
+        # page or HTML/JSON body can never be uploaded as a torrent.
+        resolution = self._resolve_submission(release)
+        form = str(resolution.get("form") or "magnet")
+        infohash = resolution.get("infohash") or extract_torrent_hash(resolution.get("magnet") or "")
         cached = False
         if infohash:
             try:
@@ -311,15 +492,19 @@ class TorboxDownloader:
             except DownloaderError as exc:
                 logger.debug("Torbox checkcached failed (continuing with submit): %s", exc)
 
-        if str(download_url).startswith("magnet:"):
-            data = self._request("POST", "/torrents/createtorrent", params={"magnet": str(download_url)})
-        elif infohash:
-            # No magnet but a known infohash: submit the magnet form Torbox understands.
-            magnet = f"magnet:?xt=urn:btih:{infohash}"
-            data = self._request("POST", "/torrents/createtorrent", params={"magnet": magnet})
+        if form == "magnet":
+            # TorBox expects multipart/form-data with a `magnet` field — the magnet must
+            # NOT be a query parameter (the API answers 400 "provide a file or magnet").
+            logger.info("Torbox submit for '%s' using submission form 'magnet'.", title)
+            data = self._post_multipart_fields("/torrents/createtorrent", {"magnet": resolution["magnet"]})
         else:
-            torrent_bytes = self._fetch_torrent_bytes(str(download_url))
-            data = self._post_multipart("/torrents/createtorrent", {}, "file", "release.torrent", torrent_bytes)
+            logger.info(
+                "Torbox submit for '%s' using submission form '%s' (%s).",
+                title, form, resolution.get("torrent_url") or "",
+            )
+            data = self._post_multipart(
+                "/torrents/createtorrent", {}, "file", "release.torrent", resolution["torrent_bytes"],
+            )
 
         if isinstance(data, dict):
             torrent_id = data.get("torrent_id") or data.get("id")
