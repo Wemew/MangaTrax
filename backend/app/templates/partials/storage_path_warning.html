@@ -1,0 +1,3 @@
+{% if probe and not probe.writable %}
+<p class="text-[10px] text-rose-400 mt-1">Not writable by uid {{ probe.uid }}: {{ probe.error }} (errno {{ probe.errno }}). {{ action }} check mount ownership/ACL (PUID/PGID).</p>
+{% endif %}

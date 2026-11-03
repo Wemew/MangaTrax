@@ -1,0 +1,25 @@
+{% if storage_health and not storage_health.ok %}
+<div class="bg-rose-500/10 border border-rose-500/40 rounded-2xl p-4 shadow-lg">
+    <div class="flex items-start gap-3">
+        <i data-lucide="alert-triangle" class="w-5 h-5 text-rose-400 shrink-0 mt-0.5"></i>
+        <div class="space-y-1">
+            <h3 class="text-sm font-bold text-rose-200">Storage permission problem detected</h3>
+            {% if storage_health.downloads and not storage_health.downloads.writable %}
+            <p class="text-xs text-rose-200/90">
+                <strong>Downloads folder</strong> '{{ storage_health.downloads.path }}' is not writable by the container user
+                (uid {{ storage_health.downloads.uid }}): {{ storage_health.downloads.error }} (errno {{ storage_health.downloads.errno }}).
+                Downloads will fail — check the mount ownership/ACLs and PUID/PGID.
+            </p>
+            {% endif %}
+            {% if storage_health.staging and not storage_health.staging.writable %}
+            <p class="text-xs text-rose-200/90">
+                <strong>Staging folder</strong> '{{ storage_health.staging.path }}' is not writable by the container user
+                (uid {{ storage_health.staging.uid }}): {{ storage_health.staging.error }} (errno {{ storage_health.staging.errno }}).
+                Files will download but cannot be moved to staging — check the mount ownership/ACLs and PUID/PGID.
+            </p>
+            {% endif %}
+            <p class="text-[10px] text-rose-300/70">Fix the host bind-mount ownership/ACL (e.g. chown the mount to the container PUID:PGID), then reload this page.</p>
+        </div>
+    </div>
+</div>
+{% endif %}

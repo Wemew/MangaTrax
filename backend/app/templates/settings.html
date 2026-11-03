@@ -236,11 +236,13 @@
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Downloads Directory Path (raw)</label>
                     <input type="text" id="setting-downloads-dir" value="{{ settings.downloads_dir or '/downloads' }}" required class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-emerald-500">
                     <p class="text-[10px] text-slate-500 mt-1">Both qBittorrent and Torbox save raw downloads here. Must differ from the staging directory; keep both on the same drive so moves are atomic renames.</p>
+                    {% if storage_health %}{% with probe=storage_health.downloads, action="Downloads will fail —" %}{% include "partials/storage_path_warning.html" %}{% endwith %}{% endif %}
                 </div>
                 <div>
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Staging Directory Path (final)</label>
                     <input type="text" id="setting-staging-dir" value="{{ settings.staging_dir }}" required class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-emerald-500">
                     <p class="text-[10px] text-slate-500 mt-1">Tagged .cbz files are moved here (relative subfolders preserved) for manual import into Calibre.</p>
+                    {% if storage_health %}{% with probe=storage_health.staging, action="Tagged files cannot be moved here —" %}{% include "partials/storage_path_warning.html" %}{% endwith %}{% endif %}
                 </div>
             </div>
 
@@ -779,7 +781,14 @@ async function saveSettings(e) {
         });
         const data = await res.json();
         if (data.status === 'success') {
-            showToast('Settings saved successfully!', 'success');
+            const storage = data.storage || {};
+            const badPaths = Object.values(storage.paths || {}).filter(p => p && !p.writable);
+            if (badPaths.length) {
+                const first = badPaths[0];
+                showToast(`Settings saved, but '${first.path}' is not writable (uid ${first.uid}, errno ${first.errno}: ${first.error}). Check mount ownership/ACL (PUID/PGID).`, 'error');
+            } else {
+                showToast('Settings saved successfully!', 'success');
+            }
         } else {
             showToast('Failed to save settings', 'error');
         }

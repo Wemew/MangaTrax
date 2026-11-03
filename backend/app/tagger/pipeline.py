@@ -26,6 +26,7 @@ from app.parser import (
     split_series_candidate_parts,
 )
 from app.tagger import cbz_tagger
+from app import storage_health
 
 logger = logging.getLogger("mangatrax.tagger.pipeline")
 
@@ -285,7 +286,15 @@ def process_downloads_to_staging(
                 except Exception as exc:  # pragma: no cover - audit must not break routing
                     logger.debug("Could not audit staged move: %s", exc)
             except Exception as exc:  # one corrupt archive must not abort the pass
-                logger.warning("Failed to route '%s': %s", source_path, exc)
+                hint = ""
+                try:
+                    hint = storage_health.format_hint(staging_dir, exc)
+                except Exception:  # diagnostics must never abort the pass either
+                    hint = ""
+                logger.warning(
+                    "Failed to route '%s': %s%s",
+                    source_path, exc, f"; {hint}" if hint else "",
+                )
                 result["failed"] += 1
                 failed_files.append(filename)
 

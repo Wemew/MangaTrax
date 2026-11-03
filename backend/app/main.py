@@ -19,6 +19,7 @@ from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
+from app import storage_health
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
 from app.downloader.base import DownloaderError, parse_queued_handle_id
 from app.downloader.torbox import TorboxDownloader
@@ -75,6 +76,10 @@ async def lifespan(app: FastAPI):
     # for ~2 minutes on a real library); they are now the FIRST action of the
     # scheduler worker thread (MangaScheduler.perform_initial_sync), which is
     # exception-shielded and refreshes the UI data as it completes.
+    try:
+        _refresh_storage_health("startup")
+    except Exception as exc:  # pragma: no cover - diagnostics must never block startup
+        logger.debug("Startup storage probe failed: %s", exc)
     scheduler.start()
     logger.info("Web UI is serving; the initial Calibre sync runs in the background worker.")
     yield
@@ -199,6 +204,46 @@ _STAGING_FILENAME_MAX_LENGTH = 512
 
 def _staging_dir_setting() -> str:
     return db.get_setting("staging_dir", "/staging")
+
+
+def _storage_health_paths() -> Dict[str, str]:
+    """The two pipeline mounts probed for writability."""
+    return {
+        "downloads": scheduler.get_downloads_dir(create=False),
+        "staging": _staging_dir_setting(),
+    }
+
+
+def _refresh_storage_health(reason: str = "") -> Dict[str, Any]:
+    """Probe both pipeline folders, persist the result and warn about unwritable ones."""
+    health = storage_health.build_storage_health(_storage_health_paths())
+    try:
+        db.set_setting("storage_health_json", json.dumps(health))
+    except Exception as exc:  # pragma: no cover - diagnostics must never break startup
+        logger.debug("Could not persist storage health: %s", exc)
+    for label, probe in (health.get("paths") or {}).items():
+        if not probe.get("writable"):
+            logger.warning(storage_health.warning_message(label, probe))
+    if reason:
+        logger.info("Storage health refreshed (%s): ok=%s", reason, health.get("ok"))
+    return health
+
+
+def _storage_health_payload(force: bool = False) -> Dict[str, Any]:
+    """Return the persisted probe when it still matches the configured paths."""
+    if not force:
+        try:
+            raw = db.get_setting("storage_health_json", "")
+            stored = json.loads(raw) if raw else {}
+            current = _storage_health_paths()
+            if stored.get("paths") and all(
+                (stored.get("paths") or {}).get(label, {}).get("path") == value
+                for label, value in current.items()
+            ):
+                return stored
+        except Exception:
+            pass
+    return _refresh_storage_health("lazy")
 
 
 def _staging_cbz_entries() -> list:
@@ -607,7 +652,12 @@ def _aggregate_eta(active_torrents: list) -> Optional[int]:
 @app.get("/health")
 async def health_check():
     """Liveness probe (exempt from auth so Docker/Traefik health checks work)."""
-    return JSONResponse(AUTH.health_payload())
+    payload = AUTH.health_payload()
+    try:
+        payload["storage"] = _storage_health_payload()
+    except Exception as exc:  # pragma: no cover - /health must never fail on diagnostics
+        payload["storage"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    return JSONResponse(payload)
 
 
 @app.get("/auth/login")
@@ -960,6 +1010,7 @@ async def downloads_view(request: Request):
             "torrents": torrents,
             "staging_dir": staging_dir,
             "downloads_dir": downloads_dir,
+            "storage_health": _storage_health_payload(),
             "staging_files": staging_files,
             "awaiting_series": awaiting_series,
             "awaiting_total": awaiting_total,
@@ -1005,6 +1056,7 @@ async def settings_view(request: Request):
             "settings": settings,
             "prioritized_groups": prioritized_groups,
             "torbox_api_key_set": torbox_key_set,
+            "storage_health": _storage_health_payload(),
             "debug_actions_enabled": AUTH_CONFIG.debug_actions
         }
     )
@@ -1936,7 +1988,13 @@ async def api_save_settings(payload: Dict[str, Any]):
                 f"Nyaa base URL set to {provided['nyaa_base_url']}; repointed {migrated} built-in feed(s).",
             )
     db.log_activity("SETTINGS_UPDATED", "Application settings updated")
-    return JSONResponse({"status": "success"})
+    storage = {}
+    if "staging_dir" in provided or "downloads_dir" in provided:
+        try:
+            storage = _refresh_storage_health("settings")
+        except Exception as exc:  # pragma: no cover - save must succeed regardless
+            logger.debug("Storage probe after settings save failed: %s", exc)
+    return JSONResponse({"status": "success", "storage": storage})
 
 @app.post("/api/settings/test-webhook")
 async def api_test_webhook(payload: Optional[Dict[str, Any]] = None):
