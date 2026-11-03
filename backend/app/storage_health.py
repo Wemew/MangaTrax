@@ -158,8 +158,15 @@ def format_hint(path: str, exc: Optional[BaseException] = None) -> str:
 
 def warning_message(label: str, probe: Dict[str, Any]) -> str:
     """Warning used at startup/settings-save for one unwritable folder."""
+    errno_value = probe.get("errno")
+    error = str(probe.get("error") or "").strip()
+    if errno_value:
+        reason = f"errno {errno_value} {error}".strip()
+    else:
+        # Missing folder / not a directory: no errno, but the reason is known.
+        reason = error or "path does not exist"
     return (
         f"Storage check: '{probe.get('path')}' ({label}) is NOT writable by uid "
-        f"{probe.get('uid')} (errno {probe.get('errno')} {probe.get('error') or ''}); "
+        f"{probe.get('uid')} ({reason}); "
         "move/route operations will fail. Fix the host mount ownership/ACL (PUID/PGID)."
     )
