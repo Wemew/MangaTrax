@@ -280,6 +280,35 @@ class MangaScheduler:
             return numbered
         return series
 
+    def _explicit_chapter_range_reason(self, rel, known_series_keys: Set[str]) -> str:
+        """Audit reason for an explicit chapter-RANGE release of a known series.
+
+        Explicit chapter markers are always discarded (pre-existing policy).  Chapter
+        RANGES ("Solo Leveling Ch1-50", "Ch 1-50") are batches of the same policy and
+        deserve the same audit trail as the marker-less guard: when the clean series
+        is in the Calibre library / tracked rows, log ``CHAPTER_DISCARDED`` with the
+        range.  Single explicit chapters ("Chainsaw Man Ch. 180") and unknown series
+        keep their previous silent path, so the existing behaviour is unchanged.
+        """
+        title = (getattr(rel, "title", "") or "").strip()
+        if not title or not known_series_keys:
+            return ""
+        try:
+            parsed = extract_manga_bundle_and_volumes(title)
+        except Exception:  # pragma: no cover - guard must never break ingestion
+            return ""
+        ranges = parsed.get("chapter_ranges") or []
+        if not ranges:
+            return ""
+        series = (parsed.get("series_name") or "").strip()
+        series_key = normalize_text(series)
+        if not series_key or series_key not in known_series_keys:
+            return ""
+        start, end = ranges[0][0], ranges[0][1]
+        return (
+            f"explicit chapter range {start:g}-{end:g} of known series '{series}'"
+        )
+
     def _discard_unmarked_chapter(self, rel, known_series_keys: Set[str]) -> bool:
         """Discard and audit-log a context-proven marker-less chapter release.
 
@@ -940,8 +969,21 @@ class MangaScheduler:
                 feed_requested = 0
 
                 for rel in releases:
-                    # Discard pure chapter updates and light novels
-                    if is_chapter_only(rel.title) or is_light_novel(rel.title):
+                    # Discard pure chapter updates and light novels.  Explicit chapter
+                    # markers ("Ch1-50", "Chapter 180", "#12") are always discarded
+                    # (existing policy); chapter RANGES of a known series are audited
+                    # like the context-guarded marker-less path, single chapters keep
+                    # their previous silent path.
+                    if is_chapter_only(rel.title):
+                        range_reason = self._explicit_chapter_range_reason(rel, known_series_keys)
+                        if range_reason:
+                            self._log_activity(
+                                "CHAPTER_DISCARDED",
+                                f"Discarded chapter range release: '{rel.title}'",
+                                range_reason,
+                            )
+                        continue
+                    if is_light_novel(rel.title):
                         continue
                     # Marker-less chapters ("Chainsaw Man 180"): discarded only when the
                     # title without its trailing number names a series we already know,

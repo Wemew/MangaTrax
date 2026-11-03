@@ -183,13 +183,38 @@ _CHAPTER_RANGE_TAIL_RE = re.compile(
     r"\+\s*(\d{1,4}(?:\.\d+)?)\s*[-–—~]\s*(\d{1,4}(?:\.\d+)?)"
 )
 
-# Explicit chapter markers, e.g. "Chapter 250", "Ch. 250", "c374", "#01".  The
-# trailing number requirement keeps ordinary words such as "Chronicles" safe.
+# Explicit chapter markers, e.g. "Chapter 250", "Ch. 250", "Ch250", "c374", "#01".
+# The marker may be followed IMMEDIATELY by the number ("Ch1-50") -- requiring a
+# separator made "Ch1-50" fall through to the bare volume-range bundle path and
+# produce 50 phantom volumes.  The trailing number requirement keeps ordinary words
+# such as "Chronicles" safe.
 _EXPLICIT_CHAPTER_NUMBER_RE = re.compile(
-    r"(?i)(?:\b(?:chapters?|chap|ch)\.?\s*[-–—:]?\s*(\d{1,4}(?:\.\d+)?)\b"
-    r"|\bc(\d{1,4}(?:\.\d+)?)\b"
+    r"(?i)(?:\b(?:chapters?|chap|ch)\.?\s*[-–—:]?\s*(\d{1,4}(?:\.\d+)?)"
+    r"|\bc\.?\s*[-–—:]?\s*(\d{1,4}(?:\.\d+)?)"
     r"|#\s*(\d{1,4}(?:\.\d+)?))"
 )
+# Explicit chapter RANGE, same marker forms, e.g. "Ch1-50", "Ch. 1-50",
+# "Chapter1-50", "c1-50", "#1-50", "Ch 1-50".  Used to record chapter_ranges
+# (defect B: spaced forms previously dropped the range and kept only chapter_number).
+_EXPLICIT_CHAPTER_RANGE_RE = re.compile(
+    r"(?i)(?:\b(?:chapters?|chap|ch)\.?\s*[-–—:]?\s*|\bc\.?\s*[-–—:]?\s*|#\s*)"
+    r"(?P<start>\d{1,4}(?:\.\d+)?)\s*[-–—~]\s*(?P<end>\d{1,4}(?:\.\d+)?)"
+)
+# A trailing standalone FORMAT descriptor in a series key ("Solo Leveling Manga",
+# "... Webtoon", "... Comic").  It is a format word, not part of the name, and it
+# breaks Calibre matching ("Solo Leveling Manga" scores ~0.65 against the library's
+# "Solo Leveling").  "Novel" is deliberately NOT included: spec §9.2 keeps it
+# ("Some Brand New Novel" is a real series name).
+_TRAILING_FORMAT_WORD_RE = re.compile(
+    r"(?i)\s*\b(?:manga|manhwa|manhua|webtoon|comic|comics)\s*$"
+)
+
+
+def strip_trailing_format_word(name: str) -> str:
+    """Remove a trailing standalone format descriptor from a series key."""
+    if not name:
+        return name
+    return _TRAILING_FORMAT_WORD_RE.sub("", str(name)).strip(" -–—:,|.")
 # Re-release / fix revision marker: "(f)" = 1, "(f2)" = second, "(f10)" = tenth.
 # Case-insensitive; bracket style accepted both ways.  It is metadata, never a
 # series/volume/group signal.
@@ -387,6 +412,10 @@ def _parse_bare_volume_range(title: str) -> Optional[Dict[str, Any]]:
     if not title:
         return None
     if re.search(r"#\s*\d", title):
+        return None
+    # A chapter marker before the numeric range means this is a CHAPTER range, not
+    # a volume bundle ("Solo Leveling Ch1-50"): never let Pattern 1b fire.
+    if _EXPLICIT_CHAPTER_NUMBER_RE.search(title):
         return None
     m = _BARE_VOLUME_RANGE_RE.match(title.strip())
     if not m:
@@ -652,7 +681,7 @@ def is_valid_group_candidate(clean: str) -> bool:
     if lower in BUZZWORDS:
         return False
     # If all tokens in it are buzzwords or technical markers
-    tokens = [t.strip().lower() for t in re.split(r"[\s\-_.]+", clean) if t.strip()]
+    tokens = [t.strip().lower() for t in re.split(r"[\s\-_.+,&/]+", clean) if t.strip()]
     if tokens and all(t in BUZZWORDS or re.match(r"^\d+p?$", t) or re.match(r"^(?:19|20)\d{2}$", t) for t in tokens):
         return False
     return True
@@ -909,7 +938,13 @@ def extract_release_groups(raw_title: str, known_groups: Optional[Iterable[str]]
         text = blocks[index]["text"].strip()
         if not is_valid_group_candidate(text) or _is_known_publisher(text):
             return
-        for part in (_split_group_list(text) or [text]):
+        split = _split_group_list(text)
+        if split is None and _GROUP_SPLIT_RE.search(text):
+            # A multi-piece block whose pieces are ALL format words/publishers
+            # ("Webtoon, CBZ") is metadata, not a group -- never fall back to the
+            # whole string.
+            return
+        for part in (split or [text]):
             _add(part)
 
     # 1. Known/prioritized groups win (bracket order; credits excluded).
@@ -1094,8 +1129,14 @@ def is_chapter_only(raw_title: str) -> bool:
     if has_volume:
         return False
 
-    # 1. Explicit chapter keywords: ch, chapter, c
-    if re.search(r"\b(?:chapters?|ch)\b\.?\s*\d+", title) or re.search(r"\bc\d+\b", title) or re.search(r"[\(\[]c\d+", title):
+    # 1. Explicit chapter keywords: chapter/chap/ch/c/#.  The marker may be followed
+    #    immediately by the number ("Ch1-50", "Chapter1-50") -- requiring a separator
+    #    sent those titles into the bare volume-range bundle path (50 phantom volumes).
+    if (
+        re.search(r"(?i)\b(?:chapters?|chap|ch)\.?\s*[-–—:]?\s*\d{1,4}", title)
+        or re.search(r"(?i)\bc\.?\s*[-–—:]?\s*\d{1,4}", title)
+        or re.search(r"#\s*\d{1,4}", title)
+    ):
         return True
 
     # 2. Explicit chapter symbols: #01, #100
@@ -1192,9 +1233,22 @@ def clean_manga_title(raw_title: str) -> str:
     cleaned = re.sub(r"\[.*?\]", bracket_replacer, cleaned)
     cleaned = re.sub(r"\(.*?\)", bracket_replacer, cleaned)
 
-    # For mixed updates: strip chapter notations outside brackets so only volumes remain
-    cleaned = re.sub(r"(?i)\b(?:chapters?|ch)\b\.?\s*\d+(?:\s*[-–—~to]+\s*\d+)?(?:\s*\+\s*extra)?", " ", cleaned)
-    cleaned = re.sub(r"(?i)\bc\d+(?:\s*[-–—~to]+\s*c?\d+)?\b", " ", cleaned)
+    # For mixed updates: strip chapter notations outside brackets so only volumes remain.
+    # The marker may be followed immediately by the number ("Ch1-50", "Chapter1-50")
+    # and may carry a range; those must not survive into the series key.
+    cleaned = re.sub(
+        r"(?i)\b(?:chapters?|chap|ch)\.?\s*[-–—:]?\s*\d{1,4}(?:\.\d+)?"
+        r"(?:\s*[-–—~]\s*\d{1,4}(?:\.\d+)?)?(?:\s*\+\s*extra)?",
+        " ", cleaned,
+    )
+    cleaned = re.sub(
+        r"(?i)\bc\.?\s*\d{1,4}(?:\.\d+)?(?:\s*[-–—~]\s*c?\d{1,4}(?:\.\d+)?)?\b",
+        " ", cleaned,
+    )
+    cleaned = re.sub(
+        r"#\s*\d{1,4}(?:\.\d+)?(?:\s*[-–—~]\s*\d{1,4}(?:\.\d+)?)?",
+        " ", cleaned,
+    )
 
     # Strip format buzzwords, scene tokens, and status tags
     buzzwords = [
@@ -1218,7 +1272,10 @@ def clean_manga_title(raw_title: str) -> str:
     cleaned = re.sub(r'\b(?:19|20)\d{2}\b(?=\s*[-–—]\s*[A-Za-z0-9_]+)', ' ', cleaned)
 
     cleaned = re.sub(r"^[\s\-–—:;,|.]+|[\s\-–—:;,|.]+$", "", cleaned)
-    return " ".join(cleaned.split())
+    cleaned = " ".join(cleaned.split())
+    # A trailing standalone format descriptor ("Solo Leveling Manga") is not part of
+    # the series key -- Calibre stores "Solo Leveling".  "Novel" is preserved.
+    return strip_trailing_format_word(cleaned)
 
 def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """
@@ -1308,6 +1365,24 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
                     result["chapter_number"] = float(trailing.group(1))
                 except (TypeError, ValueError):
                     pass
+
+    # Explicit chapter RANGES are chapter data, not volumes: record them for both
+    # the no-separator ("Ch1-50") and spaced ("Ch 1-50") forms so chapter_ranges /
+    # chapter_start / chapter_end carry the real range.
+    chapter_range_match = _EXPLICIT_CHAPTER_RANGE_RE.search(raw_title)
+    if chapter_range_match:
+        try:
+            range_start = float(chapter_range_match.group("start"))
+            range_end = float(chapter_range_match.group("end"))
+        except (TypeError, ValueError):
+            range_start = range_end = None
+        if range_start is not None and range_end is not None:
+            span = [min(range_start, range_end), max(range_start, range_end)]
+            result["chapter_ranges"] = [span]
+            result["chapter_start"] = span[0]
+            result["chapter_end"] = span[1]
+            if result["chapter_number"] is None:
+                result["chapter_number"] = span[0]
 
     # Chapter-as-volume idiom: volumes come from the "v<X>-<Y>" half, NOT from the
     # chapter numbers (chapters 1-9 map to volumes 1-2, never volumes 1-9).
