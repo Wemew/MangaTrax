@@ -1537,7 +1537,7 @@ class MangaScheduler:
     def _torbox_progress_callback(self, release_id: int, total_bytes: int):
         """Throttled progress callback: persists at most every 2 s / 1 %."""
         tracker = {
-            "label": "", "file_written": 0, "done": 0,
+            "files": {}, "lock": threading.Lock(),
             "started": time.monotonic(), "last_save": 0.0, "last_pct": -1.0,
         }
 
@@ -1548,14 +1548,10 @@ class MangaScheduler:
             except (TypeError, ValueError):
                 return
             name = str(label or "")
-            if name != tracker["label"]:
-                if tracker["label"]:
-                    tracker["done"] += tracker["file_written"]
-                tracker["label"] = name
-                tracker["file_written"] = 0
-            tracker["file_written"] = max(tracker["file_written"], written)
+            with tracker["lock"]:
+                tracker["files"][name] = max(tracker["files"].get(name, 0), written)
+                downloaded = sum(tracker["files"].values())
             total = int(total_bytes or 0)
-            downloaded = tracker["done"] + tracker["file_written"]
             if total:
                 downloaded = min(downloaded, total)
             pct = (downloaded / total * 100.0) if total else 0.0
@@ -1738,6 +1734,23 @@ class MangaScheduler:
                 self.refresh_downloads_inventory()
             except Exception as exc:
                 logger.debug("Inventory refresh after download failed: %s", exc)
+            try:
+                connections = max([int(item.get("connections") or 1) for item in (saved or [])] or [1])
+            except (TypeError, ValueError):
+                connections = 1
+            per_file = [
+                {
+                    "name": item.get("name"), "bytes": int(item.get("size") or 0),
+                    "seconds": round(float(item.get("seconds") or 0.0), 1),
+                    "connections": int(item.get("connections") or 1),
+                }
+                for item in (saved or [])
+            ]
+            logger.info(
+                "Torbox fetch aggregate for '%s': %s file(s), %.2f GiB in %.1fs = %.1f MiB/s (%s conns max)",
+                title, len(saved or []), downloaded_bytes / (1024 ** 3),
+                fetch_seconds, speed_bps / (1024 ** 2), connections,
+            )
             latency = {
                 "ready_detected_at": ready_at,
                 "fetch_started_at": fetch_started_iso,
@@ -1749,6 +1762,8 @@ class MangaScheduler:
                 "downloaded_bytes": downloaded_bytes,
                 "total_bytes": total_bytes,
                 "speed_bps": speed_bps,
+                "connections": connections,
+                "per_file": per_file,
             }
             logger.info(
                 "Torbox latency for '%s': ready→fetch %.1fs, fetch %.1fs (%.2f GiB at %.1f MiB/s), route %.1fs",

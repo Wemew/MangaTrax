@@ -48,6 +48,14 @@ def build_downloader(db, qbit_client=None, engine: Optional[str] = None) -> Down
         except (TypeError, ValueError):
             max_download_gb = 64.0
         max_download_gb = max(1.0, min(max_download_gb, 10240.0))
+        try:
+            download_concurrency = int(db.get_setting("torbox_download_concurrency", "4") or 4)
+        except (TypeError, ValueError):
+            download_concurrency = 4
+        try:
+            parallel_chunks = int(db.get_setting("torbox_parallel_chunks", "4") or 4)
+        except (TypeError, ValueError):
+            parallel_chunks = 4
         return TorboxDownloader(
             api_key=db.get_setting("torbox_api_key", "") or "",
             enabled=as_bool(db.get_setting("torbox_enabled", "false"), default=False),
@@ -55,6 +63,8 @@ def build_downloader(db, qbit_client=None, engine: Optional[str] = None) -> Down
                 db.get_setting("torbox_delete_after_download", "true"), default=True,
             ),
             max_file_bytes=int(max_download_gb * 1024 * 1024 * 1024),
+            max_concurrency=download_concurrency,
+            parallel_chunks=parallel_chunks,
         )
     if qbit_client is None:
         from app.downloader.qbit import QBitClient

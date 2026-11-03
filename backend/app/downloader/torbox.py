@@ -20,10 +20,12 @@ import os
 import re
 import shutil
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -52,6 +54,13 @@ TORBOX_STREAM_CHUNK_BYTES = 1024 * 256
 TORBOX_MAX_FILE_BYTES = 64 * 1024 * 1024 * 1024
 TORBOX_ZIP_MAX_FILES = 20  # whole-torrent zips only for small bundles
 TORBOX_ZIP_SAFETY_RATIO = 0.9  # archive must be comfortably under the cap
+# Throughput (task-31): parallel per-file downloads and ranged multi-connection fetch.
+TORBOX_DEFAULT_CONCURRENCY = 4
+TORBOX_MAX_CONCURRENCY = 16
+TORBOX_DEFAULT_PARALLEL_CHUNKS = 4
+TORBOX_MAX_PARALLEL_CHUNKS = 8
+TORBOX_RANGE_THRESHOLD_BYTES = 16 * 1024 * 1024  # only ranged-fetch larger files
+_RANGE_FALLBACK = object()
 TORBOX_MAX_TORRENT_BYTES = 10 * 1024 * 1024  # .torrent metadata sanity cap
 TORBOX_MAX_REDIRECTS = 5
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
@@ -147,6 +156,10 @@ def _filesystem_error(action: str, path: str, exc: OSError) -> DownloaderFileErr
     )
 
 
+class _RangeUnsupported(Exception):
+    """Internal marker: server ignored Range (200) -> fall back to single stream."""
+
+
 class TorboxDownloader:
     """Torbox implementation of :class:`DownloaderClient`."""
 
@@ -160,6 +173,8 @@ class TorboxDownloader:
         delete_after_download: bool = True,
         timeout: float = TORBOX_API_TIMEOUT_SECONDS,
         max_file_bytes: int = TORBOX_MAX_FILE_BYTES,
+        max_concurrency: int = TORBOX_DEFAULT_CONCURRENCY,
+        parallel_chunks: int = TORBOX_DEFAULT_PARALLEL_CHUNKS,
     ):
         self.api_key = (api_key or "").strip()
         self.base_url = (base_url or TORBOX_API_BASE).rstrip("/")
@@ -167,6 +182,9 @@ class TorboxDownloader:
         self.delete_after_download = bool(delete_after_download)
         self.timeout = float(timeout or TORBOX_API_TIMEOUT_SECONDS)
         self.max_file_bytes = int(max_file_bytes or TORBOX_MAX_FILE_BYTES)
+        self.max_concurrency = max(1, min(int(max_concurrency or TORBOX_DEFAULT_CONCURRENCY), TORBOX_MAX_CONCURRENCY))
+        self.parallel_chunks = max(1, min(int(parallel_chunks or TORBOX_DEFAULT_PARALLEL_CHUNKS), TORBOX_MAX_PARALLEL_CHUNKS))
+        self._throttle_events = 0
 
     def __repr__(self) -> str:
         """Masked representation: ``%r``/tracebacks can never leak the API key."""
@@ -847,13 +865,227 @@ class TorboxDownloader:
             f"configured cap of {cap_gb:g} GiB (torbox_max_download_gb)."
         )
 
-    def _download_to(self, url: str, dest_dir: str, name: str, progress_cb=None) -> Dict[str, Any]:
+    # -- HTTP Range (task-31) ----------------------------------------------
+    def _open_range(self, url: str, start: int, end: int):
+        current_url = url
+        for _hop in range(TORBOX_MAX_REDIRECTS + 1):
+            try:
+                security.validate_public_url(current_url, resolve_dns=False)
+            except security.UnsafeURLError as exc:
+                raise DownloaderFileError(f"Blocked unsafe download URL ({exc})") from exc
+            request = urllib.request.Request(
+                current_url,
+                headers={"User-Agent": "MangaTrax/1.0", "Range": f"bytes={start}-{end}"},
+            )
+            try:
+                response = _open_no_redirect(request, TORBOX_STREAM_TIMEOUT_SECONDS)
+            except urllib.error.HTTPError as exc:
+                location = exc.headers.get("Location") if exc.headers else None
+                try:
+                    exc.close()
+                except Exception:
+                    pass
+                if exc.code in REDIRECT_STATUSES and location:
+                    current_url = urllib.parse.urljoin(current_url, location)
+                    continue
+                raise DownloaderFileError(
+                    f"Download failed (HTTP {exc.code}) for range {start}-{end}."
+                ) from None
+            status = getattr(response, "status", None) or 200
+            if status in REDIRECT_STATUSES:
+                location = response.headers.get("Location") if response.headers else None
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                if not location:
+                    raise DownloaderFileError(f"Redirect without Location for range {start}-{end}.")
+                current_url = urllib.parse.urljoin(current_url, location)
+                continue
+            return response
+        raise DownloaderFileError(f"Too many redirects downloading range {start}-{end}.")
+
+    @staticmethod
+    def _parse_content_range(value: Optional[str]) -> int:
+        match = re.match(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", str(value or ""))
+        if not match:
+            return 0
+        try:
+            return int(match.group(3))
+        except (TypeError, ValueError):
+            return 0
+
+    def _probe_range_total(self, url: str) -> int:
+        response = self._open_range(url, 0, 0)
+        try:
+            status = getattr(response, "status", None) or 200
+            if status == 206:
+                return self._parse_content_range(response.headers.get("Content-Range") if response.headers else "")
+            if status == 200:
+                raise _RangeUnsupported()
+            raise DownloaderFileError(f"Range probe failed (HTTP {status}).")
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    def _stream_range_to_file(self, url: str, path: str, start: int, end: int) -> int:
+        response = self._open_range(url, start, end)
+        try:
+            status = getattr(response, "status", None) or 200
+            if status == 200:
+                raise _RangeUnsupported()
+            if status != 206:
+                raise DownloaderFileError(f"Range download failed (HTTP {status}) for bytes {start}-{end}.")
+            expected = end - start + 1
+            written = 0
+            try:
+                with open(path, "wb") as handle:
+                    while True:
+                        chunk = response.read(TORBOX_STREAM_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        handle.write(chunk)
+            except OSError as exc:
+                raise _filesystem_error("write", path, exc) from exc
+            if written != expected:
+                raise DownloaderFileError(
+                    f"Range {start}-{end} returned {written}/{expected} bytes."
+                )
+            return written
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    def _download_ranged(
+        self, url: str, final_path: str, name: str, expected_size: int, progress_cb=None,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch a large file as N concurrent byte ranges; None -> single-stream fallback."""
+        if self.parallel_chunks <= 1 or expected_size <= TORBOX_RANGE_THRESHOLD_BYTES:
+            return None
+        total = self._probe_range_total(url) or expected_size
+        if not total or total <= TORBOX_RANGE_THRESHOLD_BYTES:
+            return None
+        chunk_count = max(2, min(self.parallel_chunks, int(total // (4 * 1024 * 1024)) or 2))
+        size = total // chunk_count
+        ranges = []
+        for index in range(chunk_count):
+            start = index * size
+            end = total - 1 if index == chunk_count - 1 else (start + size - 1)
+            ranges.append((index, start, end))
+        parts = [f"{final_path}.part{index}" for index, _start, _end in ranges]
+        progress_lock = threading.Lock()
+        done = {"bytes": 0}
+
+        def _worker(index: int, start: int, end: int) -> int:
+            last_error = None
+            for attempt in (1, 2):
+                try:
+                    written = self._stream_range_to_file(url, parts[index], start, end)
+                    with progress_lock:
+                        done["bytes"] += written
+                        cumulative = done["bytes"]
+                    if progress_cb:
+                        try:
+                            progress_cb(name, cumulative)
+                        except Exception:
+                            pass
+                    return written
+                except _RangeUnsupported:
+                    raise
+                except DownloaderFileError as exc:
+                    last_error = exc
+                    if attempt == 1:
+                        time.sleep(0.5)
+                        continue
+                    raise
+            raise last_error or DownloaderFileError("range download failed")
+
+        started = time.monotonic()
+        try:
+            with ThreadPoolExecutor(max_workers=chunk_count) as pool:
+                futures = [pool.submit(_worker, index, start, end) for index, start, end in ranges]
+                for future in as_completed(futures):
+                    future.result()
+            partial_path = f"{final_path}.part"
+            assembled = 0
+            try:
+                with open(partial_path, "wb") as output:
+                    for part in parts:
+                        with open(part, "rb") as source:
+                            while True:
+                                chunk = source.read(TORBOX_STREAM_CHUNK_BYTES)
+                                if not chunk:
+                                    break
+                                output.write(chunk)
+                                assembled += len(chunk)
+            except OSError as exc:
+                raise _filesystem_error("write", partial_path, exc) from exc
+            if assembled != total:
+                raise DownloaderFileError(
+                    f"Ranged assembly for '{name}' produced {assembled}/{total} bytes."
+                )
+            try:
+                os.replace(partial_path, final_path)
+            except OSError as exc:
+                raise _filesystem_error("move into place", final_path, exc) from exc
+            elapsed = max(0.001, time.monotonic() - started)
+            if progress_cb:
+                try:
+                    progress_cb(name, total)
+                except Exception:
+                    pass
+            return {
+                "name": name, "path": final_path, "size": total,
+                "seconds": elapsed, "connections": chunk_count,
+            }
+        except _RangeUnsupported:
+            for part in parts:
+                try:
+                    if os.path.isfile(part):
+                        os.remove(part)
+                except OSError:
+                    pass
+            return None
+        except Exception:
+            for part in parts:
+                try:
+                    if os.path.isfile(part):
+                        os.remove(part)
+                except OSError:
+                    pass
+            raise
+        finally:
+            for part in parts:
+                try:
+                    if os.path.isfile(part):
+                        os.remove(part)
+                except OSError:
+                    pass
+
+    def _download_to(
+        self, url: str, dest_dir: str, name: str, progress_cb=None, expected_size: Optional[int] = None,
+    ) -> Dict[str, Any]:
         final_path = _resolve_within(dest_dir, name)
         try:
             os.makedirs(dest_dir, exist_ok=True)
         except OSError as exc:
             raise _filesystem_error("create directory", dest_dir, exc) from exc
+        if expected_size and expected_size > TORBOX_RANGE_THRESHOLD_BYTES:
+            try:
+                ranged = self._download_ranged(
+                    url, final_path, name, int(expected_size), progress_cb=progress_cb,
+                )
+                if ranged is not None:
+                    return ranged
+            except _RangeUnsupported:
+                pass
         partial_path = f"{final_path}.part"
+        started = time.monotonic()
         try:
             written = self._stream_to_file(url, partial_path, progress_cb=progress_cb, label=name)
             try:
@@ -874,7 +1106,10 @@ class TorboxDownloader:
             except OSError:
                 pass
             raise
-        return {"name": name, "path": final_path, "size": written}
+        return {
+            "name": name, "path": final_path, "size": written,
+            "seconds": max(0.001, time.monotonic() - started), "connections": 1,
+        }
 
     @staticmethod
     def _safe_extract_zip(zip_path: str, dest_dir: str) -> List[Dict[str, Any]]:
@@ -923,6 +1158,91 @@ class TorboxDownloader:
         if not saved:
             raise DownloaderFileError("The Torbox zip archive contained no files.")
         return saved
+
+    @staticmethod
+    def _is_throttle_error(exc: BaseException) -> bool:
+        text = str(exc).lower()
+        return "http 429" in text or "http 503" in text or "rate limit" in text or "too many requests" in text
+
+    def _cleanup_fetch_outputs(self, dest_dir: str, saved: List[Dict[str, Any]]) -> None:
+        """Remove files written by a failed fetch call and any .part remnants."""
+        for entry in saved or []:
+            try:
+                path = entry.get("path")
+                if path and os.path.isfile(path):
+                    os.remove(path)
+            except OSError:
+                pass
+        try:
+            with os.scandir(dest_dir) as iterator:
+                for item in iterator:
+                    try:
+                        if not item.is_file(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    # The destination directory is release-specific: on a failed
+                    # parallel fetch remove every file written by this call (completed
+                    # finals included) plus .part/Torbox temp remnants.
+                    lowered = item.name.lower()
+                    if lowered.endswith(".part") or lowered.startswith(".torbox-") or not lowered.startswith("."):
+                        try:
+                            os.remove(item.path)
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+
+    def _download_item(self, torrent_id: int, item: Dict[str, Any], dest_dir: str, progress_cb=None) -> Dict[str, Any]:
+        if not isinstance(item, dict):
+            raise DownloaderFileError("Torbox file entries must be mappings.")
+        name = _safe_basename(item.get("name") or item.get("short_name") or item.get("path") or "")
+        file_id = item.get("id")
+        if file_id is None:
+            raise DownloaderFileError(f"Torbox file {name!r} has no file id.")
+        try:
+            reported = int(item.get("size") or 0)
+        except (TypeError, ValueError):
+            reported = 0
+        if reported > self.max_file_bytes:
+            raise self._size_cap_error(name or "file", reported)
+        try:
+            url = self._requestdl(int(torrent_id), file_id=int(file_id))
+            entry = self._download_to(
+                url, dest_dir, name, progress_cb=progress_cb, expected_size=reported or None,
+            )
+        except DownloaderFileError as exc:
+            text = str(exc)
+            if name and name not in text:
+                raise DownloaderFileError(f"Torbox fetch failed for '{name}': {text}") from exc
+            raise
+        size = int(entry.get("size") or 0)
+        seconds = float(entry.get("seconds") or 0.0)
+        conns = int(entry.get("connections") or 1)
+        speed_mb = (size / (1024 * 1024) / seconds) if seconds else 0.0
+        logger.info(
+            "Torbox fetch '%s': %.1f MB in %.1fs = %.1f MB/s (%s conns)",
+            name, size / (1024 * 1024), seconds, speed_mb, conns,
+        )
+        return entry
+
+    def _download_item_with_retry(self, torrent_id: int, item: Dict[str, Any], dest_dir: str, progress_cb=None) -> Dict[str, Any]:
+        last_error: Optional[DownloaderFileError] = None
+        for attempt in (1, 2, 3):
+            try:
+                return self._download_item(torrent_id, item, dest_dir, progress_cb=progress_cb)
+            except DownloaderFileError as exc:
+                last_error = exc
+                if attempt < 3 and self._is_throttle_error(exc):
+                    self._throttle_events += 1
+                    logger.warning(
+                        "Torbox throttled (attempt %s/3): %s; backing off %.1fs.",
+                        attempt, exc, 0.5 * attempt,
+                    )
+                    time.sleep(0.5 * attempt)
+                    continue
+                raise
+        raise last_error or DownloaderFileError("Torbox download failed.")
 
     def fetch_files(
         self,
@@ -981,24 +1301,29 @@ class TorboxDownloader:
                 raise self._size_cap_error(name or "file", reported)
         saved: List[Dict[str, Any]] = []
         try:
-            for item in files:
-                if not isinstance(item, dict):
-                    raise DownloaderFileError("Torbox file entries must be mappings.")
-                name = _safe_basename(item.get("name") or item.get("short_name") or item.get("path") or "")
-                file_id = item.get("id")
-                if file_id is None:
-                    raise DownloaderFileError(f"Torbox file {name!r} has no file id.")
-                url = self._requestdl(int(torrent_id), file_id=int(file_id))
-                saved.append(self._download_to(url, dest_dir, name, progress_cb=progress_cb))
-        except Exception:
-            # Never leave half a release behind: remove files already written by this
-            # call (final files and .part remnants) before surfacing the error.
-            for entry in saved:
+            if self.max_concurrency <= 1 or len(files) <= 1:
+                for item in files:
+                    saved.append(self._download_item_with_retry(
+                        int(torrent_id), item, dest_dir, progress_cb=progress_cb,
+                    ))
+            else:
+                # Parallel file fetches (task-31): bounded pool, each file its own
+                # .part + atomic rename, aggregated progress via the shared callback.
+                workers = max(1, min(self.max_concurrency, len(files)))
+                pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="torbox-files")
+                futures = [
+                    pool.submit(self._download_item_with_retry, int(torrent_id), item, dest_dir, progress_cb)
+                    for item in files
+                ]
                 try:
-                    if entry.get("path") and os.path.isfile(entry["path"]):
-                        os.remove(entry["path"])
-                except OSError:
-                    pass
+                    for future in as_completed(futures):
+                        saved.append(future.result())
+                finally:
+                    for future in futures:
+                        future.cancel()
+                    pool.shutdown(wait=True, cancel_futures=True)
+        except Exception:
+            self._cleanup_fetch_outputs(dest_dir, saved)
             raise
         if not saved:
             raise DownloaderFileError("No files were downloaded from Torbox.")

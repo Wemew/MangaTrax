@@ -213,6 +213,45 @@ mirror is configured.
 
 ---
 
+## Download throughput & troubleshooting (Torbox / 1 Gbps)
+
+MangaTrax now downloads selected Torbox files in parallel and splits large single files
+into HTTP Range chunks over multiple connections:
+
+- `torbox_download_concurrency` (Settings -> Downloader, default 4, 1-16): concurrent
+  file downloads. `1` = sequential diagnostic mode.
+- `torbox_parallel_chunks` (default 4, max 8): connections per file > 16 MiB when the
+  server supports `Accept-Ranges`/206. Falls back to a single stream on 200/416.
+- Per-file INFO: `Torbox fetch '<file>': 612 MB in 41.2 s = 14.9 MB/s (4 conns)`.
+  Per-release aggregate and `connections`/`per_file` metrics are in the
+  `TORBOX_DOWNLOADED` audit details.
+
+A 1 Gbps link is 125 MB/s **aggregate**, but one TCP stream over the WAN usually tops
+out far below that (per-connection CDN/Torbox caps, RTT/congestion window). Sequential
+per-file fetching therefore cannot fill the link; parallel files + ranged chunks are
+what raise aggregate throughput. Watch the per-file numbers: if a single stream is
+already fast, more connections will not help and may cause 429 throttling (the
+downloader retries with backoff and logs it).
+
+Verify the two ceilings before blaming MangaTrax/Torbox:
+
+```bash
+# WAN speed to a nearby CDN (expect close to the link's aggregate capacity)
+curl -o /dev/null -s -w '%{speed_download} B/s\n' \
+  'https://speed.cloudflare.com/__down?bytes=500000000'
+
+# Disk write speed on the downloads mount (run inside the container/host path;
+# for mergerfs/FUSE include the same options and watch for the FUSE overhead)
+dd if=/dev/zero of=/downloads/.speedtest bs=1M count=2048 oflag=direct && rm /downloads/.speedtest
+```
+
+If both are fast but a single Torbox stream is slow, keep the defaults/raise
+`torbox_download_concurrency`; if the disk is the bottleneck (mergerfs/FUSE, network
+mount), parallel connections will not help. Check the task-28 storage-health banner and
+`GET /health` for unwritable/missing downloads/staging mounts first.
+
+---
+
 ## 📄 License
 
 MIT License. See [LICENSE](LICENSE) for details.

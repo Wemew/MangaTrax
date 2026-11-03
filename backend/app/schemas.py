@@ -370,6 +370,8 @@ SETTINGS_KEYS = (
     "torbox_strict_volume_selection",
     "torbox_max_download_gb",
     "torbox_delete_on_failure",
+    "torbox_download_concurrency",
+    "torbox_parallel_chunks",
 )
 # Placeholder returned by GET /api/settings and rendered in the Settings UI instead of
 # the real Torbox key.  Saving the placeholder back is a no-op.
@@ -690,6 +692,10 @@ class SettingsUpdateRequest(BaseModel):
     # Delete a permanently failing Torbox torrent so it does not hold an active slot
     # (default true; false keeps it for inspection; Remove button still available).
     torbox_delete_on_failure: Optional[str] = Field(default=None, max_length=20)
+    # task-31 throughput: parallel per-file downloads and ranged multi-connection
+    # fetch for large files (1 = sequential diagnostic mode).
+    torbox_download_concurrency: Optional[str] = Field(default=None, max_length=20)
+    torbox_parallel_chunks: Optional[str] = Field(default=None, max_length=20)
 
     @field_validator("downloader_engine")
     @classmethod
@@ -700,6 +706,32 @@ class SettingsUpdateRequest(BaseModel):
         if engine not in ("qbit", "torbox"):
             raise ValueError("downloader_engine must be 'qbit' or 'torbox'")
         return engine
+
+    @field_validator("torbox_download_concurrency")
+    @classmethod
+    def _validate_torbox_download_concurrency(cls, value):
+        if value is None or not str(value).strip():
+            return "4"
+        try:
+            concurrency = int(str(value).strip())
+        except ValueError:
+            raise ValueError("torbox_download_concurrency must be an integer")
+        if not 1 <= concurrency <= 16:
+            raise ValueError("torbox_download_concurrency must be between 1 and 16")
+        return str(concurrency)
+
+    @field_validator("torbox_parallel_chunks")
+    @classmethod
+    def _validate_torbox_parallel_chunks(cls, value):
+        if value is None or not str(value).strip():
+            return "4"
+        try:
+            chunks = int(str(value).strip())
+        except ValueError:
+            raise ValueError("torbox_parallel_chunks must be an integer")
+        if not 1 <= chunks <= 8:
+            raise ValueError("torbox_parallel_chunks must be between 1 and 8")
+        return str(chunks)
 
     @field_validator("torbox_max_download_gb")
     @classmethod
