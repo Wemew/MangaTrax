@@ -3,6 +3,17 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
+
+class ProviderFetchError(RuntimeError):
+    """The provider could not fetch its source at all (network/parse failure).
+
+    Providers deliberately keep transport-level helpers non-throwing, but
+    ``fetch_releases()`` raises this when NO page/feed could be retrieved, so the
+    scheduler can mark the feed as failed and the poll result is not a silent
+    success.  A legitimately empty response (page fetched, zero rows) is not an
+    error and returns ``[]``.
+    """
+
 class ReleaseItem:
     def __init__(
         self,

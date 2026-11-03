@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from app import security
-from app.providers.base import BaseFeedProvider, ReleaseItem
+from app.providers.base import BaseFeedProvider, ProviderFetchError, ReleaseItem
 from app.parser import extract_manga_bundle_and_volumes, is_chapter_only, is_light_novel
 
 logger = logging.getLogger("mangatrax.providers.html_scraper")
@@ -69,6 +69,12 @@ class HtmlScraperProvider(BaseFeedProvider):
             html_text = self._fetch_page_html(current_url, headers)
             if not html_text:
                 logger.warning(f"Could not retrieve HTML for page {page_num} ({current_url}). Stopping crawl.")
+                if page_num == 1 and not results:
+                    # Nothing was fetched at all: surface it as a feed failure
+                    # instead of an empty, silently "successful" poll.
+                    raise ProviderFetchError(
+                        f"Failed to fetch HTML page {page_num} ({current_url})."
+                    )
                 break
 
             soup = BeautifulSoup(html_text, "html.parser")

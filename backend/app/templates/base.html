@@ -331,20 +331,48 @@
             btn.disabled = true;
 
             try {
+                // The poll runs in the background: this request returns immediately,
+                // so the page stays responsive while the providers are fetched.
                 const res = await fetch('/api/feeds/check', { method: 'POST' });
                 const data = await res.json();
-                if (data.success) {
-                    showToast(data.message, 'success');
-                    setTimeout(() => location.reload(), 1500);
-                } else {
+                if (!data.success) {
                     showToast(data.message || 'Feed check failed', 'error');
+                    return;
                 }
+                showToast(
+                    data.started ? 'Feed check started. The page stays usable while it runs.' : data.message,
+                    'success'
+                );
+                const result = await waitForFeedCheck();
+                if (!result) return;
+                if (result.success) {
+                    showToast(result.message, 'success');
+                } else {
+                    showToast(result.message || 'Feed check failed', 'error');
+                }
+                setTimeout(() => location.reload(), 1500);
             } catch (err) {
                 showToast('Failed to trigger feed check: ' + err, 'error');
             } finally {
                 icon.classList.remove('animate-spin');
                 btn.disabled = false;
             }
+        }
+
+        async function waitForFeedCheck() {
+            const deadline = Date.now() + 15 * 60 * 1000;
+            while (Date.now() < deadline) {
+                await new Promise(resolve => setTimeout(resolve, 1500));
+                try {
+                    const res = await fetch('/api/feeds/check/status');
+                    const data = await res.json();
+                    if (data.running) continue;
+                    return data.result || null;
+                } catch (err) {
+                    return { success: false, message: 'Lost track of the feed check: ' + err };
+                }
+            }
+            return { success: false, message: 'Feed check is still running after 15 minutes.' };
         }
 
         async function triggerStagingTag() {

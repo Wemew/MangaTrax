@@ -4,7 +4,7 @@ import logging
 from typing import List, Dict, Any, Optional
 import feedparser
 from app import security
-from app.providers.base import BaseFeedProvider, ReleaseItem
+from app.providers.base import BaseFeedProvider, ProviderFetchError, ReleaseItem
 from app.parser import extract_manga_bundle_and_volumes, is_chapter_only, is_light_novel
 
 logger = logging.getLogger("mangatrax.providers.rss")
@@ -53,10 +53,12 @@ class RSSFeedProvider(BaseFeedProvider):
 
         feed = _parse_feed_with_timeout(self.url, headers)
         if feed is None:
-            return []
+            # A network/timeout failure must be a visible feed failure, not a
+            # silently "successful" empty poll.
+            raise ProviderFetchError(f"Failed to fetch RSS feed at {self.url} (network/timeout error).")
         if feed.bozo and not feed.entries:
             logger.error(f"Error parsing RSS feed at {self.url}: {feed.bozo_exception}")
-            return []
+            raise ProviderFetchError(f"Failed to parse RSS feed at {self.url}: {feed.bozo_exception}")
 
         results = []
         for entry in feed.entries:

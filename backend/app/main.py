@@ -890,9 +890,20 @@ async def api_get_cover(url: str = Query(...)):
 
 @app.post("/api/feeds/check")
 async def api_feeds_check():
-    """Trigger check for all enabled feeds."""
-    res = scheduler.check_all_feeds()
-    return JSONResponse(res)
+    """Start a feed poll in the background and return immediately.
+
+    The poll is network-heavy (Nyaa/RSS/HTML fetches) and used to run inline inside
+    this async handler, which blocked the event loop: the whole web UI froze for the
+    duration of the poll.  It now runs on the scheduler's daemon thread; poll
+    ``GET /api/feeds/check/status`` for progress and the result (including per-feed
+    failures, so a dead Nyaa lookup no longer looks like a silent success).
+    """
+    return JSONResponse(scheduler.start_feed_check())
+
+@app.get("/api/feeds/check/status")
+async def api_feeds_check_status():
+    """Non-blocking feed-poll status: running flag, timestamps and last result."""
+    return JSONResponse(scheduler.get_feed_check_status())
 
 @app.post("/api/feeds/test")
 async def api_feeds_test(payload: Dict[str, Any]):

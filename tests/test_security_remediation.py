@@ -35,6 +35,7 @@ for _p in (BACKEND_DIR, TESTS_DIR, BASE_DIR):
 from app import schemas, security
 from app.database import MangaDatabase
 from app.notifier.webhook import NotificationService, _post_json
+from app.providers.base import ProviderFetchError
 from app.providers.html_scraper import HtmlScraperProvider
 from app.providers.rss import RSSFeedProvider
 from e2e.harness import E2ETestContext, main_app
@@ -597,7 +598,14 @@ def test_outbound_timeout_shields():
 
     with patch.object(rss_module.feedparser, "parse", side_effect=boom):
         provider = RSSFeedProvider(name="offline", url="https://example.com/rss")
-        assert provider.fetch_releases() == []
+        # A network failure is a typed ProviderFetchError (reported as a failed feed by
+        # the scheduler) rather than an empty list that looks like a successful poll.
+        try:
+            provider.fetch_releases()
+        except ProviderFetchError as exc:
+            assert "network/timeout" in str(exc), str(exc)
+        else:
+            assert False, "offline RSS feed must raise ProviderFetchError"
     # The temporary socket timeout must always be restored.
     assert socket.getdefaulttimeout() == original_default, socket.getdefaulttimeout()
 

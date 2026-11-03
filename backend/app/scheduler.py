@@ -83,6 +83,18 @@ class MangaScheduler:
             self.reconcile_batch_size = 2000
         self.is_backfilling = False
         self.stop_backfill_requested = False
+        # Feed polling (task: "Poll Feeds" froze the UI).  The poll is network-heavy
+        # and must never run on the event loop; a request starts a background thread
+        # and the UI polls get_feed_check_status().  The lock also prevents a manual
+        # poll and the interval poll from overlapping.
+        self._feed_check_lock = threading.Lock()
+        self._feed_check_state_lock = threading.Lock()
+        self._feed_check_state: Dict[str, Any] = {
+            "running": False,
+            "started_at": None,
+            "finished_at": None,
+            "result": None,
+        }
 
     def _log_activity(self, event_type: str, message: str, details: str = ""):
         """Audit helper for background work: always stamps ``actor='scheduler'``.
@@ -782,7 +794,94 @@ class MangaScheduler:
         return changed
 
     # --- Feed Check Task ---
+    @staticmethod
+    def _feed_check_payload(
+        success: bool,
+        message: str,
+        releases_found: int = 0,
+        requested: int = 0,
+        sent_to_downloader: int = 0,
+        feeds_failed: int = 0,
+        errors: Optional[List[Dict[str, str]]] = None,
+        skipped: bool = False,
+    ) -> Dict[str, Any]:
+        """Uniform feed-poll result (counts + per-feed failure detail)."""
+        return {
+            "success": success,
+            "message": message,
+            "releases_found": releases_found,
+            "requested": requested,
+            "sent_to_downloader": sent_to_downloader,
+            "feeds_failed": feeds_failed,
+            "errors": list(errors or []),
+            "skipped": skipped,
+        }
+
     def check_all_feeds(self) -> Dict[str, Any]:
+        """Poll all enabled feeds (BLOCKING; call from a worker thread, never the event loop).
+
+        A concurrent call (manual "Poll Feeds" while the interval poll runs, or a
+        second click) is skipped with an explicit ``skipped`` flag instead of running
+        twice or raising.
+        """
+        if not self._feed_check_lock.acquire(blocking=False):
+            message = "Feed check already in progress"
+            logger.info(message)
+            return self._feed_check_payload(True, message, skipped=True)
+        try:
+            return self._check_all_feeds_locked()
+        finally:
+            self._feed_check_lock.release()
+
+    # --- Async feed poll (UI availability) ---
+    def start_feed_check(self) -> Dict[str, Any]:
+        """Start a background feed poll and return immediately.
+
+        The web handler used to await ``check_all_feeds()`` inline, which blocked the
+        uvicorn event loop while the providers fetched (the whole UI froze, and a
+        Nyaa failure looked like a silent success).  The poll now runs on a daemon
+        thread; the UI polls :meth:`get_feed_check_status` for the result.
+        """
+        with self._feed_check_state_lock:
+            if self._feed_check_state["running"]:
+                return {"success": True, "started": False, "message": "Feed check already in progress"}
+            self._feed_check_state.update(
+                running=True, started_at=time.time(), finished_at=None, result=None,
+            )
+        thread = threading.Thread(
+            target=self._feed_check_thread, daemon=True, name="MangaTraxFeedCheck",
+        )
+        thread.start()
+        logger.info("Background feed check started.")
+        return {"success": True, "started": True, "message": "Feed check started in the background."}
+
+    def _feed_check_thread(self):
+        """Run the blocking poll, shield crashes, and publish the result for the UI."""
+        result: Dict[str, Any]
+        try:
+            result = self.check_all_feeds()
+        except Exception as exc:  # pragma: no cover - defensive outer shield
+            logger.error("Background feed check crashed: %s", exc)
+            self._log_activity("FEED_ERROR", f"Background feed check crashed: {exc}")
+            result = self._feed_check_payload(False, f"Feed check crashed: {exc}")
+        finally:
+            with self._feed_check_state_lock:
+                self._feed_check_state.update(
+                    running=False, finished_at=time.time(), result=result,
+                )
+
+    def get_feed_check_status(self) -> Dict[str, Any]:
+        """Non-blocking feed-poll state + last result (for the Settings/topbar UI)."""
+        with self._feed_check_state_lock:
+            result = self._feed_check_state["result"]
+            return {
+                "running": bool(self._feed_check_state["running"]),
+                "started_at": self._feed_check_state["started_at"],
+                "finished_at": self._feed_check_state["finished_at"],
+                "result": dict(result) if result else None,
+            }
+
+    def _check_all_feeds_locked(self) -> Dict[str, Any]:
         """
         Polls all enabled feeds, parses manga bundles/volumes, matches against Calibre,
         caches cover images, and auto-sends downloads to qBittorrent if enabled.
@@ -791,6 +890,8 @@ class MangaScheduler:
         total_found = 0
         total_requested = 0
         total_sent_to_downloader = 0
+        feeds_failed = 0
+        feed_errors: List[Dict[str, str]] = []
 
         # Load Calibre context for matching
         calibre_path = self.db.get_setting("calibre_path", "/calibre")
@@ -818,8 +919,19 @@ class MangaScheduler:
 
             feed_id = feed["id"]
             feed_name = feed["name"]
-            provider = create_provider(feed)
+            try:
+                provider = create_provider(feed)
+            except Exception as exc:
+                # A broken feed configuration must fail that feed, not crash the poll.
+                feeds_failed += 1
+                feed_errors.append({"feed": feed_name, "error": f"Provider configuration error: {exc}"})
+                logger.error(f"Error creating provider for feed '{feed_name}': {exc}")
+                self.db.update_feed_status(feed_id, "ERROR", str(exc))
+                self._log_activity("FEED_ERROR", f"Feed error in '{feed_name}': {exc}")
+                continue
             if not provider:
+                feeds_failed += 1
+                feed_errors.append({"feed": feed_name, "error": "Unsupported feed provider"})
                 self.db.update_feed_status(feed_id, "ERROR", "Unsupported feed provider")
                 continue
 
@@ -992,20 +1104,32 @@ class MangaScheduler:
                 self.db.update_feed_status(feed_id, "OK", None)
             except Exception as e:
                 err_msg = str(e)
+                feeds_failed += 1
+                feed_errors.append({"feed": feed_name, "error": err_msg})
                 logger.error(f"Error checking feed '{feed_name}': {err_msg}")
                 self.db.update_feed_status(feed_id, "ERROR", err_msg)
                 self._log_activity("FEED_ERROR", f"Feed error in '{feed_name}': {err_msg}")
 
         summary = f"Feeds checked: {total_found} releases found, {total_requested} requested, {total_sent_to_downloader} sent to downloader."
+        if feeds_failed:
+            # Never report a failed provider lookup as a silent success.
+            detail = "; ".join(f"{item['feed']}: {item['error']}" for item in feed_errors[:5])
+            summary += f" {feeds_failed} feed(s) failed: {detail}"
         logger.info(summary)
-        self._log_activity("FEED_POLL_COMPLETED", summary)
-        return {
-            "success": True,
-            "message": summary,
-            "releases_found": total_found,
-            "requested": total_requested,
-            "sent_to_downloader": total_sent_to_downloader
-        }
+        self._log_activity(
+            "FEED_POLL_COMPLETED",
+            summary,
+            f"feeds_failed={feeds_failed}; errors={feed_errors}",
+        )
+        return self._feed_check_payload(
+            success=feeds_failed == 0,
+            message=summary,
+            releases_found=total_found,
+            requested=total_requested,
+            sent_to_downloader=total_sent_to_downloader,
+            feeds_failed=feeds_failed,
+            errors=feed_errors,
+        )
 
     # --- Staging Auto-Tag Task ---
     def tag_staging_files(self) -> Dict[str, Any]:

@@ -34,7 +34,7 @@ from app.database import MangaDatabase
 from app.covers import CoverCache
 from app.scheduler import MangaScheduler
 from app.parser import extract_manga_bundle_and_volumes, MAX_BUNDLE_SPAN
-from app.providers.base import ReleaseItem
+from app.providers.base import ReleaseItem, ProviderFetchError
 from app.providers.nyaa import NyaaMangaProvider
 from app.providers.html_scraper import HtmlScraperProvider
 from tests.mock_calibre_manga import create_mock_calibre_manga_db
@@ -594,12 +594,19 @@ def test_feature_13_html_scraper_robustness():
         _check(releases[0].series_name == "Berserk")
         _check(releases[0].volume_start == 41.0)
 
-    # Test 2: Network failure resilience (urllib transport fails)
+    # Test 2: Transport failure is contained by the low-level helper, but
+    # fetch_releases() surfaces it as a typed ProviderFetchError so a dead feed is
+    # reported as a feed failure instead of a silently "successful" empty poll.
     provider_fail = HtmlScraperProvider(name="Failing Scraper", url="https://unreachable.invalid/releases")
     with patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
-        # Must NOT raise exception; must return empty list safely
-        res_fail = provider_fail.fetch_releases()
-        _check(res_fail == [])
+        # The transport helper itself never throws.
+        _check(provider_fail._fetch_page_html("https://unreachable.invalid/releases", {}) is None)
+        try:
+            provider_fail.fetch_releases()
+        except ProviderFetchError as exc:
+            _check("Failed to fetch HTML page 1" in str(exc), str(exc))
+        else:
+            _check(False, "HTML scraper must raise ProviderFetchError when page 1 cannot be fetched")
 
     print("    [PASSED] Feature 13: HTML scraper is resilient to network failures.")
 

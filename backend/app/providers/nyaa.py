@@ -8,7 +8,7 @@ from datetime import datetime
 
 from bs4 import BeautifulSoup
 
-from app.providers.base import BaseFeedProvider, ReleaseItem
+from app.providers.base import BaseFeedProvider, ProviderFetchError, ReleaseItem
 from app.parser import extract_manga_bundle_and_volumes, is_chapter_only, is_light_novel
 
 logger = logging.getLogger("mangatrax.providers.nyaa")
@@ -33,8 +33,15 @@ class NyaaMangaProvider(BaseFeedProvider):
         self.query = self.config.get("query", "")
 
     def fetch_releases(self) -> List[ReleaseItem]:
-        """Fetches releases according to configured query and max_pages."""
-        return self.crawl_pages(max_pages=self.max_pages, query=self.query)
+        """Fetches releases according to configured query and max_pages.
+
+        Raises :class:`ProviderFetchError` when the source could not be fetched at
+        all (network/HTTP failure on the first page), so a dead Nyaa lookup is a
+        visible feed failure instead of an empty "successful" poll.
+        """
+        return self.crawl_pages(
+            max_pages=self.max_pages, query=self.query, raise_on_fetch_error=True,
+        )
 
     def search_series(
         self,
@@ -90,7 +97,8 @@ class NyaaMangaProvider(BaseFeedProvider):
         date_cutoff: Optional[datetime] = None,
         delay: Optional[float] = None,
         progress_cb: Optional[Any] = None,
-        stop_check: Optional[Any] = None
+        stop_check: Optional[Any] = None,
+        raise_on_fetch_error: bool = False
     ) -> List[ReleaseItem]:
         """
         Crawls through Nyaa pages sequentially with polite rate-limiting.
@@ -136,9 +144,17 @@ class NyaaMangaProvider(BaseFeedProvider):
                     logger.info(f"Nyaa reached end of results at page {page}.")
                     break
                 logger.warning(f"Error fetching Nyaa page {page} ({page_url}): {e}")
+                if raise_on_fetch_error and not results:
+                    raise ProviderFetchError(
+                        f"Failed to fetch Nyaa page {page} ({page_url}): HTTP {e.code}"
+                    ) from e
                 break
             except Exception as e:
                 logger.warning(f"Error fetching Nyaa page {page} ({page_url}): {e}")
+                if raise_on_fetch_error and not results:
+                    raise ProviderFetchError(
+                        f"Failed to fetch Nyaa page {page} ({page_url}): {e}"
+                    ) from e
                 break
 
             soup = BeautifulSoup(html, "html.parser")
