@@ -18,8 +18,14 @@ if [ "$(id -u)" = "0" ]; then
         usermod -o -u "$PUID" appuser 2>/dev/null || true
     fi
 
-    # Fix ownership and permissions on data and staging directories
-    chown -R appuser:appuser /app/data /staging 2>/dev/null || chmod -R 777 /app/data /staging 2>/dev/null || true
+    # Fix ownership only when something is actually mis-owned: a recursive chown
+    # over a large cover cache / staging volume costs tens of seconds on every
+    # start.  POSIX sh: `-print -quit` stops at the first offender and `grep -q .`
+    # tests whether anything was printed.  The chmod fallback is preserved for
+    # environments where chown is not permitted.
+    if find /app/data /staging ! -user appuser -print -quit 2>/dev/null | grep -q .; then
+        chown -R appuser:appuser /app/data /staging 2>/dev/null || chmod -R 777 /app/data /staging 2>/dev/null || true
+    fi
 
     # Drop root privileges and execute command as appuser
     exec gosu appuser "$@"

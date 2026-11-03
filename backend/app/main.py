@@ -65,15 +65,13 @@ AUTH = auth_module.AuthManager(AUTH_CONFIG, user_store=db)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting MangaTrax application...")
-    # Trigger initial Calibre sync if available BEFORE starting background scheduler loop
-    calibre_path = db.get_setting("calibre_path", CALIBRE_DIR)
-    scanner = CalibreMangaScanner(calibre_path)
-    if scanner.is_available():
-        logger.info("Found Calibre library metadata.db on startup! Running initial manga scan...")
-        scheduler.sync_calibre_library()
-    else:
-        logger.info(f"Calibre library metadata.db not yet found at {scanner.db_path}. Will re-check periodically.")
+    # Availability first: NOTHING heavy may run before `yield`.  The legacy series
+    # key repair and the initial Calibre sync used to run here (blocking the web UI
+    # for ~2 minutes on a real library); they are now the FIRST action of the
+    # scheduler worker thread (MangaScheduler.perform_initial_sync), which is
+    # exception-shielded and refreshes the UI data as it completes.
     scheduler.start()
+    logger.info("Web UI is serving; the initial Calibre sync runs in the background worker.")
     yield
     logger.info("Shutting down MangaTrax application...")
     scheduler.stop()
@@ -834,9 +832,19 @@ async def settings_view(request: Request):
 
 @app.post("/api/calibre/sync")
 async def api_calibre_sync():
-    """Trigger manual Calibre library rescan and bundle request resolution."""
+    """Trigger manual Calibre library rescan and bundle request resolution.
+
+    Deliberately synchronous: a user who clicks "Sync now" waits for the result.
+    The background worker's own sync respects ``scheduler._calibre_sync_lock``, so a
+    manual trigger and the startup/first-tick sync can never run concurrently.
+    """
     res = scheduler.sync_calibre_library()
     return JSONResponse(res)
+
+@app.get("/api/calibre/status")
+async def api_calibre_status():
+    """Cheap, non-blocking sync state so the UI can show "initial sync running"."""
+    return JSONResponse(scheduler.get_calibre_sync_status())
 
 @app.get("/api/calibre/test")
 async def api_calibre_test(path: str = Query(...)):

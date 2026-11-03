@@ -462,7 +462,9 @@ def test_feature_11_calibre_sync_startup_deduplication():
         _check("already in progress" in concurrent_res["message"])
         sched._calibre_sync_lock.release()
 
-        # Scenario 3: Startup Sequence Deduplication
+        # Scenario 3: Startup sequence — the lifespan must NOT sync before serving;
+        # the worker performs the initial repair + sync as its FIRST action, exactly
+        # once (task-14: availability first, heavy work in the background thread).
         sched2 = MangaScheduler(db, cover_cache)
         sync_call_count = 0
         original_sync = sched2.sync_calibre_library
@@ -474,17 +476,20 @@ def test_feature_11_calibre_sync_startup_deduplication():
 
         sched2.sync_calibre_library = instrumented_sync
 
-        # Lifespan step 1: sync_calibre_library() runs before scheduler.start()
-        sched2.sync_calibre_library()
-        _check(sync_call_count == 1)
-        _check(sched2.last_calibre_sync > 0.0)
-
-        # Lifespan step 2: scheduler.start() begins worker thread
+        # Starting the worker must return immediately (no synchronous Calibre work).
+        started_at = time.time()
         sched2.start()
-        time.sleep(0.5)
+        _check(time.time() - started_at < 1.0, "scheduler.start() must not block on the initial sync")
+        _check(sync_call_count == 0, "start() must not sync synchronously before the worker thread runs")
 
-        # Background worker thread must NOT have executed a redundant 2nd sync at boot!
-        _check(sync_call_count == 1)
+        # The worker thread then performs the initial sync exactly once.
+        deadline = time.time() + 3.0
+        while time.time() < deadline and sync_call_count == 0:
+            time.sleep(0.05)
+        time.sleep(0.3)  # allow any (incorrect) redundant sync to surface
+        _check(sync_call_count == 1, f"worker must perform exactly one initial sync, got {sync_call_count}")
+        _check(sched2.last_calibre_sync > 0.0)
+        _check(sched2.get_calibre_sync_status()["initial_sync_done"] is True)
         sched2.stop()
 
         print("    [PASSED] Feature 11: Calibre sync startup deduplication & concurrency lock verified.")

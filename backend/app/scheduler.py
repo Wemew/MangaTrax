@@ -1,5 +1,6 @@
 import time
 import logging
+import os
 import threading
 import re
 import json
@@ -69,6 +70,17 @@ class MangaScheduler:
         self._lock = threading.Lock()
         self._calibre_sync_lock = threading.Lock()
         self.last_calibre_sync: float = 0.0
+        # Startup work (legacy key repair + initial Calibre sync) runs as the FIRST
+        # action of the worker thread so the web UI can serve immediately; see
+        # perform_initial_sync().
+        self._initial_sync_done = False
+        # Incremental reconcile: already-owned rows are skipped and the remaining
+        # work is bounded per pass (continuing on the next tick).
+        self._reconcile_cursor = 0
+        try:
+            self.reconcile_batch_size = max(50, int(os.getenv("MANGATRAX_RECONCILE_BATCH_SIZE", "2000") or 2000))
+        except (TypeError, ValueError):
+            self.reconcile_batch_size = 2000
         self.is_backfilling = False
         self.stop_backfill_requested = False
 
@@ -628,22 +640,10 @@ class MangaScheduler:
                     except Exception as e:
                         logger.debug(f"Webhook notification failed for acquired release: {e}")
 
-                # Reconcile all active releases against Calibre matcher to update missing_volumes and statuses
-                all_active = self.db.get_releases(limit=5000)
-                for r in all_active:
-                    if r.get("status") in ("REQUESTED", "DISCOVERY", "IN_CALIBRE", "NEW"):
-                        res = matcher.check_release(r, auto_request_monitored=True)
-                        new_missing = res.get("missing_volumes", [])
-                        new_status = res.get("status")
-                        old_missing = r.get("missing_volumes", [])
-                        old_status = r.get("status")
-                        if new_missing != old_missing or new_status != old_status:
-                            self.db.update_release_volumes_and_status(
-                                r["id"],
-                                r.get("volumes", []),
-                                new_missing,
-                                new_status
-                            )
+                # Reconcile active releases against Calibre: updates missing_volumes
+                # and statuses.  Incremental + bounded (see the method) so a large
+                # library cannot stall the worker.
+                self._reconcile_releases_with_calibre(matcher)
 
                 # Auto-expand any unexpanded complete releases against freshly synced Calibre library
                 try:
@@ -667,6 +667,119 @@ class MangaScheduler:
                 return {"success": False, "message": err, "synced_series": 0, "resolved_requests": 0}
         finally:
             self._calibre_sync_lock.release()
+
+    # --- Startup work (runs in the worker thread, never before the app serves) ---
+    def perform_initial_sync(self) -> Dict[str, Any]:
+        """First worker action on start: legacy key repair + initial Calibre sync.
+
+        The web server used to run this inside ``lifespan`` *before* ``yield``, which
+        made the UI unavailable for the whole duration (~2 min on a real library).
+        The lifespan now only starts the worker; this method runs on the worker
+        thread and is called from an exception-shielded block so a failing sync can
+        never kill the worker loop.
+        """
+        results: Dict[str, Any] = {"repair": 0, "sync": None}
+        try:
+            results["repair"] = self.repair_series_matching_keys(actor="scheduler")
+        except Exception as exc:
+            logger.error("Initial series key repair failed (worker continues): %s", exc)
+        try:
+            calibre_path = self.db.get_setting("calibre_path", "/calibre")
+            scanner = CalibreMangaScanner(calibre_path)
+            if scanner.is_available():
+                logger.info("Found Calibre library metadata.db on startup! Running initial manga scan...")
+                results["sync"] = self.sync_calibre_library()
+            else:
+                logger.info(
+                    "Calibre library metadata.db not yet found at %s. Will re-check periodically.",
+                    scanner.db_path,
+                )
+        except Exception as exc:
+            logger.error("Initial Calibre sync failed (worker continues): %s", exc)
+        finally:
+            self._initial_sync_done = True
+        return results
+
+    def get_calibre_sync_status(self) -> Dict[str, Any]:
+        """Cheap "is a sync running?" state for the UI (never blocks)."""
+        return {
+            "in_progress": self._calibre_sync_lock.locked(),
+            "initial_sync_done": bool(self._initial_sync_done),
+            "last_sync": self.last_calibre_sync or None,
+        }
+
+    @staticmethod
+    def _reconcile_release_is_stable(release: Dict[str, Any]) -> bool:
+        """True when re-checking this release against Calibre cannot change anything.
+
+        Already-owned rows with a full explicit volume set and no missing volumes are
+        stable: the only event that can change them is a new Calibre sync (which is
+        this pass), and their stored volume set is unchanged.
+        """
+        if release.get("status") != "IN_CALIBRE":
+            return False
+        if release.get("missing_volumes"):
+            return False
+        if not release.get("volumes"):
+            return False
+        if release.get("is_inferred"):
+            # Inferred full sets may still be refined by a concrete resolution.
+            return False
+        return True
+
+    def _reconcile_releases_with_calibre(self, matcher: MangaCalibreMatcher) -> int:
+        """Incremental, bounded reconcile of active releases against Calibre.
+
+        Skips stable ``IN_CALIBRE`` rows and processes at most
+        ``reconcile_batch_size`` candidates per pass, rotating the window so the
+        remaining work continues on the next tick.  Returns the number of rows whose
+        status/volume state actually changed.
+        """
+        try:
+            all_active = self.db.get_releases(limit=5000)
+        except Exception as exc:
+            logger.error("Calibre reconcile: could not load releases: %s", exc)
+            return 0
+        candidates = [
+            release for release in all_active
+            if release.get("status") in ("REQUESTED", "DISCOVERY", "IN_CALIBRE", "NEW")
+            and not self._reconcile_release_is_stable(release)
+        ]
+        if not candidates:
+            self._reconcile_cursor = 0
+            return 0
+
+        batch_size = max(1, int(self.reconcile_batch_size))
+        if len(candidates) <= batch_size:
+            window = candidates
+            self._reconcile_cursor = 0
+        else:
+            start = self._reconcile_cursor % len(candidates)
+            window = candidates[start:start + batch_size]
+            if len(window) < batch_size:
+                window = window + candidates[:batch_size - len(window)]
+            self._reconcile_cursor = (start + len(window)) % len(candidates)
+            logger.info(
+                "Calibre reconcile pass: %d of %d active release(s); the rest continue on the next tick.",
+                len(window), len(candidates),
+            )
+
+        changed = 0
+        for release in window:
+            result = matcher.check_release(release, auto_request_monitored=True)
+            new_missing = result.get("missing_volumes", [])
+            new_status = result.get("status")
+            old_missing = release.get("missing_volumes", [])
+            old_status = release.get("status")
+            if new_missing != old_missing or new_status != old_status:
+                self.db.update_release_volumes_and_status(
+                    release["id"],
+                    release.get("volumes", []),
+                    new_missing,
+                    new_status,
+                )
+                changed += 1
+        return changed
 
     # --- Feed Check Task ---
     def check_all_feeds(self) -> Dict[str, Any]:
@@ -1625,6 +1738,13 @@ class MangaScheduler:
     # --- Background Loop ---
     def _worker_loop(self):
         logger.info("MangaTrax background worker loop started.")
+        # FIRST action: the work that used to block the FastAPI lifespan before
+        # `yield` (legacy re-key repair + initial Calibre sync).  Shielded so any
+        # failure is logged and the worker keeps running on its normal interval.
+        try:
+            self.perform_initial_sync()
+        except Exception as exc:  # pragma: no cover - defensive outer shield
+            logger.error("Initial startup sync crashed (worker continues): %s", exc)
         # Asynchronously expand any complete series releases that need volume counts from AniList/MangaUpdates
         try:
             self.expand_unresolved_complete_releases()
@@ -1688,11 +1808,10 @@ class MangaScheduler:
         logger.info("MangaTrax background worker loop stopped.")
 
     def start(self):
-        # Legacy repair before serving traffic: older versions stored some releases
-        # under AniList's canonical English title instead of the tracked series'
-        # stable matching key.  The repair is guarded and idempotent, so running it
-        # on every startup is safe (and a no-op once the data is clean).
-        self.repair_series_matching_keys(actor="scheduler")
+        # Do NOT run the legacy re-key repair (or any Calibre work) synchronously
+        # here: this method is called from the FastAPI lifespan before it yields, so
+        # blocking here makes the web UI unavailable.  The worker thread performs
+        # perform_initial_sync() as its first action instead.
         with self._lock:
             if self.running:
                 return
