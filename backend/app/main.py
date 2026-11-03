@@ -1,6 +1,7 @@
 import os
 import json
 import math
+import time
 import asyncio
 import logging
 from typing import Dict, Any, Optional
@@ -434,7 +435,12 @@ def _build_downloader_status(timeout: Optional[float] = None) -> Dict[str, Any]:
 def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Normalise a Torbox release row (+optional live status) for the status API."""
     info = info or {}
-    state = str(info.get("state") or ("failed" if release.get("download_status") == "FAILED" else "queued"))
+    db_status = str(release.get("download_status") or "").upper()
+    # The DB is authoritative for failures: Torbox may still report `Ready` for a
+    # torrent we refused locally (e.g. over the size cap), which used to look stuck.
+    state = "failed" if db_status == "FAILED" else str(
+        info.get("state") or ("failed" if db_status == "FAILED" else "queued")
+    )
     files = info.get("files") or []
     saved = release.get("downloader_id") or ""
     progress = float(info.get("progress") or 0.0)
@@ -456,10 +462,20 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
         selection = "nothing missing"
     else:
         selection = "legacy whole-torrent fallback allowed"
+    failed = state == "failed" or db_status == "FAILED"
+    error = str(release.get("download_error") or "").strip()
+    if failed and not error:
+        error = f"Torbox reported state '{info.get('raw_state') or 'failed'}'."
+    can_retry = bool(failed and str(release.get("status") or "") in ("REQUESTED", "DISCOVERY", "NEW"))
     return {
         "hash": str(release.get("torrent_hash") or saved),
         "name": str(release.get("title") or ""),
         "state": state,
+        "failed": failed,
+        "error": error,
+        "can_retry": can_retry,
+        "attempts": int(release.get("download_attempts") or 0),
+        "download_status": db_status,
         "raw_state": str(info.get("raw_state") or ""),
         "engine": "torbox",
         "cached": bool(info.get("cached")),
@@ -482,7 +498,7 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
         "eta_seconds": int(eta) if eta is not None else None,
         "ratio": 0.0,
         "seeds": info.get("seeds") or 0,
-        "is_active": state in ("queued", "queued_slot", "downloading", "stalled"),
+        "is_active": (not failed) and state in ("queued", "queued_slot", "downloading", "stalled"),
         "queued": state == "queued_slot",
         "queue_position": info.get("queue_position"),
         "active_limit": info.get("active_limit"),
@@ -1544,6 +1560,81 @@ async def api_downloader_delete(torrent_hash: str):
     qbit = scheduler.get_qbit_client()
     success = qbit.delete_torrent(torrent_hash, delete_files=False)
     return JSONResponse({"status": "success" if success else "error"})
+
+
+_TORBOX_RETRY_MIN_SECONDS = 5.0
+_TORBOX_RETRY_LAST: Dict[int, float] = {}
+
+
+@app.post("/api/downloads/torbox/{release_id}/retry")
+async def api_torbox_retry(release_id: int):
+    """Re-submit a failed Torbox release with the normal strict selection rules."""
+    target = db.get_release_by_id(release_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Release not found")
+    if resolve_downloader_engine(db) != "torbox":
+        raise HTTPException(status_code=409, detail="Torbox is not the active downloader engine")
+    now = time.time()
+    last = _TORBOX_RETRY_LAST.get(release_id, 0.0)
+    if now - last < _TORBOX_RETRY_MIN_SECONDS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Retry rate-limited; wait {_TORBOX_RETRY_MIN_SECONDS:g}s between retries.",
+        )
+    _TORBOX_RETRY_LAST[release_id] = now
+
+    # Drop the stale remote job first (it may still hold an active slot), then reset.
+    old_handle = scheduler._torbox_handle_for_release(release_id)
+    if old_handle:
+        try:
+            await asyncio.to_thread(build_downloader(db, engine="torbox").cancel, old_handle)
+        except Exception as exc:
+            logger.debug("Could not cancel stale Torbox job on retry: %s", exc)
+    db.clear_download_error(release_id)
+    db.update_downloader_state(release_id, "IDLE", "torbox")
+    missing = await asyncio.to_thread(scheduler.resolve_release_missing_volumes, target)
+    result = await asyncio.to_thread(
+        scheduler.submit_torbox_download,
+        release_id,
+        str(target.get("title") or ""),
+        str(target.get("download_url") or target.get("link") or ""),
+        link=str(target.get("link") or ""),
+        missing_volumes=missing,
+        source="retry",
+        guid=str(target.get("guid") or ""),
+        torrent_hash=str(target.get("torrent_hash") or ""),
+    )
+    if result.get("success"):
+        db.clear_download_error(release_id)
+        if result.get("skipped"):
+            return JSONResponse({"status": "skipped", "message": result.get("message") or "Nothing missing"})
+        return JSONResponse({
+            "status": "success",
+            "engine": "torbox",
+            "message": result.get("message") or "Torbox retry submitted",
+        })
+    message = str(result.get("message") or "Torbox rejected the retry")
+    db.set_download_error(release_id, f"{message} (retry rejected)")
+    db.update_downloader_state(release_id, "FAILED", "torbox")
+    return JSONResponse({"status": "error", "message": message})
+
+
+@app.post("/api/downloads/torbox/{release_id}/remove")
+async def api_torbox_remove(release_id: int):
+    """Remove a Torbox release's remote job and clear its local failed state."""
+    target = db.get_release_by_id(release_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Release not found")
+    handle = scheduler._torbox_handle_for_release(release_id)
+    deleted = False
+    if handle:
+        try:
+            deleted = bool(await asyncio.to_thread(build_downloader(db, engine="torbox").cancel, handle))
+        except Exception as exc:
+            logger.debug("Could not remove Torbox job for release %s: %s", release_id, exc)
+    db.update_downloader_state(release_id, "IDLE", "torbox")
+    db.clear_download_error(release_id)
+    return JSONResponse({"status": "success" if deleted else "error", "removed": deleted})
 
 @app.post("/api/releases/{release_id}/download")
 async def api_release_download(release_id: int):

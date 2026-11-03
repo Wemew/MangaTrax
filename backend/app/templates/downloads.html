@@ -166,12 +166,26 @@
                                 {{ (t.dlspeed / 1024 / 1024)|round(2) }} MB/s
                             </td>
                             <td class="py-3 px-4 capitalize text-slate-300">
+                                {% if t.failed %}
+                                <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/40 text-rose-300 text-[10px] font-bold">Failed</span>
+                                {% if t.error %}
+                                <div class="text-[10px] text-rose-300/80 max-w-[280px] truncate mt-0.5" title="{{ t.error }}">{{ t.error }}</div>
+                                {% endif %}
+                                {% else %}
                                 {{ t.state }}
+                                {% endif %}
                             </td>
                             <td class="py-3 px-4 text-right">
                                 <div class="flex items-center justify-end gap-1.5">
                                     {% if engine == 'torbox' %}
-                                    <span class="text-[10px] text-slate-500" title="Torbox downloads are controlled in MangaTrax/Torbox">Torbox</span>
+                                    {% if t.failed or t.can_retry %}
+                                    <button onclick="retryTorbox({{ t.release_id }})" title="Retry this Torbox download (strict rules apply)" class="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold" aria-label="Retry Torbox download">
+                                        <i data-lucide="refresh-cw" class="w-3 h-3"></i> Retry
+                                    </button>
+                                    {% endif %}
+                                    <button onclick="removeTorbox({{ t.release_id }})" title="Remove from Torbox (frees the active slot)" class="p-1 rounded bg-slate-800 hover:bg-rose-900/30 text-rose-400" aria-label="Remove from Torbox">
+                                        <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                                    </button>
                                     {% else %}
                                     {% if 'paused' in t.state|lower %}
                                     <button onclick="resumeTorrent('{{ t.hash }}')" title="Resume" class="p-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-400" aria-label="Resume">
@@ -452,6 +466,38 @@ async function deleteTorrent(hash) {
     try {
         await fetch(`/api/downloader/delete/${hash}`, { method: 'DELETE' });
         showToast('Torrent removed', 'success');
+        setTimeout(() => location.reload(), 800);
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+
+async function retryTorbox(releaseId) {
+    if (!confirm('Retry this Torbox download? Strict volume selection applies.')) return;
+    try {
+        const res = await fetch(`/api/downloads/torbox/${releaseId}/retry`, { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || 'Retry failed', 'error');
+            return;
+        }
+        showToast(data.message || (data.status === 'success' ? 'Torbox retry submitted' : 'Nothing to retry'), data.status === 'success' ? 'success' : 'info');
+        setTimeout(() => location.reload(), 800);
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    }
+}
+
+async function removeTorbox(releaseId) {
+    if (!confirm('Remove this torrent from Torbox?')) return;
+    try {
+        const res = await fetch(`/api/downloads/torbox/${releaseId}/remove`, { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || 'Remove failed', 'error');
+            return;
+        }
+        showToast(data.removed ? 'Removed from Torbox' : 'Local state cleared', 'success');
         setTimeout(() => location.reload(), 800);
     } catch (err) {
         showToast('Error: ' + err, 'error');

@@ -20,6 +20,7 @@ from app.calibre.scanner import CalibreMangaScanner
 from app.calibre.matcher import MangaCalibreMatcher
 from app.downloader.qbit import QBitClient
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
+from app.downloader.torbox import TORBOX_ZIP_MAX_FILES, TORBOX_ZIP_SAFETY_RATIO
 from app.downloader.base import (
     DownloaderAuthError,
     DownloaderError,
@@ -977,11 +978,69 @@ class MangaScheduler:
         return {"success": True, "engine": engine, "handle": handle, "cached": cached, "queued": False}
 
     # --- Torbox polling worker (task-20, Phase 1+2; queued slots task-21) ---
-    def _torbox_fail_release(self, release_id: int, title: str, message: str) -> None:
-        """Mark a Torbox release FAILED and audit it (surfaced, not silently retried)."""
+    def _torbox_handle_for_release(self, release_id: int) -> Dict[str, Any]:
+        """Reconstruct a Torbox handle from the release row (for failure cleanup/retry)."""
+        try:
+            row = self.db.get_release_by_id(release_id) or {}
+        except Exception:
+            return {}
+        raw = row.get("downloader_id")
+        queued_id = parse_queued_handle_id(raw)
+        if queued_id is not None:
+            return {
+                "engine": "torbox", "queued_id": queued_id, "torrent_id": None,
+                "hash": str(row.get("torrent_hash") or ""),
+            }
+        try:
+            torrent_id = int(raw or 0)
+        except (TypeError, ValueError):
+            torrent_id = 0
+        if torrent_id:
+            return {
+                "engine": "torbox", "torrent_id": torrent_id,
+                "hash": str(row.get("torrent_hash") or ""),
+            }
+        return {}
+
+    def _torbox_fail_release(
+        self,
+        release_id: int,
+        title: str,
+        message: str,
+        downloader=None,
+        handle: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Mark a Torbox release FAILED, persist the visible reason and free the slot.
+
+        ``download_error`` (with the attempt count + poll timestamp) is what the
+        Downloads page shows instead of Torbox's misleading live ``Ready`` state.
+        With ``torbox_delete_on_failure`` (default true) the remote torrent is deleted
+        so it does not occupy an active slot forever.
+        """
+        reason = str(message or "Torbox download failed.")
+        attempts = self.db.increment_download_attempt(release_id)
+        stored_reason = (
+            f"{reason} (attempt {attempts}, "
+            f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC)"
+        )
+        self.db.set_download_error(release_id, stored_reason)
         self.db.update_downloader_state(release_id, "FAILED", "torbox")
-        self._log_activity("TORBOX_FAILED", f"Torbox download failed: '{title}'", message)
-        logger.warning("Torbox download failed for '%s': %s", title, message)
+        remote = ""
+        if as_bool(self.db.get_setting("torbox_delete_on_failure", "true"), default=True):
+            target_handle = handle or self._torbox_handle_for_release(release_id)
+            if target_handle and (target_handle.get("torrent_id") or target_handle.get("queued_id")):
+                try:
+                    engine = downloader or build_downloader(self.db, engine="torbox")
+                    remote = " Removed from Torbox." if engine.cancel(target_handle) else " Torbox remove failed."
+                except Exception as exc:
+                    logger.debug("Could not delete failed Torbox job %s: %s", release_id, exc)
+                    remote = " Torbox remove failed."
+        self._log_activity(
+            "TORBOX_FAILED",
+            f"Torbox download failed: '{title}'",
+            f"{reason}{remote}",
+        )
+        logger.warning("Torbox download failed for '%s': %s%s", title, reason, remote)
 
     def _torbox_surface_once(
         self, release_id: int, message: str, title: str, event_type: str = "TORBOX_FAILED",
@@ -1071,8 +1130,35 @@ class MangaScheduler:
             return None, "subset selects every file: whole-torrent zip"
         return selected, f"subset: {len(selected)}/{len(files)} file(s) for volumes {sorted(wanted)}"
 
+    def _torbox_max_download_bytes(self) -> int:
+        try:
+            max_gb = float(self.db.get_setting("torbox_max_download_gb", "64") or 64)
+        except (TypeError, ValueError):
+            max_gb = 64.0
+        max_gb = max(1.0, min(max_gb, 10240.0))
+        return int(max_gb * 1024 * 1024 * 1024)
+
+    def _check_torbox_file_size(self, item: Dict[str, Any], max_bytes: int) -> None:
+        item = item or {}
+        try:
+            size = int(item.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size > max_bytes:
+            name = str(item.get("name") or item.get("short_name") or f"file {item.get('id')}")
+            size_gb = size / (1024 ** 3)
+            cap_gb = max_bytes / (1024 ** 3)
+            raise DownloaderFileError(
+                f"Torbox file '{name}' is {size_gb:.1f} GiB ({size} bytes), above the "
+                f"configured cap of {cap_gb:g} GiB (torbox_max_download_gb); refusing to download it."
+            )
+
     def _plan_torbox_selection(
-        self, release: Dict[str, Any], files: List[Dict[str, Any]], wanted_volumes: List[float],
+        self,
+        release: Dict[str, Any],
+        files: List[Dict[str, Any]],
+        wanted_volumes: List[float],
+        total_size: int = 0,
     ) -> Dict[str, Any]:
         """Decide exactly which Torbox files to fetch (strict by default).
 
@@ -1080,15 +1166,20 @@ class MangaScheduler:
           * no wanted volumes -> ``skip`` (do not fetch/submit; nothing to download);
           * no file list, any unmappable file name, or any wanted volume absent from
             the torrent -> typed DownloaderFileError (never download everything);
-          * every file needed and all wanted covered -> ``zip`` (equivalent);
+          * every file needed and all wanted covered -> ``zip`` (equivalent) only when
+            the estimated archive is comfortably under the configured cap and the file
+            count is small (<= TORBOX_ZIP_MAX_FILES); otherwise the exact files are
+            downloaded per-file so each one is checked individually;
           * otherwise -> ``files`` with only the files whose parsed volume set
             intersects the wanted set (per-file requestdl).
+        A single wanted file larger than ``torbox_max_download_gb`` raises a typed
+        DownloaderFileError naming the file, its size and the cap BEFORE any download.
         strict=false restores the legacy whole-torrent fallback.
         """
         title = str(release.get("title") or "")
         strict = as_bool(self.db.get_setting("torbox_strict_volume_selection", "true"), default=True)
         wanted = {float(value) for value in (wanted_volumes or [])}
-        logger.info(
+        logger.debug(
             "Torbox selection for '%s': strict=%s wanted volumes %s", title, strict, sorted(wanted),
         )
         if not strict:
@@ -1132,24 +1223,28 @@ class MangaScheduler:
             mapping.append({"index": index, "id": item.get("id"), "name": name, "volumes": volumes})
             if not volumes:
                 unmapped.append(name or f"file #{index}")
-            logger.info(
+            logger.debug(
                 "Torbox selection for '%s': file '%s' (id=%s) -> volumes %s",
                 title, name or f"file #{index}", item.get("id"), volumes,
             )
         if unmapped:
-            raise DownloaderFileError(
+            message = (
                 f"Torbox strict volume selection for '{title}' failed: {len(unmapped)} file name(s) "
                 f"cannot be mapped to volumes ({', '.join(unmapped[:5])}); refusing to download the whole torrent."
             )
+            logger.error("%s file->volume mapping: %s", message, json.dumps(mapping))
+            raise DownloaderFileError(message)
         available: Set[float] = set()
         for entry in mapping:
             available.update(entry["volumes"])
         absent = sorted(wanted - available)
         if absent:
-            raise DownloaderFileError(
+            message = (
                 f"Torbox strict volume selection for '{title}' failed: wanted volume(s) {absent} "
                 f"are absent from the torrent (available volumes: {sorted(available)})."
             )
+            logger.error("%s file->volume mapping: %s", message, json.dumps(mapping))
+            raise DownloaderFileError(message)
         selected_indices = [
             entry["index"] for entry in mapping if set(entry["volumes"]) & wanted
         ]
@@ -1170,19 +1265,56 @@ class MangaScheduler:
             "selected_count": len(selected_files),
             "total_files": len(files),
         }
+        max_bytes = self._torbox_max_download_bytes()
+        estimated_total = int(total_size or 0)
+        if not estimated_total:
+            estimated_total = sum(
+                int((item or {}).get("size") or 0) for item in files if isinstance(item, dict)
+            )
         if all_needed:
+            zip_ok = (
+                len(files) <= TORBOX_ZIP_MAX_FILES
+                and (not estimated_total or estimated_total <= int(max_bytes * TORBOX_ZIP_SAFETY_RATIO))
+            )
+            if zip_ok:
+                return {
+                    "action": "zip",
+                    "files": None,
+                    "reason": f"all {len(files)} file(s) needed: whole-torrent zip",
+                    **result,
+                }
+            # The archive would be huge (or the bundle has many files): fall back to
+            # exact per-file downloads so each file is individually size-checked.  This
+            # is NOT a strictness regression: every needed file is still selected.
+            try:
+                for item in selected_files:
+                    self._check_torbox_file_size(item, max_bytes)
+            except DownloaderFileError as exc:
+                logger.error("%s file->volume mapping: %s", exc, json.dumps(mapping))
+                raise
             return {
-                "action": "zip",
-                "files": None,
-                "reason": f"all {len(files)} file(s) needed: whole-torrent zip",
+                "action": "files",
+                "files": selected_files,
+                "reason": (
+                    f"all {len(files)} file(s) needed but the whole-torrent archive is "
+                    f"{estimated_total / (1024 ** 3):.1f} GiB / {len(files)} file(s) (safe zip "
+                    f"limit: {TORBOX_ZIP_MAX_FILES} files and <{TORBOX_ZIP_SAFETY_RATIO:.0%} of "
+                    "torbox_max_download_gb); downloading the exact files per-file"
+                ),
                 **result,
             }
+        try:
+            for item in selected_files:
+                self._check_torbox_file_size(item, max_bytes)
+        except DownloaderFileError as exc:
+            logger.error("%s file->volume mapping: %s", exc, json.dumps(mapping))
+            raise
         return {
             "action": "files",
             "files": selected_files,
             "reason": (
-                f"strict subset: {len(selected_files)}/{len(files)} file(s) for volumes "
-                f"{sorted(wanted)} (skipped volumes {skipped_volumes})"
+                f"strict subset: {len(selected_files)}/{len(files)} file(s) selected, "
+                f"{len(skipped_volumes)} owned volume(s) skipped"
             ),
             **result,
         }
@@ -1361,181 +1493,236 @@ class MangaScheduler:
         rate_limited = False
 
         for release in rows:
-            release_id = int(release.get("id"))
+            # A single bad release must never abort the poll cycle or leave the row in
+            # DOWNLOADING: contain it, persist the reason, clean partials and continue.
+            release_id = 0
             title = str(release.get("title") or "")
-            queued_id = parse_queued_handle_id(release.get("downloader_id"))
-            started = self._parse_db_timestamp(release.get("downloader_started_at"))
-            if started is not None and timeout_hours > 0:
-                age_hours = (datetime.utcnow() - started).total_seconds() / 3600.0
-                if age_hours > timeout_hours:
-                    if queued_id is not None:
-                        message = (
-                            f"No free Torbox active slot for {age_hours:.1f}h "
-                            f"(limit {timeout_hours:g}h); the release stays REQUESTED for a retry."
-                        )
-                    else:
-                        message = (
-                            f"Timed out after {age_hours:.1f}h (limit {timeout_hours:g}h); "
-                            "the release stays REQUESTED for a retry."
-                        )
-                    self._torbox_fail_release(release_id, title, message)
-                    failed += 1
-                    continue
-
-            if queued_id is not None:
-                handle = {
-                    "engine": "torbox",
-                    "queued_id": queued_id,
-                    "torrent_id": None,
-                    "hash": str(release.get("torrent_hash") or ""),
-                }
-            else:
-                try:
-                    torrent_id = int(release.get("downloader_id") or 0)
-                except (TypeError, ValueError):
-                    torrent_id = 0
-                handle = {
-                    "torrent_id": torrent_id,
-                    "hash": str(release.get("torrent_hash") or ""),
-                }
-                if not torrent_id:
-                    self._torbox_fail_release(release_id, title, "Missing Torbox torrent_id/queued_id on the release row.")
-                    failed += 1
-                    continue
-
+            handle: Dict[str, Any] = {}
             try:
-                info = downloader.status(handle)
-            except DownloaderRateLimitError as exc:
-                self._torbox_surface_once(release_id, str(exc), title)
-                rate_limited = True
-                break
-            except (DownloaderAuthError, DownloaderNotFoundError) as exc:
-                self._torbox_fail_release(release_id, title, str(exc))
-                failed += 1
-                continue
-            except DownloaderError as exc:
-                self._torbox_surface_once(release_id, str(exc), title)
-                continue
+                release_id = int(release.get("id"))
+                title = str(release.get("title") or "")
+                queued_id = parse_queued_handle_id(release.get("downloader_id"))
+                started = self._parse_db_timestamp(release.get("downloader_started_at"))
+                if started is not None and timeout_hours > 0:
+                    age_hours = (datetime.utcnow() - started).total_seconds() / 3600.0
+                    if age_hours > timeout_hours:
+                        if queued_id is not None:
+                            message = (
+                                f"No free Torbox active slot for {age_hours:.1f}h "
+                                f"(limit {timeout_hours:g}h); the release stays REQUESTED for a retry."
+                            )
+                        else:
+                            message = (
+                                f"Timed out after {age_hours:.1f}h (limit {timeout_hours:g}h); "
+                                "the release stays REQUESTED for a retry."
+                            )
+                        self._torbox_fail_release(
+                            release_id, title, message, downloader=downloader,
+                        )
+                        failed += 1
+                        continue
 
-            processed += 1
-            state = str(info.get("state") or "queued")
+                if queued_id is not None:
+                    handle = {
+                        "engine": "torbox",
+                        "queued_id": queued_id,
+                        "torrent_id": None,
+                        "hash": str(release.get("torrent_hash") or ""),
+                    }
+                else:
+                    try:
+                        torrent_id = int(release.get("downloader_id") or 0)
+                    except (TypeError, ValueError):
+                        torrent_id = 0
+                    handle = {
+                        "torrent_id": torrent_id,
+                        "hash": str(release.get("torrent_hash") or ""),
+                    }
+                    if not torrent_id:
+                        self._torbox_fail_release(release_id, title, "Missing Torbox torrent_id/queued_id on the release row.")
+                        failed += 1
+                        continue
 
-            # Queued submission just activated: capture the real torrent id and keep
-            # going with the normal flow in this same poll cycle.
-            promoted = info.get("promoted_torrent_id")
-            if promoted:
-                self.db.set_downloader_id(release_id, str(promoted))
-                self._torbox_surface_once(
-                    release_id,
-                    f"Activated from queued_id={handle.get('queued_id')} as Torbox torrent {promoted}.",
-                    title,
-                    event_type="TORBOX_PROMOTED",
-                )
-                handle = {
-                    "engine": "torbox",
-                    "torrent_id": int(promoted),
-                    "queued_id": handle.get("queued_id"),
-                    "hash": handle.get("hash") or "",
-                }
+                try:
+                    info = downloader.status(handle)
+                except DownloaderRateLimitError as exc:
+                    self._torbox_surface_once(release_id, str(exc), title)
+                    rate_limited = True
+                    break
+                except (DownloaderAuthError, DownloaderNotFoundError) as exc:
+                    self._torbox_fail_release(release_id, title, str(exc))
+                    failed += 1
+                    continue
+                except DownloaderError as exc:
+                    self._torbox_surface_once(release_id, str(exc), title)
+                    continue
+
+                processed += 1
+                state = str(info.get("state") or "queued")
+
+                # Queued submission just activated: capture the real torrent id and keep
+                # going with the normal flow in this same poll cycle.
+                promoted = info.get("promoted_torrent_id")
+                if promoted:
+                    self.db.set_downloader_id(release_id, str(promoted))
+                    self._torbox_surface_once(
+                        release_id,
+                        f"Activated from queued_id={handle.get('queued_id')} as Torbox torrent {promoted}.",
+                        title,
+                        event_type="TORBOX_PROMOTED",
+                    )
+                    handle = {
+                        "engine": "torbox",
+                        "torrent_id": int(promoted),
+                        "queued_id": handle.get("queued_id"),
+                        "hash": handle.get("hash") or "",
+                    }
+                    self._torbox_notified.pop(release_id, None)
+
+                if state == "queued_slot":
+                    message = "queued: waiting for a free Torbox slot"
+                    position = info.get("queue_position")
+                    active_limit = info.get("active_limit")
+                    if position is not None:
+                        message += f" (position {position})"
+                    if active_limit is not None:
+                        message += f" [active limit {active_limit}]"
+                    self._torbox_surface_once(
+                        release_id, message, title, event_type="TORBOX_QUEUED",
+                    )
+                    continue
+
+                if state == "failed":
+                    self._torbox_fail_release(
+                        release_id, title,
+                        f"Torbox reported state '{info.get('raw_state') or 'failed'}'.",
+                        downloader=downloader, handle=handle,
+                    )
+                    failed += 1
+                    continue
+                if state == "stalled":
+                    self._torbox_surface_once(
+                        release_id,
+                        f"Torbox reports '{info.get('raw_state') or 'stalled'}' (no seeds/progress); "
+                        "it is not retried automatically.",
+                        title,
+                    )
+                    continue
+                if state != "ready":
+                    continue
+
+                files = info.get("files") or []
+                wanted = self.resolve_release_missing_volumes(release)
+                dest_dir = os.path.join(downloads_dir, self._safe_torrent_dirname(title))
+                try:
+                    plan = self._plan_torbox_selection(
+                        release, files, wanted, total_size=int(info.get("size") or 0),
+                    )
+                except DownloaderFileError as exc:
+                    # Strict selection refused (unmappable names / absent volumes): fail the
+                    # release with an actionable reason and leave no partial output behind.
+                    self._cleanup_torbox_partials(dest_dir)
+                    self._torbox_fail_release(
+                        release_id, title, str(exc), downloader=downloader, handle=handle,
+                    )
+                    failed += 1
+                    continue
+                if plan["action"] == "skip":
+                    # Nothing missing anymore: free the remote job instead of downloading.
+                    try:
+                        downloader.cancel(handle)
+                    except Exception as exc:  # pragma: no cover - cancel already swallows
+                        logger.debug("Could not cancel skipped Torbox job: %s", exc)
+                    self.db.update_downloader_state(release_id, "IDLE", "torbox")
+                    self._log_activity(
+                        "SELECTIVE_DOWNLOAD",
+                        f"Torbox skipped '{title}': {plan['reason']}.",
+                        json.dumps({"wanted_volumes": [], "torrent_id": handle.get("torrent_id")}),
+                    )
+                    continue
+                selection = plan["files"] if plan["action"] == "files" else None
+                reason = plan["reason"]
+                if plan.get("strict"):
+                    logger.info(
+                        "Torbox selection for '%s' (torrent %s): wanted %s volume(s), selected %s/%s file(s), "
+                        "skipped %s volume(s).",
+                        title, handle.get("torrent_id"), len(plan.get("wanted_volumes") or []),
+                        plan.get("selected_count"), plan.get("total_files"),
+                        len(plan.get("skipped_volumes") or []),
+                    )
+                    logger.debug(
+                        "Torbox file->volume mapping for '%s': %s",
+                        title, json.dumps(plan.get("mapping") or []),
+                    )
+                    self._log_activity(
+                        "SELECTIVE_DOWNLOAD",
+                        f"Torbox selective download for '{title}': {reason}.",
+                        json.dumps({
+                            "wanted_count": len(plan.get("wanted_volumes") or []),
+                            "selected_count": plan.get("selected_count"),
+                            "skipped_count": len(plan.get("skipped_volumes") or []),
+                            "torrent_id": handle.get("torrent_id"),
+                        }),
+                    )
+                fetch_handle = dict(handle)
+                fetch_handle["size"] = int(info.get("size") or 0)
+                try:
+                    saved = downloader.fetch_files(fetch_handle, selection, dest_dir)
+                except (DownloaderFileError, DownloaderError) as exc:
+                    self._cleanup_torbox_partials(dest_dir)
+                    self._torbox_fail_release(
+                        release_id, title, f"Fetch failed ({reason}): {exc}",
+                        downloader=downloader, handle=handle,
+                    )
+                    failed += 1
+                    continue
+
+                self.db.clear_download_error(release_id)
+                self.db.update_downloader_state(release_id, "COMPLETED", "torbox")
+                try:
+                    rel_row = self.db.get_release_by_id(release_id)
+                    if rel_row:
+                        self.get_notifier().notify_acquired(rel_row)
+                except Exception as e:
+                    logger.debug(f"Webhook notification failed for acquired release: {e}")
+                detail = f"Saved {len(saved)} file(s) to {dest_dir} ({reason})."
+                deleted = ""
+                if delete_after:
+                    deleted = " Torbox torrent deleted." if downloader.cancel(handle) else " Torbox delete failed."
+                self._log_activity("TORBOX_DOWNLOADED", f"Torbox download complete: '{title}'", detail + deleted)
+                completed += 1
                 self._torbox_notified.pop(release_id, None)
+                # A finished download is immediately eligible for tag+route to staging.
 
-            if state == "queued_slot":
-                message = "queued: waiting for a free Torbox slot"
-                position = info.get("queue_position")
-                active_limit = info.get("active_limit")
-                if position is not None:
-                    message += f" (position {position})"
-                if active_limit is not None:
-                    message += f" [active limit {active_limit}]"
-                self._torbox_surface_once(
-                    release_id, message, title, event_type="TORBOX_QUEUED",
-                )
-                continue
-
-            if state == "failed":
-                self._torbox_fail_release(
-                    release_id, title,
-                    f"Torbox reported state '{info.get('raw_state') or 'failed'}'.",
-                )
-                failed += 1
-                continue
-            if state == "stalled":
-                self._torbox_surface_once(
-                    release_id,
-                    f"Torbox reports '{info.get('raw_state') or 'stalled'}' (no seeds/progress); "
-                    "it is not retried automatically.",
-                    title,
-                )
-                continue
-            if state != "ready":
-                continue
-
-            files = info.get("files") or []
-            wanted = self.resolve_release_missing_volumes(release)
-            dest_dir = os.path.join(downloads_dir, self._safe_torrent_dirname(title))
-            try:
-                plan = self._plan_torbox_selection(release, files, wanted)
-            except DownloaderFileError as exc:
-                # Strict selection refused (unmappable names / absent volumes): fail the
-                # release with an actionable reason and leave no partial output behind.
-                self._cleanup_torbox_partials(dest_dir)
-                self._torbox_fail_release(release_id, title, str(exc))
-                failed += 1
-                continue
-            if plan["action"] == "skip":
-                # Nothing missing anymore: free the remote job instead of downloading.
-                try:
-                    downloader.cancel(handle)
-                except Exception as exc:  # pragma: no cover - cancel already swallows
-                    logger.debug("Could not cancel skipped Torbox job: %s", exc)
-                self.db.update_downloader_state(release_id, "IDLE", "torbox")
-                self._log_activity(
-                    "SELECTIVE_DOWNLOAD",
-                    f"Torbox skipped '{title}': {plan['reason']}.",
-                    json.dumps({"wanted_volumes": [], "torrent_id": handle.get("torrent_id")}),
-                )
-                continue
-            selection = plan["files"] if plan["action"] == "files" else None
-            reason = plan["reason"]
-            if plan.get("strict"):
-                self._log_activity(
-                    "SELECTIVE_DOWNLOAD",
-                    f"Torbox selective download for '{title}': {reason}; "
-                    f"skipped volumes {plan.get('skipped_volumes')}.",
-                    json.dumps({
-                        "mapping": plan.get("mapping"),
-                        "wanted_volumes": plan.get("wanted_volumes"),
-                        "selected_volumes": plan.get("selected_volumes"),
-                        "torrent_id": handle.get("torrent_id"),
-                    }),
-                )
-            try:
-                saved = downloader.fetch_files(handle, selection, dest_dir)
-            except (DownloaderFileError, DownloaderError) as exc:
-                self._cleanup_torbox_partials(dest_dir)
-                self._torbox_fail_release(release_id, title, f"Fetch failed ({reason}): {exc}")
-                failed += 1
-                continue
-
-            self.db.update_downloader_state(release_id, "COMPLETED", "torbox")
-            try:
-                rel_row = self.db.get_release_by_id(release_id)
-                if rel_row:
-                    self.get_notifier().notify_acquired(rel_row)
-            except Exception as e:
-                logger.debug(f"Webhook notification failed for acquired release: {e}")
-            detail = f"Saved {len(saved)} file(s) to {dest_dir} ({reason})."
-            deleted = ""
-            if delete_after:
-                deleted = " Torbox torrent deleted." if downloader.cancel(handle) else " Torbox delete failed."
-            self._log_activity("TORBOX_DOWNLOADED", f"Torbox download complete: '{title}'", detail + deleted)
-            completed += 1
-            self._torbox_notified.pop(release_id, None)
-            # A finished download is immediately eligible for tag+route to staging.
-            try:
-                self.process_downloads_to_staging(actor="scheduler")
             except Exception as exc:
-                logger.debug("Downloads routing after Torbox completion failed: %s", exc)
+                message = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "Torbox poll failed for release %s (%s): %s",
+                    release_id, title, message, exc_info=True,
+                )
+                try:
+                    self._cleanup_torbox_partials(
+                        os.path.join(downloads_dir, self._safe_torrent_dirname(title))
+                    )
+                except Exception:
+                    pass
+                try:
+                    self._torbox_fail_release(
+                        release_id, title, message,
+                        downloader=downloader or None, handle=handle or None,
+                    )
+                except Exception as fail_exc:
+                    logger.error(
+                        "Could not persist Torbox failure for release %s: %s", release_id, fail_exc,
+                    )
+                    try:
+                        self.db.set_download_error(release_id, message)
+                        self.db.update_downloader_state(release_id, "FAILED", "torbox")
+                    except Exception:
+                        pass
+                failed += 1
+                self._torbox_notified.pop(release_id, None)
+                continue
 
         return {
             "status": "rate_limited" if rate_limited else "ok",

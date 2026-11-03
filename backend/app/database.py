@@ -512,6 +512,11 @@ class MangaDatabase:
             # in flight from another release; Torbox polls this exact wanted set).
             if "download_wanted_json" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN download_wanted_json TEXT DEFAULT '[]';")
+            # User-visible failure reason + attempt counter for retry (task-27).
+            if "download_error" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN download_error TEXT DEFAULT '';")
+            if "download_attempts" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN download_attempts INTEGER DEFAULT 0;")
 
             # Backfill is_complete for existing releases matching complete indicators (local SQL/regex only, NO network calls)
             try:
@@ -731,6 +736,8 @@ class MangaDatabase:
                     ),
                     "torbox_poll_seconds": os.getenv("MANGATRAX_TORBOX_POLL_SECONDS", "10"),
                     "torbox_max_concurrent": os.getenv("MANGATRAX_TORBOX_MAX_CONCURRENT", "2"),
+        "torbox_max_download_gb": os.getenv("MANGATRAX_TORBOX_MAX_DOWNLOAD_GB", "64"),
+        "torbox_delete_on_failure": os.getenv("MANGATRAX_TORBOX_DELETE_ON_FAILURE", "true"),
                     "torbox_timeout_hours": os.getenv("MANGATRAX_TORBOX_TIMEOUT_HOURS", "6"),
                     "torbox_strict_volume_selection": os.getenv("MANGATRAX_TORBOX_STRICT_VOLUMES", "true"),
                 }
@@ -766,6 +773,8 @@ class MangaDatabase:
                 ("torbox_delete_after_download", os.getenv("MANGATRAX_TORBOX_DELETE_AFTER_DOWNLOAD", "true")),
                 ("torbox_poll_seconds", os.getenv("MANGATRAX_TORBOX_POLL_SECONDS", "10")),
                 ("torbox_max_concurrent", os.getenv("MANGATRAX_TORBOX_MAX_CONCURRENT", "2")),
+                ("torbox_max_download_gb", os.getenv("MANGATRAX_TORBOX_MAX_DOWNLOAD_GB", "64")),
+                ("torbox_delete_on_failure", os.getenv("MANGATRAX_TORBOX_DELETE_ON_FAILURE", "true")),
                 ("torbox_timeout_hours", os.getenv("MANGATRAX_TORBOX_TIMEOUT_HOURS", "6")),
                 ("torbox_strict_volume_selection", os.getenv("MANGATRAX_TORBOX_STRICT_VOLUMES", "true")),
             ):
@@ -1570,6 +1579,8 @@ class MangaDatabase:
                     downloader_id = ?,
                     torrent_hash = COALESCE(?, torrent_hash),
                     download_wanted_json = COALESCE(?, download_wanted_json),
+                    download_error = '',
+                    download_attempts = 0,
                     downloader_started_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?;
@@ -1591,6 +1602,47 @@ class MangaDatabase:
                     "UPDATE releases SET download_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
                     (download_status, release_id),
                 )
+            conn.commit()
+            self._invalidate_grouped_cache()
+
+    def increment_download_attempt(self, release_id: int) -> int:
+        """Bump the failure attempt counter and return the new value."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET download_attempts = COALESCE(download_attempts, 0) + 1, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (release_id,),
+            )
+            conn.commit()
+            cur.execute(
+                "SELECT COALESCE(download_attempts, 0) AS attempts FROM releases WHERE id = ?;",
+                (release_id,),
+            )
+            row = cur.fetchone()
+            self._invalidate_grouped_cache()
+            return int(row["attempts"]) if row else 0
+
+    def set_download_error(self, release_id: int, message: str) -> None:
+        """Persist a user-visible failure reason (attempt count is bumped separately)."""
+        clean = str(message or "").strip()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET download_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (clean, release_id),
+            )
+            conn.commit()
+            self._invalidate_grouped_cache()
+
+    def clear_download_error(self, release_id: int) -> None:
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET download_error = '', download_attempts = 0, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (release_id,),
+            )
             conn.commit()
             self._invalidate_grouped_cache()
 

@@ -43,12 +43,18 @@ def build_downloader(db, qbit_client=None, engine: Optional[str] = None) -> Down
     """Construct the configured engine (Torbox needs no qBittorrent client)."""
     selected = (engine or resolve_downloader_engine(db)).strip().lower()
     if selected == "torbox":
+        try:
+            max_download_gb = float(db.get_setting("torbox_max_download_gb", "64") or 64)
+        except (TypeError, ValueError):
+            max_download_gb = 64.0
+        max_download_gb = max(1.0, min(max_download_gb, 10240.0))
         return TorboxDownloader(
             api_key=db.get_setting("torbox_api_key", "") or "",
             enabled=as_bool(db.get_setting("torbox_enabled", "false"), default=False),
             delete_after_download=as_bool(
                 db.get_setting("torbox_delete_after_download", "true"), default=True,
             ),
+            max_file_bytes=int(max_download_gb * 1024 * 1024 * 1024),
         )
     if qbit_client is None:
         from app.downloader.qbit import QBitClient

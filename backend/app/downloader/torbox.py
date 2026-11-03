@@ -13,10 +13,12 @@ Secrets: the API key is only ever sent in the ``Authorization`` header (or the
 messages, or persisted anywhere outside ``app_settings``.
 """
 
+import errno
 import json
 import logging
 import os
 import re
+import shutil
 import time
 import urllib.error
 import urllib.parse
@@ -44,7 +46,12 @@ REDACTED_SECRET = "'***'"
 TORBOX_API_TIMEOUT_SECONDS = 30.0
 TORBOX_STREAM_TIMEOUT_SECONDS = 60.0
 TORBOX_STREAM_CHUNK_BYTES = 1024 * 256
-TORBOX_MAX_FILE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB sanity cap for one file
+# Default sanity cap for one streamed file / one whole-torrent zip.  The scheduler
+# passes the configured ``torbox_max_download_gb`` (default 64 GiB) via the factory;
+# this constant is only the safety default for direct construction.
+TORBOX_MAX_FILE_BYTES = 64 * 1024 * 1024 * 1024
+TORBOX_ZIP_MAX_FILES = 20  # whole-torrent zips only for small bundles
+TORBOX_ZIP_SAFETY_RATIO = 0.9  # archive must be comfortably under the cap
 TORBOX_MAX_TORRENT_BYTES = 10 * 1024 * 1024  # .torrent metadata sanity cap
 TORBOX_MAX_REDIRECTS = 5
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
@@ -112,6 +119,32 @@ def _resolve_within(base_dir: str, name: str) -> str:
     if candidate != root and not candidate.startswith(root + os.sep):
         raise DownloaderFileError(f"Unsafe path outside the download folder: {name!r}")
     return candidate
+
+
+def _disk_free_text(path: str) -> str:
+    """One-line free-space hint for a filesystem error (nearest existing parent)."""
+    probe = os.path.abspath(path or ".")
+    while probe and not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    try:
+        usage = shutil.disk_usage(probe or ".")
+    except OSError:
+        return ""
+    return f"; free space on the destination: {usage.free / (1024 ** 3):.2f} GiB"
+
+
+def _filesystem_error(action: str, path: str, exc: OSError) -> DownloaderFileError:
+    """Turn a raw OSError into an actionable DownloaderFileError (path + errno + space)."""
+    errno_value = getattr(exc, "errno", None)
+    code = errno.errorcode.get(errno_value, "") if errno_value else ""
+    detail = getattr(exc, "strerror", None) or str(exc) or type(exc).__name__
+    suffix = f" (errno {errno_value}{' ' + code if code else ''})" if errno_value else ""
+    return DownloaderFileError(
+        f"Cannot {action} '{path}': {detail}{suffix}{_disk_free_text(os.path.dirname(path) or path)}"
+    )
 
 
 class TorboxDownloader:
@@ -764,15 +797,18 @@ class TorboxDownloader:
                         f"Refusing {label or 'file'}: {expected} bytes exceeds the size cap."
                     )
                 written = 0
-                with open(dest_path, "wb") as handle:
-                    while True:
-                        chunk = response.read(TORBOX_STREAM_CHUNK_BYTES)
-                        if not chunk:
-                            break
-                        written += len(chunk)
-                        if written > self.max_file_bytes:
-                            raise DownloaderFileError(f"{label or 'file'} exceeded the size cap while streaming.")
-                        handle.write(chunk)
+                try:
+                    with open(dest_path, "wb") as handle:
+                        while True:
+                            chunk = response.read(TORBOX_STREAM_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            if written > self.max_file_bytes:
+                                raise DownloaderFileError(f"{label or 'file'} exceeded the size cap while streaming.")
+                            handle.write(chunk)
+                except OSError as exc:
+                    raise _filesystem_error("write", dest_path, exc) from exc
                 if expected and written < expected:
                     raise DownloaderFileError(
                         f"Partial download for {label or 'file'}: {written}/{expected} bytes."
@@ -792,13 +828,34 @@ class TorboxDownloader:
                     pass
         raise DownloaderFileError(f"Too many redirects downloading {label or 'file'}.")
 
+    def _size_cap_error(self, label: str, size_bytes: int) -> DownloaderFileError:
+        size_gb = float(size_bytes) / (1024 * 1024 * 1024)
+        cap_gb = float(self.max_file_bytes) / (1024 * 1024 * 1024)
+        return DownloaderFileError(
+            f"Torbox {label} is {size_gb:.1f} GiB ({int(size_bytes)} bytes), above the "
+            f"configured cap of {cap_gb:g} GiB (torbox_max_download_gb)."
+        )
+
     def _download_to(self, url: str, dest_dir: str, name: str, progress_cb=None) -> Dict[str, Any]:
         final_path = _resolve_within(dest_dir, name)
-        os.makedirs(dest_dir, exist_ok=True)
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except OSError as exc:
+            raise _filesystem_error("create directory", dest_dir, exc) from exc
         partial_path = f"{final_path}.part"
         try:
             written = self._stream_to_file(url, partial_path, progress_cb=progress_cb, label=name)
-            os.replace(partial_path, final_path)
+            try:
+                os.replace(partial_path, final_path)
+            except OSError as exc:
+                raise _filesystem_error("move into place", final_path, exc) from exc
+        except OSError as exc:
+            try:
+                if os.path.isfile(partial_path):
+                    os.remove(partial_path)
+            except OSError:
+                pass
+            raise _filesystem_error("write", final_path, exc) from exc
         except Exception:
             try:
                 if os.path.isfile(partial_path):
@@ -813,30 +870,45 @@ class TorboxDownloader:
         """Extract a Torbox zip archive, rejecting absolute paths, ``..`` and symlinks."""
         root = os.path.realpath(dest_dir)
         saved: List[Dict[str, Any]] = []
-        with zipfile.ZipFile(zip_path, "r") as archive:
-            for member in archive.infolist():
-                name = member.filename.replace("\\", "/")
-                if not name or name.endswith("/"):
-                    continue
-                if name.startswith("/") or re.match(r"^[a-zA-Z]:", name) or "\x00" in name:
-                    raise DownloaderFileError(f"Unsafe absolute path in Torbox zip: {member.filename!r}")
-                parts = [part for part in name.split("/") if part not in ("", ".")]
-                if any(part == ".." for part in parts):
-                    raise DownloaderFileError(f"Unsafe '..' path in Torbox zip: {member.filename!r}")
-                mode = (member.external_attr >> 16) & 0o170000
-                if mode == 0o120000:  # symlink
-                    raise DownloaderFileError(f"Refusing symlink entry in Torbox zip: {member.filename!r}")
-                target = os.path.realpath(os.path.join(root, *parts))
-                if target != root and not target.startswith(root + os.sep):
-                    raise DownloaderFileError(f"Zip entry escapes the download folder: {member.filename!r}")
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                with archive.open(member, "r") as source, open(target, "wb") as handle:
-                    while True:
-                        chunk = source.read(TORBOX_STREAM_CHUNK_BYTES)
-                        if not chunk:
-                            break
-                        handle.write(chunk)
-                saved.append({"name": parts[-1], "path": target, "size": member.file_size})
+        written_paths: List[str] = []
+        try:
+            with zipfile.ZipFile(zip_path, "r") as archive:
+                for member in archive.infolist():
+                    name = member.filename.replace("\\", "/")
+                    if not name or name.endswith("/"):
+                        continue
+                    if name.startswith("/") or re.match(r"^[a-zA-Z]:", name) or "\x00" in name:
+                        raise DownloaderFileError(f"Unsafe absolute path in Torbox zip: {member.filename!r}")
+                    parts = [part for part in name.split("/") if part not in ("", ".")]
+                    if any(part == ".." for part in parts):
+                        raise DownloaderFileError(f"Unsafe '..' path in Torbox zip: {member.filename!r}")
+                    mode = (member.external_attr >> 16) & 0o170000
+                    if mode == 0o120000:  # symlink
+                        raise DownloaderFileError(f"Refusing symlink entry in Torbox zip: {member.filename!r}")
+                    target = os.path.realpath(os.path.join(root, *parts))
+                    if target != root and not target.startswith(root + os.sep):
+                        raise DownloaderFileError(f"Zip entry escapes the download folder: {member.filename!r}")
+                    try:
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        with archive.open(member, "r") as source, open(target, "wb") as handle:
+                            while True:
+                                chunk = source.read(TORBOX_STREAM_CHUNK_BYTES)
+                                if not chunk:
+                                    break
+                                handle.write(chunk)
+                    except OSError as exc:
+                        raise _filesystem_error("write", target, exc) from exc
+                    saved.append({"name": parts[-1], "path": target, "size": member.file_size})
+                    written_paths.append(target)
+        except Exception:
+            # Remove partially extracted entries so a failed archive leaves no junk.
+            for written in written_paths:
+                try:
+                    if os.path.isfile(written):
+                        os.remove(written)
+                except OSError:
+                    pass
+            raise
         if not saved:
             raise DownloaderFileError("The Torbox zip archive contained no files.")
         return saved
@@ -857,9 +929,18 @@ class TorboxDownloader:
         torrent_id = (handle or {}).get("torrent_id")
         if not torrent_id:
             raise DownloaderNotFoundError("Torbox handle is missing its torrent_id.")
-        os.makedirs(dest_dir, exist_ok=True)
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except OSError as exc:
+            raise _filesystem_error("create directory", dest_dir, exc) from exc
 
         if files in (None, "all") or files == []:
+            try:
+                estimated = int((handle or {}).get("size") or 0)
+            except (TypeError, ValueError):
+                estimated = 0
+            if estimated and estimated > self.max_file_bytes:
+                raise self._size_cap_error("whole-torrent archive", estimated)
             url = self._requestdl(int(torrent_id), file_id=None)
             zip_path = os.path.join(dest_dir, ".torbox-download.zip.part")
             try:
@@ -875,16 +956,39 @@ class TorboxDownloader:
 
         if not isinstance(files, list):
             raise DownloaderFileError("Torbox fetch_files expects a file list or 'all'.")
-        saved: List[Dict[str, Any]] = []
+        # Pre-check the reported sizes BEFORE asking Torbox for any download link so a
+        # too-large file fails fast with an actionable message (zero streams/reads).
         for item in files:
             if not isinstance(item, dict):
-                raise DownloaderFileError("Torbox file entries must be mappings.")
+                continue
+            try:
+                reported = int(item.get("size") or 0)
+            except (TypeError, ValueError):
+                reported = 0
             name = _safe_basename(item.get("name") or item.get("short_name") or item.get("path") or "")
-            file_id = item.get("id")
-            if file_id is None:
-                raise DownloaderFileError(f"Torbox file {name!r} has no file id.")
-            url = self._requestdl(int(torrent_id), file_id=int(file_id))
-            saved.append(self._download_to(url, dest_dir, name, progress_cb=progress_cb))
+            if reported > self.max_file_bytes:
+                raise self._size_cap_error(name or "file", reported)
+        saved: List[Dict[str, Any]] = []
+        try:
+            for item in files:
+                if not isinstance(item, dict):
+                    raise DownloaderFileError("Torbox file entries must be mappings.")
+                name = _safe_basename(item.get("name") or item.get("short_name") or item.get("path") or "")
+                file_id = item.get("id")
+                if file_id is None:
+                    raise DownloaderFileError(f"Torbox file {name!r} has no file id.")
+                url = self._requestdl(int(torrent_id), file_id=int(file_id))
+                saved.append(self._download_to(url, dest_dir, name, progress_cb=progress_cb))
+        except Exception:
+            # Never leave half a release behind: remove files already written by this
+            # call (final files and .part remnants) before surfacing the error.
+            for entry in saved:
+                try:
+                    if entry.get("path") and os.path.isfile(entry["path"]):
+                        os.remove(entry["path"])
+                except OSError:
+                    pass
+            raise
         if not saved:
             raise DownloaderFileError("No files were downloaded from Torbox.")
         return saved

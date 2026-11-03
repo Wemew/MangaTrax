@@ -116,7 +116,8 @@ def test_strict_subset_exact_files():
         _handle, selection, _dest = service.fetch_calls[0]
         assert [item["id"] for item in selection] == [3, 4], selection
         events = ctx.events("SELECTIVE_DOWNLOAD")
-        assert events and "skipped volumes [1.0, 2.0, 5.0]" in events[0]["message"], events
+        assert events and "2/5 file(s) selected" in events[0]["message"], events
+        assert "3 owned volume(s) skipped" in events[0]["message"], events
         assert ctx.db.get_release_by_id(rid)["download_status"] == "COMPLETED"
         print("    [PASSED] v01..v05 missing 3,4 -> only file ids 3 and 4 requested, no zip_link.")
     finally:

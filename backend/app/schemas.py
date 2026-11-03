@@ -368,6 +368,8 @@ SETTINGS_KEYS = (
     "torbox_max_concurrent",
     "torbox_timeout_hours",
     "torbox_strict_volume_selection",
+    "torbox_max_download_gb",
+    "torbox_delete_on_failure",
 )
 # Placeholder returned by GET /api/settings and rendered in the Settings UI instead of
 # the real Torbox key.  Saving the placeholder back is a no-op.
@@ -682,6 +684,12 @@ class SettingsUpdateRequest(BaseModel):
     # Strict exact-missing-volume selection (default true; false restores the old
     # whole-torrent fallback when file names cannot be mapped).
     torbox_strict_volume_selection: Optional[str] = Field(default=None, max_length=20)
+    # Per-file / whole-torrent download size cap in GiB (default 64, min 1).  A file
+    # above the cap is rejected before streaming with an actionable message.
+    torbox_max_download_gb: Optional[str] = Field(default=None, max_length=20)
+    # Delete a permanently failing Torbox torrent so it does not hold an active slot
+    # (default true; false keeps it for inspection; Remove button still available).
+    torbox_delete_on_failure: Optional[str] = Field(default=None, max_length=20)
 
     @field_validator("downloader_engine")
     @classmethod
@@ -692,6 +700,29 @@ class SettingsUpdateRequest(BaseModel):
         if engine not in ("qbit", "torbox"):
             raise ValueError("downloader_engine must be 'qbit' or 'torbox'")
         return engine
+
+    @field_validator("torbox_max_download_gb")
+    @classmethod
+    def _validate_torbox_max_download_gb(cls, value):
+        if value is None or not str(value).strip():
+            return "64"
+        try:
+            gb = float(str(value).strip())
+        except ValueError:
+            raise ValueError("torbox_max_download_gb must be a number")
+        if not 1 <= gb <= 10240:
+            raise ValueError("torbox_max_download_gb must be between 1 and 10240")
+        return str(int(gb)) if gb.is_integer() else str(gb)
+
+    @field_validator("torbox_delete_on_failure")
+    @classmethod
+    def _validate_torbox_delete_on_failure(cls, value):
+        if value is None or not str(value).strip():
+            return "true"
+        text = str(value).strip().lower()
+        if text not in ("true", "false", "1", "0", "yes", "no", "on", "off"):
+            raise ValueError("torbox_delete_on_failure must be true or false")
+        return "true" if text in ("true", "1", "yes", "on") else "false"
 
     @field_validator("torbox_poll_seconds")
     @classmethod
