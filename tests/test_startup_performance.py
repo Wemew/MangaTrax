@@ -416,10 +416,13 @@ def test_entrypoint_ownership_guard():
     source = _source(ENTRYPOINT)
     assert source.startswith("#!/bin/sh\n"), "entrypoint must stay POSIX sh"
     assert "[[ " not in source, "entrypoint must not use bash-only [[ ... ]]"
-    assert "find /app/data /staging ! -user appuser -print -quit" in source, source
+    # The guard covers every bind-mounted runtime directory (data, staging, downloads).
+    for guarded in ("/app/data", "/staging", "/downloads"):
+        assert guarded in source, source
+    assert "find /app/data /staging /downloads ! -user appuser -print -quit" in source, source
     assert "grep -q ." in source, source
     # The recursive chown only runs inside the mis-owned check.
-    guard_index = source.index("if find /app/data /staging ! -user appuser")
+    guard_index = source.index("if find /app/data /staging /downloads ! -user appuser")
     chown_index = source.index("chown -R appuser:appuser")
     assert guard_index < chown_index, source
     assert "\n    fi\n" in source[guard_index:], source[guard_index:]
