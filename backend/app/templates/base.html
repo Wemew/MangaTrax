@@ -78,6 +78,18 @@
         @keyframes shimmer {
             to { background-position-x: -200%; }
         }
+
+        /* Consistent keyboard focus ring for every interactive control. */
+        :where(a, button, input, select, textarea, summary):focus-visible {
+            outline: 2px solid rgba(244, 63, 94, 0.8);
+            outline-offset: 2px;
+        }
+        /* Nav dropdown panels: keyboard-menu links keep a visible focus ring. */
+        [data-dropdown-menu] a:focus-visible,
+        [data-dropdown-menu] button:focus-visible {
+            background-color: rgba(30, 41, 59, 0.9);
+            outline-offset: 0;
+        }
     </style>
 </head>
 <body class="bg-[#0b0f19] text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-brand-500 selection:text-white">
@@ -105,73 +117,181 @@
                     </a>
                 </div>
 
-                <!-- Main Navigation Links -->
-                <nav class="hidden md:flex space-x-1 lg:space-x-1.5">
-                    <a href="/" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'dashboard' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
+                <!-- Main Navigation (5 grouped top-level items; task-15) -->
+                <nav class="hidden md:flex items-center space-x-1 lg:space-x-1.5" aria-label="Main navigation">
+                    <a href="/" data-nav-item="overview" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'dashboard' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
                         <i data-lucide="layout-dashboard" class="w-4 h-4"></i>
                         Overview
                     </a>
-                    <a href="/series" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'series' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
-                        <i data-lucide="library" class="w-4 h-4"></i>
-                        Series
-                    </a>
-                    <a href="/discovery" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'discovery' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
-                        <i data-lucide="compass" class="w-4 h-4 text-amber-400"></i>
-                        Discovery
-                    </a>
-                    <a href="/releases" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'releases' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
-                        <i data-lucide="sparkles" class="w-4 h-4"></i>
-                        Releases
-                    </a>
-                    <a href="/prioritized" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'prioritized' %}bg-slate-800 text-amber-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
-                        <i data-lucide="star" class="w-4 h-4 text-amber-400"></i>
-                        Prioritized
-                    </a>
-                    <a href="/downloads" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'downloads' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
+
+                    <!-- Library -->
+                    <div class="relative" data-dropdown data-nav-item="library">
+                        <button type="button" data-dropdown-trigger aria-haspopup="true" aria-expanded="false" aria-controls="nav-menu-library" title="Library: Series, Releases, Prioritized" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page in ['series', 'releases', 'prioritized'] %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
+                            <i data-lucide="library" class="w-4 h-4"></i>
+                            Library
+                            <i data-lucide="chevron-down" class="w-3.5 h-3.5 opacity-70"></i>
+                        </button>
+                        <div id="nav-menu-library" data-dropdown-menu role="menu" class="hidden absolute left-0 mt-2 w-52 bg-darkcard border border-slate-800 rounded-xl shadow-2xl p-1.5 z-50">
+                            <a href="/series" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'series' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="library" class="w-4 h-4"></i> Series
+                            </a>
+                            <a href="/releases" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'releases' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="sparkles" class="w-4 h-4"></i> Releases
+                            </a>
+                            <a href="/prioritized" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'prioritized' %}bg-slate-800 text-amber-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="star" class="w-4 h-4 text-amber-400"></i> Prioritized
+                            </a>
+                        </div>
+                    </div>
+
+                    <!-- Discover -->
+                    <div class="relative" data-dropdown data-nav-item="discover">
+                        <button type="button" data-dropdown-trigger aria-haspopup="true" aria-expanded="false" aria-controls="nav-menu-discover" title="Discover: Discovery, Feeds" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page in ['discovery', 'feeds'] %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
+                            <i data-lucide="compass" class="w-4 h-4 text-amber-400"></i>
+                            Discover
+                            <i data-lucide="chevron-down" class="w-3.5 h-3.5 opacity-70"></i>
+                        </button>
+                        <div id="nav-menu-discover" data-dropdown-menu role="menu" class="hidden absolute left-0 mt-2 w-52 bg-darkcard border border-slate-800 rounded-xl shadow-2xl p-1.5 z-50">
+                            <a href="/discovery" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'discovery' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="compass" class="w-4 h-4 text-amber-400"></i> Discovery
+                            </a>
+                            <a href="/feeds" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'feeds' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="rss" class="w-4 h-4"></i> Feeds
+                            </a>
+                        </div>
+                    </div>
+
+                    <!-- Downloads -->
+                    <a href="/downloads" data-nav-item="downloads" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'downloads' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
                         <i data-lucide="download-cloud" class="w-4 h-4 text-cyan-400"></i>
                         Downloads
                     </a>
-                    <a href="/feeds" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'feeds' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
-                        <i data-lucide="rss" class="w-4 h-4"></i>
-                        Feeds
-                    </a>
-                    <a href="/logs" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'logs' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
-                        <i data-lucide="scroll-text" class="w-4 h-4"></i>
-                        Logs
-                    </a>
-                    <a href="/settings" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'settings' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
-                        <i data-lucide="settings" class="w-4 h-4"></i>
-                        Settings
-                    </a>
+
+                    <!-- System -->
+                    <div class="relative" data-dropdown data-nav-item="system">
+                        <button type="button" data-dropdown-trigger aria-haspopup="true" aria-expanded="false" aria-controls="nav-menu-system" title="System: Logs, Settings" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page in ['logs', 'settings'] %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
+                            <i data-lucide="settings" class="w-4 h-4"></i>
+                            System
+                            <i data-lucide="chevron-down" class="w-3.5 h-3.5 opacity-70"></i>
+                        </button>
+                        <div id="nav-menu-system" data-dropdown-menu role="menu" class="hidden absolute left-0 mt-2 w-52 bg-darkcard border border-slate-800 rounded-xl shadow-2xl p-1.5 z-50">
+                            <a href="/logs" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'logs' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="scroll-text" class="w-4 h-4"></i> Logs
+                            </a>
+                            <a href="/settings" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'settings' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="settings" class="w-4 h-4"></i> Settings
+                            </a>
+                        </div>
+                    </div>
                 </nav>
 
-                <!-- Quick Action Buttons -->
+                <!-- Right side: one primary action (Poll Feeds), a "more actions"
+                     overflow menu, and the auth user menu (task-15). -->
                 <div class="flex items-center space-x-2">
                     {% if auth_mode and auth_mode != 'none' %}
-                    <span class="hidden md:inline-flex items-center px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 text-[11px] text-slate-300" title="Signed in ({{ auth_mode }})">
-                        <i data-lucide="user" class="w-3 h-3 mr-1 text-brand-400"></i>{{ auth_actor() }}
-                    </span>
-                    <a href="/auth/logout" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-medium flex items-center gap-1.5 transition-colors" title="Sign out">
-                        <i data-lucide="log-out" class="w-3.5 h-3.5"></i>
-                        <span class="hidden lg:inline">Sign out</span>
-                    </a>
+                    <div class="relative hidden md:block" data-dropdown>
+                        <button type="button" data-dropdown-trigger aria-haspopup="true" aria-expanded="false" aria-controls="nav-menu-user" aria-label="User menu for {{ auth_actor() }}" title="Signed in via {{ auth_mode }} — open user menu" class="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 transition-colors">
+                            <i data-lucide="user" class="w-3.5 h-3.5 text-brand-400"></i>
+                            <span class="max-w-[9rem] truncate">{{ auth_actor() }}</span>
+                            <i data-lucide="chevron-down" class="w-3 h-3 opacity-70"></i>
+                        </button>
+                        <div id="nav-menu-user" data-dropdown-menu role="menu" class="hidden absolute right-0 mt-2 w-48 bg-darkcard border border-slate-800 rounded-xl shadow-2xl p-1.5 z-50">
+                            <p class="px-3 py-1.5 text-[10px] uppercase tracking-wider text-slate-500">Signed in ({{ auth_mode }})</p>
+                            <a href="/auth/logout" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-slate-300 hover:bg-slate-800/70 hover:text-white">
+                                <i data-lucide="log-out" class="w-4 h-4"></i> Sign out
+                            </a>
+                        </div>
+                    </div>
                     {% endif %}
-                    <button onclick="triggerCalibreSync()" id="btn-sync-calibre" title="Scan Calibre library for manga series & owned volumes" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm active:scale-95">
-                        <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-brand-400" id="icon-calibre-sync"></i>
-                        <span class="hidden lg:inline">Sync Calibre</span>
-                    </button>
-                    <button onclick="triggerFeedCheck()" id="btn-check-feeds" title="Check feeds for new manga releases & bundles" class="px-2.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm shadow-brand-600/30 active:scale-95">
+                    <button type="button" onclick="triggerFeedCheck()" id="btn-check-feeds" aria-label="Poll feeds for new releases" title="Check feeds for new manga releases & bundles" class="px-2.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm shadow-brand-600/30 active:scale-95">
                         <i data-lucide="radio" class="w-3.5 h-3.5" id="icon-feed-check"></i>
                         <span class="hidden sm:inline">Poll Feeds</span>
                     </button>
-                    <button onclick="triggerStagingTag()" id="btn-tag-staging" title="Tag completed .cbz files in staging with inherited Calibre metadata" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-cyan-300 text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm active:scale-95">
-                        <i data-lucide="tag" class="w-3.5 h-3.5" id="icon-staging-tag"></i>
-                        <span class="hidden lg:inline">Tag CBZ</span>
+                    <div class="relative" data-dropdown>
+                        <button type="button" data-dropdown-trigger aria-haspopup="true" aria-expanded="false" aria-controls="nav-menu-actions" aria-label="More maintenance actions" title="More actions (Sync Calibre, Tag CBZ)" class="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center justify-center transition-colors">
+                            <i data-lucide="more-horizontal" class="w-4 h-4"></i>
+                        </button>
+                        <div id="nav-menu-actions" data-dropdown-menu role="menu" class="hidden absolute right-0 mt-2 w-52 bg-darkcard border border-slate-800 rounded-xl shadow-2xl p-1.5 z-50">
+                            <button type="button" onclick="triggerCalibreSync()" id="btn-sync-calibre" role="menuitem" title="Scan Calibre library for manga series & owned volumes" class="w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-slate-300 hover:bg-slate-800/70 hover:text-white">
+                                <i data-lucide="refresh-cw" class="w-4 h-4 text-brand-400" id="icon-calibre-sync"></i> Sync Calibre
+                            </button>
+                            <button type="button" onclick="triggerStagingTag()" id="btn-tag-staging" role="menuitem" title="Tag completed .cbz files in staging with inherited Calibre metadata" class="w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-slate-300 hover:bg-slate-800/70 hover:text-white">
+                                <i data-lucide="tag" class="w-4 h-4 text-cyan-400" id="icon-staging-tag"></i> Tag CBZ
+                            </button>
+                        </div>
+                    </div>
+                    <button type="button" id="btn-mobile-menu" onclick="toggleMobileMenu()" aria-haspopup="true" aria-expanded="false" aria-controls="mobile-menu" aria-label="Open navigation menu" title="Open navigation menu" class="md:hidden w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center justify-center transition-colors">
+                        <i data-lucide="menu" class="w-4 h-4"></i>
                     </button>
                 </div>
             </div>
         </div>
     </header>
+
+    <!-- Mobile navigation menu: same 5-item grouping as desktop (task-15) -->
+    <div id="mobile-menu" class="hidden md:hidden border-b border-slate-800 bg-[#0d131f] shadow-xl">
+        <nav class="max-w-7xl mx-auto px-4 sm:px-6 py-3 space-y-0.5" aria-label="Mobile navigation">
+            <a href="/" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'dashboard' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="layout-dashboard" class="w-4 h-4"></i> Overview
+            </a>
+
+            <p class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Library</p>
+            <a href="/series" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'series' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="library" class="w-4 h-4"></i> Series
+            </a>
+            <a href="/releases" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'releases' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="sparkles" class="w-4 h-4"></i> Releases
+            </a>
+            <a href="/prioritized" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'prioritized' %}bg-slate-800 text-amber-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="star" class="w-4 h-4 text-amber-400"></i> Prioritized
+            </a>
+
+            <p class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Discover</p>
+            <a href="/discovery" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'discovery' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="compass" class="w-4 h-4 text-amber-400"></i> Discovery
+            </a>
+            <a href="/feeds" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'feeds' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="rss" class="w-4 h-4"></i> Feeds
+            </a>
+
+            <a href="/downloads" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'downloads' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="download-cloud" class="w-4 h-4 text-cyan-400"></i> Downloads
+            </a>
+
+            <p class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-slate-500 font-semibold">System</p>
+            <a href="/logs" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'logs' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="scroll-text" class="w-4 h-4"></i> Logs
+            </a>
+            <a href="/settings" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'settings' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                <i data-lucide="settings" class="w-4 h-4"></i> Settings
+            </a>
+
+            <div class="pt-3 mt-2 border-t border-slate-800/80">
+                <p class="px-3 pb-1 text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Actions</p>
+                <button type="button" onclick="triggerCalibreSync()" class="w-full flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium text-slate-300 hover:bg-slate-800/70 hover:text-white" title="Scan Calibre library for manga series & owned volumes">
+                    <i data-lucide="refresh-cw" class="w-4 h-4 text-brand-400"></i> Sync Calibre
+                </button>
+                <button type="button" onclick="triggerStagingTag()" class="w-full flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium text-slate-300 hover:bg-slate-800/70 hover:text-white" title="Tag completed .cbz files in staging">
+                    <i data-lucide="tag" class="w-4 h-4 text-cyan-400"></i> Tag CBZ
+                </button>
+                <button type="button" onclick="triggerFeedCheck()" class="w-full flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-semibold text-brand-300 hover:bg-slate-800/70 hover:text-white" title="Check feeds for new manga releases & bundles">
+                    <i data-lucide="radio" class="w-4 h-4"></i> Poll Feeds
+                </button>
+            </div>
+
+            {% if auth_mode and auth_mode != 'none' %}
+            <div class="pt-3 mt-2 border-t border-slate-800/80">
+                <p class="px-3 pb-1 text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Signed in ({{ auth_mode }})</p>
+                <p class="px-3 pb-1 text-sm text-slate-300 flex items-center gap-2">
+                    <i data-lucide="user" class="w-4 h-4 text-brand-400"></i> {{ auth_actor() }}
+                </p>
+                <a href="/auth/logout" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium text-slate-300 hover:bg-slate-800/70 hover:text-white">
+                    <i data-lucide="log-out" class="w-4 h-4"></i> Sign out
+                </a>
+            </div>
+            {% endif %}
+        </nav>
+    </div>
 
     <!-- Notification Toast Container -->
     <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none"></div>
@@ -300,6 +420,96 @@
                 setTimeout(() => toast.remove(), 300);
             }, 4000);
         }
+
+        // --- Navigation dropdowns & mobile menu (task-15) ---------------------
+        // Click-to-open (touch friendly), closes on outside click / Escape / item
+        // selection; aria-expanded mirrors the visual state and Escape restores
+        // focus to the trigger button.
+        function closeAllDropdowns(except = null) {
+            document.querySelectorAll('[data-dropdown]').forEach((wrapper) => {
+                if (wrapper === except) return;
+                const trigger = wrapper.querySelector('[data-dropdown-trigger]');
+                const menu = wrapper.querySelector('[data-dropdown-menu]');
+                if (!trigger || !menu) return;
+                menu.classList.add('hidden');
+                trigger.setAttribute('aria-expanded', 'false');
+            });
+        }
+
+        function toggleDropdown(trigger) {
+            const wrapper = trigger.closest('[data-dropdown]');
+            if (!wrapper) return;
+            const menu = wrapper.querySelector('[data-dropdown-menu]');
+            const isOpen = trigger.getAttribute('aria-expanded') === 'true';
+            closeAllDropdowns(wrapper);
+            if (!menu) return;
+            if (isOpen) {
+                menu.classList.add('hidden');
+                trigger.setAttribute('aria-expanded', 'false');
+            } else {
+                menu.classList.remove('hidden');
+                trigger.setAttribute('aria-expanded', 'true');
+                if (window.lucide) lucide.createIcons();
+            }
+        }
+
+        function closeMobileMenu() {
+            const menu = document.getElementById('mobile-menu');
+            const btn = document.getElementById('btn-mobile-menu');
+            if (!menu || !btn) return;
+            menu.classList.add('hidden');
+            btn.setAttribute('aria-expanded', 'false');
+            btn.setAttribute('aria-label', 'Open navigation menu');
+            btn.setAttribute('title', 'Open navigation menu');
+        }
+
+        function toggleMobileMenu() {
+            const menu = document.getElementById('mobile-menu');
+            const btn = document.getElementById('btn-mobile-menu');
+            if (!menu || !btn) return;
+            const willOpen = menu.classList.contains('hidden');
+            menu.classList.toggle('hidden', !willOpen);
+            btn.setAttribute('aria-expanded', String(willOpen));
+            const label = willOpen ? 'Close navigation menu' : 'Open navigation menu';
+            btn.setAttribute('aria-label', label);
+            btn.setAttribute('title', label);
+            if (willOpen) closeAllDropdowns();
+            if (window.lucide) lucide.createIcons();
+        }
+
+        document.addEventListener('click', (event) => {
+            const trigger = event.target.closest('[data-dropdown-trigger]');
+            if (trigger) {
+                event.preventDefault();
+                toggleDropdown(trigger);
+                return;
+            }
+            const insideMenu = event.target.closest('[data-dropdown-menu]');
+            if (insideMenu) {
+                // Selecting a link/item closes the menu; navigation/action continues.
+                closeAllDropdowns();
+                return;
+            }
+            closeAllDropdowns();
+            if (!event.target.closest('#mobile-menu') && !event.target.closest('#btn-mobile-menu')) {
+                closeMobileMenu();
+            }
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape') return;
+            const openWrapper = Array.from(document.querySelectorAll('[data-dropdown]')).find((wrapper) => {
+                const trigger = wrapper.querySelector('[data-dropdown-trigger]');
+                return trigger && trigger.getAttribute('aria-expanded') === 'true';
+            });
+            closeAllDropdowns();
+            closeMobileMenu();
+            if (openWrapper) {
+                event.preventDefault();
+                const trigger = openWrapper.querySelector('[data-dropdown-trigger]');
+                if (trigger) trigger.focus();
+            }
+        });
 
         async function triggerCalibreSync() {
             const btn = document.getElementById('btn-sync-calibre');
