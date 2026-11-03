@@ -18,6 +18,9 @@ from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
+from app.downloader import as_bool, build_downloader, resolve_downloader_engine
+from app.downloader.base import DownloaderError
+from app.downloader.torbox import TorboxDownloader
 from app.tagger import cbz_tagger, series_audit
 from app.tagger.cbz_tagger import has_comicinfo
 from app.metadata.mangaupdates import MangaUpdatesService
@@ -350,6 +353,7 @@ def _build_downloader_status(timeout: Optional[float] = None) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "status": "degraded",
         "degraded": True,
+        "engine": resolve_downloader_engine(db),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "timeout_seconds": round(effective_timeout, 2),
         "downloader": {
@@ -368,6 +372,9 @@ def _build_downloader_status(timeout: Optional[float] = None) -> Dict[str, Any]:
             "eta_seconds": None,
         },
     }
+
+    if payload["engine"] == "torbox":
+        return _build_torbox_downloader_status(payload, effective_timeout)
 
     try:
         qbit = scheduler.get_qbit_client()
@@ -416,6 +423,115 @@ def _build_downloader_status(timeout: Optional[float] = None) -> Dict[str, Any]:
         "totals": {
             "download_speed": sum(torrent["download_speed"] for torrent in active),
             "upload_speed": sum(torrent["upload_speed"] for torrent in active),
+            "progress": round(downloaded / total_size, 4) if total_size else 0.0,
+            "eta_seconds": _aggregate_eta(active),
+        },
+    })
+    return payload
+
+
+def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Normalise a Torbox release row (+optional live status) for the status API."""
+    info = info or {}
+    state = str(info.get("state") or ("failed" if release.get("download_status") == "FAILED" else "queued"))
+    files = info.get("files") or []
+    saved = release.get("downloader_id") or ""
+    progress = float(info.get("progress") or 0.0)
+    size = int(info.get("size") or 0)
+    eta = info.get("eta") if isinstance(info.get("eta"), (int, float)) else None
+    speed = int(info.get("download_speed") or 0)
+    return {
+        "hash": str(release.get("torrent_hash") or saved),
+        "name": str(release.get("title") or ""),
+        "state": state,
+        "raw_state": str(info.get("raw_state") or ""),
+        "engine": "torbox",
+        "cached": bool(info.get("cached")),
+        "files": files,
+        "category": "manga",
+        "progress": round(max(0.0, min(1.0, progress)), 4),
+        "progress_percent": round(max(0.0, min(1.0, progress)) * 100.0, 1),
+        "size_bytes": size,
+        # Template-compatible aliases (downloads.html historically reads qBittorrent's
+        # raw field names; keep both so neither engine breaks the table).
+        "size": size,
+        "eta": eta,
+        "dlspeed": speed,
+        "downloaded_bytes": int(round(size * progress)),
+        "download_speed": speed,
+        "upload_speed": 0,
+        "eta_seconds": int(eta) if eta is not None else None,
+        "ratio": 0.0,
+        "seeds": info.get("seeds") or 0,
+        "is_active": state in ("queued", "downloading", "stalled"),
+        "release_id": release.get("id"),
+    }
+
+
+def _build_torbox_downloader_status(payload: Dict[str, Any], timeout: float) -> Dict[str, Any]:
+    """Torbox branch of ``/api/downloads/status``; never raises."""
+    payload["downloader"]["enabled"] = as_bool(db.get_setting("torbox_enabled", "false"), default=False)
+    if not payload["downloader"]["enabled"]:
+        payload["status"] = "disabled"
+        payload["degraded"] = False
+        payload["downloader"]["message"] = "Torbox is disabled in MangaTrax settings."
+        return payload
+
+    try:
+        downloader = build_downloader(db, engine="torbox")
+        downloader.timeout = max(1.0, min(float(timeout), 30.0))
+    except Exception as exc:  # pragma: no cover - defensive
+        payload["downloader"]["message"] = f"Could not construct the Torbox client: {exc}"
+        return payload
+
+    try:
+        connection = downloader.test_connection() or {}
+    except Exception as exc:
+        connection = {"success": False, "message": f"Connection error: {exc}"}
+
+    connected = bool(connection.get("success"))
+    payload["downloader"]["connected"] = connected
+    payload["downloader"]["version"] = "torbox"
+    payload["downloader"]["message"] = str(connection.get("message") or "")
+    payload["downloader"]["plan"] = str(connection.get("plan") or "")
+    payload["downloader"]["active_slots"] = connection.get("active_slots")
+    if not connected:
+        return payload
+
+    try:
+        releases = db.get_downloader_releases("torbox", limit=20)
+    except Exception as exc:
+        payload["degraded"] = True
+        payload["downloader"]["message"] = f"Connected, but the Torbox queue failed: {exc}"
+        return payload
+
+    torrents = []
+    payload["degraded"] = False
+    for release in releases:
+        info: Optional[Dict[str, Any]] = None
+        if release.get("download_status") == "DOWNLOADING":
+            handle = {"torrent_id": release.get("downloader_id"), "hash": release.get("torrent_hash") or ""}
+            try:
+                if handle["torrent_id"]:
+                    info = downloader.status(handle)
+            except DownloaderError as exc:
+                info = None
+                payload["degraded"] = True
+                payload["downloader"]["message"] = f"Queue partially unavailable: {exc}"
+        torrents.append(_torbox_release_view(release, info))
+
+    active = [torrent for torrent in torrents if torrent["is_active"]]
+    total_size = sum(torrent["size_bytes"] for torrent in active)
+    downloaded = sum(torrent["downloaded_bytes"] for torrent in active)
+    payload.update({
+        "status": "success",
+        "degraded": bool(payload["degraded"]),
+        "torrents": torrents,
+        "active": active,
+        "count": len(torrents),
+        "totals": {
+            "download_speed": sum(torrent["download_speed"] for torrent in active),
+            "upload_speed": 0,
             "progress": round(downloaded / total_size, 4) if total_size else 0.0,
             "eta_seconds": _aggregate_eta(active),
         },
@@ -782,6 +898,7 @@ async def downloads_view(request: Request):
         context={
             "active_page": "downloads",
             "qbit_status": qbit_status,
+            "engine": download_status.get("engine") or "qbit",
             "torrents": torrents,
             "staging_dir": staging_dir,
             "staging_files": staging_files,
@@ -816,6 +933,8 @@ async def logs_view(request: Request):
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_view(request: Request):
     settings = db.get_all_settings()
+    torbox_key_set = bool(str(settings.get("torbox_api_key", "") or "").strip())
+    settings["torbox_api_key"] = schemas.TORBOX_API_KEY_MASK if torbox_key_set else ""
     prioritized_groups = db.get_prioritized_groups()
     return templates.TemplateResponse(
         request=request,
@@ -824,6 +943,7 @@ async def settings_view(request: Request):
             "active_page": "settings",
             "settings": settings,
             "prioritized_groups": prioritized_groups,
+            "torbox_api_key_set": torbox_key_set,
             "debug_actions_enabled": AUTH_CONFIG.debug_actions
         }
     )
@@ -1295,6 +1415,17 @@ async def api_downloader_test(payload: Optional[Dict[str, Any]] = None):
     res = client.test_connection()
     return JSONResponse(res)
 
+@app.post("/api/downloader/torbox/test")
+async def api_downloader_torbox_test(payload: Optional[Dict[str, Any]] = None):
+    """Test the Torbox connection (plan/slots).  An unsaved key may be supplied."""
+    model = _validated_payload(schemas.TorboxTestRequest, payload or {})
+    provided_key = (model.torbox_api_key or "").strip()
+    if provided_key and provided_key != schemas.TORBOX_API_KEY_MASK:
+        client = TorboxDownloader(api_key=provided_key, enabled=True)
+    else:
+        client = build_downloader(db, engine="torbox")
+    return JSONResponse(client.test_connection())
+
 @app.post("/api/downloader/configure")
 async def api_downloader_configure(payload: Dict[str, Any]):
     """Save in-app BitTorrent downloader configuration and test connection."""
@@ -1352,13 +1483,38 @@ async def api_downloader_delete(torrent_hash: str):
 
 @app.post("/api/releases/{release_id}/download")
 async def api_release_download(release_id: int):
-    """Manually send release to qBittorrent downloader."""
+    """Manually send a release to the configured download engine (qBittorrent or Torbox)."""
     target = db.get_release_by_id(release_id)
     if not target:
         raise HTTPException(status_code=404, detail="Release not found")
 
     download_url = target.get("download_url") or target.get("link")
     staging_dir = db.get_setting("staging_dir", "/staging")
+    missing = target.get("missing_volumes") or json.loads(target.get("missing_vols_json") or "[]")
+    vols = target.get("volumes") or []
+
+    if resolve_downloader_engine(db) == "torbox":
+        result = scheduler.submit_torbox_download(
+            release_id,
+            str(target.get("title") or ""),
+            str(download_url or ""),
+            link=str(target.get("link") or ""),
+            missing_volumes=[float(v) for v in (missing or [])],
+            source="manual",
+        )
+        if result.get("success"):
+            db.log_activity("MANUAL_DOWNLOAD", f"Sent to Torbox: '{target['title']}'", "Engine: torbox")
+            return JSONResponse({
+                "status": "success",
+                "engine": "torbox",
+                "cached": bool(result.get("cached")),
+                "message": "Sent to Torbox successfully",
+            })
+        return JSONResponse(
+            {"status": "error", "engine": "torbox", "message": result.get("message") or "Torbox rejected the release"},
+            status_code=500,
+        )
+
     qbit = scheduler.get_qbit_client()
 
     success = qbit.add_torrent(
@@ -1370,11 +1526,9 @@ async def api_release_download(release_id: int):
 
     if success:
         torrent_h = qbit.extract_torrent_hash(download_url)
-        db.update_download_status(release_id, "DOWNLOADING", torrent_h)
+        db.update_download_handle(release_id, "qbit", downloader_id=torrent_h or "", torrent_hash=torrent_h)
         db.log_activity("MANUAL_DOWNLOAD", f"Sent to downloader: '{target['title']}'", f"URL: {download_url[:60]}...")
 
-        missing = target.get("missing_volumes") or json.loads(target.get("missing_vols_json") or "[]")
-        vols = target.get("volumes") or []
         if torrent_h and target.get("is_bundle") and missing and len(missing) < len(vols):
             sel_res = qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing])
             if sel_res.get("status") == "filtered":
@@ -1383,9 +1537,9 @@ async def api_release_download(release_id: int):
                     f"Selective download applied for '{target['title']}': skipped {len(sel_res.get('skipped_volumes', []))} owned volumes; downloading {len(sel_res.get('kept_volumes', []))} missing volumes."
                 )
 
-        return JSONResponse({"status": "success", "message": "Sent to downloader successfully"})
+        return JSONResponse({"status": "success", "engine": "qbit", "message": "Sent to downloader successfully"})
     else:
-        return JSONResponse({"status": "error", "message": "Failed to add release to downloader"}, status_code=500)
+        return JSONResponse({"status": "error", "engine": "qbit", "message": "Failed to add release to downloader"}, status_code=500)
 
 @app.post("/api/series/{series_id}/toggle")
 async def api_toggle_series(series_id: int):
@@ -1556,6 +1710,14 @@ async def api_discovery_fetch_info(release_id: int):
         "cover_url": cover_url
     })
 
+@app.get("/api/settings")
+async def api_get_settings():
+    """Return settings with secrets masked (the Torbox API key is never echoed)."""
+    settings = db.get_all_settings()
+    if str(settings.get("torbox_api_key", "") or "").strip():
+        settings["torbox_api_key"] = schemas.TORBOX_API_KEY_MASK
+    return JSONResponse({"status": "success", "settings": settings})
+
 @app.post("/api/settings")
 async def api_save_settings(payload: Dict[str, Any]):
     """Save application settings (strict key whitelist; unknown keys rejected)."""
@@ -1569,6 +1731,12 @@ async def api_save_settings(payload: Dict[str, Any]):
                     security.ensure_path_within_roots(str(provided[key]), operator_roots)
                 except security.UnsafePathError as exc:
                     raise HTTPException(status_code=400, detail=f"{key}: {exc}") from exc
+    # Never persist the masked placeholder back over a real Torbox key (and an empty
+    # value from the UI means "unchanged", not "clear").
+    if "torbox_api_key" in provided:
+        candidate = str(provided["torbox_api_key"] or "").strip()
+        if not candidate or candidate == schemas.TORBOX_API_KEY_MASK:
+            provided.pop("torbox_api_key", None)
     for k, v in provided.items():
         db.set_setting(k, str(v))
     if "nyaa_base_url" in provided:

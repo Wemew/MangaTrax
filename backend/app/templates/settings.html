@@ -132,6 +132,71 @@
                     <p class="text-[10px] text-slate-500 mt-1">Comma-separated tags added to downloaded torrents</p>
                 </div>
             </div>
+
+            <!-- task-20: default download engine + Torbox debrid integration -->
+            <div class="pt-4 mt-2 border-t border-slate-800 space-y-4">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                        <h4 class="text-xs font-bold uppercase tracking-wider text-white">Default Download Engine</h4>
+                        <p class="text-[11px] text-slate-400 mt-0.5">Choose which engine receives new releases. qBittorrent stays fully functional; Torbox downloads are fetched into staging by MangaTrax.</p>
+                    </div>
+                    <span id="torbox-status-badge" class="px-2.5 py-1 rounded-full text-[10px] font-semibold bg-slate-800 text-slate-400 border border-slate-700">Untested</span>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                        <label for="setting-downloader-engine" class="block text-xs font-semibold text-slate-300 mb-1">Default Download Engine</label>
+                        <select id="setting-downloader-engine" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+                            <option value="qbit" {% if settings.downloader_engine != 'torbox' %}selected{% endif %}>qBittorrent (local)</option>
+                            <option value="torbox" {% if settings.downloader_engine == 'torbox' %}selected{% endif %}>Torbox (debrid)</option>
+                        </select>
+                    </div>
+                    <div class="flex items-start gap-2.5 sm:pt-5">
+                        <input type="checkbox" id="setting-torbox-enabled" {% if settings.torbox_enabled == 'true' %}checked{% endif %} class="mt-0.5 rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-0">
+                        <div>
+                            <label for="setting-torbox-enabled" class="text-xs font-semibold text-white">Enable Torbox Integration</label>
+                            <p class="text-[11px] text-slate-400">Required before Torbox can be the default engine.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                        <label for="setting-torbox-api-key" class="block text-xs font-semibold text-slate-300 mb-1">Torbox API Key</label>
+                        <input type="password" id="setting-torbox-api-key" value="{{ settings.torbox_api_key }}" placeholder="{{ 'API key saved — leave the mask to keep it' if torbox_api_key_set else 'Paste your Torbox API key' }}" autocomplete="new-password" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500">
+                        <p class="text-[10px] text-slate-500 mt-1">Stored server-side, masked in the UI/API and never written to logs or activity details.</p>
+                    </div>
+                    <div class="flex items-end gap-2">
+                        <button type="button" onclick="testTorboxConnection()" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                            <i data-lucide="plug-zap" class="w-3.5 h-3.5 text-cyan-400"></i>
+                            Test Torbox
+                        </button>
+                        <span id="torbox-test-result" class="text-[11px] text-slate-400"></span>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div class="flex items-start gap-2.5 sm:col-span-3">
+                        <input type="checkbox" id="setting-torbox-delete-after" {% if settings.torbox_delete_after_download != 'false' %}checked{% endif %} class="mt-0.5 rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-0">
+                        <div>
+                            <label for="setting-torbox-delete-after" class="text-xs font-semibold text-white">Delete torrent from Torbox after a successful download</label>
+                            <p class="text-[11px] text-slate-400">Frees the Torbox active slot (default on). Files already downloaded to staging are untouched.</p>
+                        </div>
+                    </div>
+                    <div>
+                        <label for="setting-torbox-poll-seconds" class="block text-xs font-semibold text-slate-300 mb-1">Poll Interval (seconds)</label>
+                        <input type="number" id="setting-torbox-poll-seconds" value="{{ settings.torbox_poll_seconds or '10' }}" min="5" max="3600" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+                    </div>
+                    <div>
+                        <label for="setting-torbox-max-concurrent" class="block text-xs font-semibold text-slate-300 mb-1">Max Concurrent Downloads</label>
+                        <input type="number" id="setting-torbox-max-concurrent" value="{{ settings.torbox_max_concurrent or '2' }}" min="1" max="20" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+                    </div>
+                    <div>
+                        <label for="setting-torbox-timeout-hours" class="block text-xs font-semibold text-slate-300 mb-1">Download Timeout (hours)</label>
+                        <input type="number" step="0.5" id="setting-torbox-timeout-hours" value="{{ settings.torbox_timeout_hours or '6' }}" min="0.25" max="168" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Staging & Tagging Pipeline Card -->
@@ -536,6 +601,53 @@ async function testDownloaderConnection() {
     }
 }
 
+async function testTorboxConnection() {
+    const badge = document.getElementById('torbox-status-badge');
+    const resultEl = document.getElementById('torbox-test-result');
+    if (badge) {
+        badge.textContent = 'Testing...';
+        badge.className = 'px-2.5 py-1 rounded-full text-[10px] font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20';
+    }
+    const keyInput = document.getElementById('setting-torbox-api-key');
+    const payload = { torbox_api_key: keyInput ? keyInput.value.trim() : '' };
+    try {
+        const res = await fetch('/api/downloader/torbox/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        const message = data.message || (data.success ? 'Connected' : 'Connection failed');
+        if (data.success) {
+            showToast(message, 'success');
+            if (badge) {
+                badge.textContent = data.plan ? `Connected: ${data.plan}` : 'Connected';
+                badge.className = 'px-2.5 py-1 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+            }
+            if (resultEl) {
+                resultEl.textContent = `${data.plan || 'plan unknown'} · ${data.active_slots ?? 0} active slot(s)`;
+                resultEl.className = 'text-[11px] text-emerald-400';
+            }
+        } else {
+            showToast(message, 'error');
+            if (badge) {
+                badge.textContent = 'Disconnected';
+                badge.className = 'px-2.5 py-1 rounded-full text-[10px] font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20';
+            }
+            if (resultEl) {
+                resultEl.textContent = message;
+                resultEl.className = 'text-[11px] text-rose-400';
+            }
+        }
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+        if (badge) {
+            badge.textContent = 'Error';
+            badge.className = 'px-2.5 py-1 rounded-full text-[10px] font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20';
+        }
+    }
+}
+
 async function testSingleWebhook(type) {
     const discordUrl = document.getElementById('setting-discord-url').value.trim();
     const appriseUrl = document.getElementById('setting-apprise-url').value.trim();
@@ -615,7 +727,14 @@ async function saveSettings(e) {
         app_timezone: document.getElementById('setting-timezone').value.trim() || 'Europe/Copenhagen',
         discord_webhook_url: document.getElementById('setting-discord-url').value.trim(),
         apprise_url: document.getElementById('setting-apprise-url').value.trim(),
-        nyaa_base_url: document.getElementById('setting-nyaa-base-url').value.trim()
+        nyaa_base_url: document.getElementById('setting-nyaa-base-url').value.trim(),
+        downloader_engine: document.getElementById('setting-downloader-engine').value,
+        torbox_enabled: document.getElementById('setting-torbox-enabled').checked ? 'true' : 'false',
+        torbox_api_key: document.getElementById('setting-torbox-api-key').value.trim(),
+        torbox_delete_after_download: document.getElementById('setting-torbox-delete-after').checked ? 'true' : 'false',
+        torbox_poll_seconds: document.getElementById('setting-torbox-poll-seconds').value,
+        torbox_max_concurrent: document.getElementById('setting-torbox-max-concurrent').value,
+        torbox_timeout_hours: document.getElementById('setting-torbox-timeout-hours').value
     };
 
     try {

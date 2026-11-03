@@ -238,22 +238,13 @@ class QBitClient:
 
     @staticmethod
     def extract_torrent_hash(url_or_magnet: str) -> Optional[str]:
-        """Extracts normalized 40-character hex hash from a magnet link or string."""
-        if not url_or_magnet:
-            return None
-        import re
-        m = re.search(r"urn:btih:([a-zA-Z0-9]{32,40})", url_or_magnet, re.IGNORECASE)
-        if m:
-            raw_hash = m.group(1).lower()
-            if len(raw_hash) == 32:
-                try:
-                    import base64
-                    raw_bytes = base64.b32decode(raw_hash.upper())
-                    return raw_bytes.hex().lower()
-                except Exception:
-                    return raw_hash
-            return raw_hash
-        return None
+        """Extracts normalized 40-character hex hash from a magnet link or string.
+
+        Implemented in ``downloader.base.extract_torrent_hash`` so the Torbox engine
+        shares exactly the same parsing; kept here for API compatibility.
+        """
+        from app.downloader.base import extract_torrent_hash
+        return extract_torrent_hash(url_or_magnet)
 
     def get_torrent_files(self, torrent_hash: str) -> List[Dict[str, Any]]:
         """Queries qBittorrent for the list of files in a specific torrent."""

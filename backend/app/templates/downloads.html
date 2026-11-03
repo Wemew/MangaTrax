@@ -95,7 +95,7 @@
         <div class="flex items-center justify-between">
             <h2 class="text-lg font-bold text-white tracking-tight flex items-center gap-2">
                 <i data-lucide="list-ordered" class="w-5 h-5 text-slate-400"></i>
-                Active qBittorrent Queue
+                Active {{ 'Torbox' if engine == 'torbox' else 'qBittorrent' }} Queue
             </h2>
             <span class="text-xs text-slate-500">{{ torrents|length }} item(s)</span>
         </div>
@@ -139,6 +139,9 @@
                             </td>
                             <td class="py-3 px-4 text-right">
                                 <div class="flex items-center justify-end gap-1.5">
+                                    {% if engine == 'torbox' %}
+                                    <span class="text-[10px] text-slate-500" title="Torbox downloads are controlled in MangaTrax/Torbox">Torbox</span>
+                                    {% else %}
                                     {% if 'paused' in t.state|lower %}
                                     <button onclick="resumeTorrent('{{ t.hash }}')" title="Resume" class="p-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-400" aria-label="Resume">
                                         <i data-lucide="play" class="w-3.5 h-3.5"></i>
@@ -151,13 +154,14 @@
                                     <button onclick="deleteTorrent('{{ t.hash }}')" title="Delete from queue" class="p-1 rounded bg-slate-800 hover:bg-rose-900/30 text-rose-400" aria-label="Delete from queue">
                                         <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                                     </button>
+                                    {% endif %}
                                 </div>
                             </td>
                         </tr>
                         {% else %}
                         <tr>
                             <td colspan="6" class="py-10 text-center text-slate-500">
-                                No active downloads in qBittorrent queue for category 'manga'.
+                                No active downloads in {{ 'the Torbox' if engine == 'torbox' else 'qBittorrent' }} queue.
                             </td>
                         </tr>
                         {% endfor %}

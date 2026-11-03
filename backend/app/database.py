@@ -474,6 +474,16 @@ class MangaDatabase:
             # volume markers in the title): marks the release as an inferred full set.
             if "inferred_volumes" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN inferred_volumes INTEGER DEFAULT 0;")
+            # task-20: download engine provenance.  qbit releases keep using
+            # torrent_hash; Torbox releases persist their torrent_id in downloader_id.
+            if "downloader" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN downloader TEXT DEFAULT '';")
+            if "downloader_id" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN downloader_id TEXT DEFAULT '';")
+            # Needed for the hard timeout (6h default); not in the plan's column list,
+            # but a timeout cannot be computed without knowing when submission began.
+            if "downloader_started_at" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN downloader_started_at TEXT DEFAULT '';")
 
             # Backfill is_complete for existing releases matching complete indicators (local SQL/regex only, NO network calls)
             try:
@@ -681,6 +691,16 @@ class MangaDatabase:
                     # Nyaa/tracker base URL (mirror/proxy support).  Bare base or a
                     # full Nyaa-style URL is accepted and normalised on save.
                     "nyaa_base_url": os.getenv("MANGATRAX_NYAA_BASE_URL", DEFAULT_NYAA_BASE_URL),
+                    # task-20: selectable download engine (qbit default => upgrades inert).
+                    "downloader_engine": os.getenv("MANGATRAX_DOWNLOADER_ENGINE", "qbit"),
+                    "torbox_enabled": os.getenv("MANGATRAX_TORBOX_ENABLED", "false"),
+                    "torbox_api_key": os.getenv("MANGATRAX_TORBOX_API_KEY", ""),
+                    "torbox_delete_after_download": os.getenv(
+                        "MANGATRAX_TORBOX_DELETE_AFTER_DOWNLOAD", "true"
+                    ),
+                    "torbox_poll_seconds": os.getenv("MANGATRAX_TORBOX_POLL_SECONDS", "10"),
+                    "torbox_max_concurrent": os.getenv("MANGATRAX_TORBOX_MAX_CONCURRENT", "2"),
+                    "torbox_timeout_hours": os.getenv("MANGATRAX_TORBOX_TIMEOUT_HOURS", "6"),
                 }
                 for k, v in defaults.items():
                     cur.execute("INSERT INTO app_settings (key, value) VALUES (?, ?);", (k, v))
@@ -707,6 +727,19 @@ class MangaDatabase:
                 "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",
                 ("nyaa_base_url", os.getenv("MANGATRAX_NYAA_BASE_URL", DEFAULT_NYAA_BASE_URL)),
             )
+            for torbox_key, torbox_default in (
+                ("downloader_engine", os.getenv("MANGATRAX_DOWNLOADER_ENGINE", "qbit")),
+                ("torbox_enabled", os.getenv("MANGATRAX_TORBOX_ENABLED", "false")),
+                ("torbox_api_key", os.getenv("MANGATRAX_TORBOX_API_KEY", "")),
+                ("torbox_delete_after_download", os.getenv("MANGATRAX_TORBOX_DELETE_AFTER_DOWNLOAD", "true")),
+                ("torbox_poll_seconds", os.getenv("MANGATRAX_TORBOX_POLL_SECONDS", "10")),
+                ("torbox_max_concurrent", os.getenv("MANGATRAX_TORBOX_MAX_CONCURRENT", "2")),
+                ("torbox_timeout_hours", os.getenv("MANGATRAX_TORBOX_TIMEOUT_HOURS", "6")),
+            ):
+                cur.execute(
+                    "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",
+                    (torbox_key, torbox_default),
+                )
             # One-shot marker for the D1 re-typing pass ('' = not applied yet).
             cur.execute(
                 "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",
@@ -1256,6 +1289,75 @@ class MangaDatabase:
             """, (download_status, clean_hash, release_id))
             conn.commit()
             self._invalidate_grouped_cache()
+
+    def update_download_handle(
+        self,
+        release_id: int,
+        engine: str,
+        downloader_id: Optional[str] = None,
+        torrent_hash: Optional[str] = None,
+    ):
+        """Persist the engine provenance for a submitted release (task-20)."""
+        clean_engine = str(engine or "").strip().lower()
+        clean_id = str(downloader_id).strip() if downloader_id is not None else ""
+        clean_hash = str(torrent_hash).strip() if (isinstance(torrent_hash, str) and torrent_hash.strip()) else None
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE releases
+                SET download_status = 'DOWNLOADING',
+                    downloader = ?,
+                    downloader_id = ?,
+                    torrent_hash = COALESCE(?, torrent_hash),
+                    downloader_started_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?;
+            """, (clean_engine, clean_id, clean_hash, release_id))
+            conn.commit()
+            self._invalidate_grouped_cache()
+
+    def update_downloader_state(self, release_id: int, download_status: str, engine: Optional[str] = None):
+        """Only mutate download_status (and optionally engine) without touching hashes."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            if engine:
+                cur.execute(
+                    "UPDATE releases SET download_status = ?, downloader = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                    (download_status, str(engine).strip().lower(), release_id),
+                )
+            else:
+                cur.execute(
+                    "UPDATE releases SET download_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                    (download_status, release_id),
+                )
+            conn.commit()
+            self._invalidate_grouped_cache()
+
+    def get_downloader_releases(self, engine: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """Releases currently representing work for *engine* (active first)."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT * FROM releases
+                WHERE downloader = ?
+                  AND download_status IN ('DOWNLOADING', 'FAILED')
+                ORDER BY CASE download_status WHEN 'DOWNLOADING' THEN 0 ELSE 1 END, updated_at DESC
+                LIMIT ?;
+                """,
+                (str(engine or "").strip().lower(), limit),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def get_active_torbox_downloads(self) -> List[Dict[str, Any]]:
+        """Releases submitted through Torbox that are still DOWNLOADING."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM releases WHERE download_status = 'DOWNLOADING' AND downloader = 'torbox' "
+                "ORDER BY downloader_started_at ASC, id ASC;"
+            )
+            return [dict(row) for row in cur.fetchall()]
 
     def _prioritized_priority_map(self, cur) -> Dict[str, int]:
         """Return {lower(group name): priority} for the prioritized groups."""

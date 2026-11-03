@@ -4,6 +4,8 @@ import os
 import threading
 import re
 import json
+import shutil
+from datetime import datetime
 from typing import Optional, Dict, Any, List, Set
 
 from app.database import (
@@ -17,6 +19,15 @@ from app.nyaa_source import DEFAULT_NYAA_BASE_URL, NyaaBaseURLError, normalize_n
 from app.calibre.scanner import CalibreMangaScanner
 from app.calibre.matcher import MangaCalibreMatcher
 from app.downloader.qbit import QBitClient
+from app.downloader import as_bool, build_downloader, resolve_downloader_engine
+from app.downloader.base import (
+    DownloaderAuthError,
+    DownloaderError,
+    DownloaderFileError,
+    DownloaderNotFoundError,
+    DownloaderRateLimitError,
+    DownloaderSlotError,
+)
 from app.tagger.cbz_tagger import auto_tag_staging_cbz_files
 from app.providers.registry import create_provider
 from app.providers.nyaa import NyaaMangaProvider
@@ -72,6 +83,8 @@ class MangaScheduler:
         self._lock = threading.Lock()
         self._calibre_sync_lock = threading.Lock()
         self.last_calibre_sync: float = 0.0
+        # Torbox non-fatal issue de-duplication (release id -> last surfaced message).
+        self._torbox_notified: Dict[int, str] = {}
         # Startup work (legacy key repair + initial Calibre sync) runs as the FIRST
         # action of the worker thread so the web UI can serve immediately; see
         # perform_initial_sync().
@@ -644,6 +657,289 @@ class MangaScheduler:
             enabled=is_enabled
         )
 
+    # --- Download engine selection (task-20) ---
+    def get_downloader_engine(self) -> str:
+        return resolve_downloader_engine(self.db)
+
+    def get_downloader(self):
+        """Build the configured engine (Torbox does not need a qBittorrent client)."""
+        engine = self.get_downloader_engine()
+        qbit = self.get_qbit_client() if engine == "qbit" else None
+        return build_downloader(self.db, qbit_client=qbit, engine=engine)
+
+    @staticmethod
+    def _safe_torrent_dirname(name: str) -> str:
+        """Filesystem-safe folder name for a Torbox torrent's staging files."""
+        cleaned = re.sub(r"[^\w\s.()\[\]-]+", "_", str(name or "")).strip().strip(".")
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return (cleaned[:120] or "torbox-download")
+
+    @staticmethod
+    def _release_missing_volumes(release: Dict[str, Any]) -> List[float]:
+        missing = release.get("missing_volumes")
+        if missing is None:
+            raw = release.get("missing_vols_json") or "[]"
+            try:
+                missing = json.loads(raw) if isinstance(raw, str) else raw
+            except (TypeError, ValueError):
+                missing = []
+        volumes: List[float] = []
+        for value in missing or []:
+            try:
+                volumes.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        return volumes
+
+    @staticmethod
+    def _parse_db_timestamp(value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        text = str(value).strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return None
+
+    def submit_torbox_download(
+        self,
+        release_id: int,
+        title: str,
+        download_url: str,
+        link: str = "",
+        missing_volumes: Optional[List[float]] = None,
+        source: str = "",
+    ) -> Dict[str, Any]:
+        """Submit a release to Torbox and persist its handle (used by all entry points)."""
+        engine = "torbox"
+        try:
+            max_concurrent = int(self.db.get_setting("torbox_max_concurrent", "2") or 2)
+        except ValueError:
+            max_concurrent = 2
+        active = self.db.get_active_torbox_downloads()
+        if len(active) >= max(1, max_concurrent):
+            message = (
+                f"Torbox concurrency limit reached ({max_concurrent} active download(s)); "
+                f"'{title}' was not submitted."
+            )
+            logger.warning(message)
+            self._log_activity("TORBOX_FAILED", message, f"torbox_max_concurrent={max_concurrent}")
+            return {"success": False, "engine": engine, "message": message, "retryable": True}
+
+        downloader = build_downloader(self.db, engine=engine)
+        staging_dir = self.db.get_setting("staging_dir", "/staging")
+        savepath = os.path.join(staging_dir, self._safe_torrent_dirname(title))
+        release = {"download_url": download_url, "link": link, "title": title}
+        wanted = [float(v) for v in (missing_volumes or [])]
+        try:
+            result = downloader.submit(release, savepath, wanted_volumes=wanted)
+        except DownloaderError as exc:
+            message = f"Torbox submit failed for '{title}': {exc}"
+            logger.warning(message)
+            self._log_activity("TORBOX_FAILED", message, f"Source: {source}" if source else "")
+            return {"success": False, "engine": engine, "message": str(exc), "retryable": True}
+
+        handle = result.get("handle") or {}
+        self.db.update_download_handle(
+            release_id,
+            engine,
+            downloader_id=str(handle.get("torrent_id") or ""),
+            torrent_hash=handle.get("hash"),
+        )
+        cached = bool(result.get("cached"))
+        event = "TORBOX_CACHED" if cached else "TORBOX_SUBMITTED"
+        detail_parts = [
+            f"torrent_id={handle.get('torrent_id')}",
+            f"hash={handle.get('hash') or ''}",
+        ]
+        if wanted:
+            detail_parts.append(f"wantedVolumes={wanted}")
+        if source:
+            detail_parts.append(f"Source: {source}")
+        self._log_activity(
+            event,
+            f"Sent to Torbox{' (cached)' if cached else ''}: '{title}'",
+            "; ".join(detail_parts),
+        )
+        return {"success": True, "engine": engine, "handle": handle, "cached": cached}
+
+    # --- Torbox polling worker (task-20, Phase 1+2) ---
+    def _torbox_fail_release(self, release_id: int, title: str, message: str) -> None:
+        """Mark a Torbox release FAILED and audit it (surfaced, not silently retried)."""
+        self.db.update_downloader_state(release_id, "FAILED", "torbox")
+        self._log_activity("TORBOX_FAILED", f"Torbox download failed: '{title}'", message)
+        logger.warning("Torbox download failed for '%s': %s", title, message)
+
+    def _torbox_surface_once(self, release_id: int, message: str, title: str) -> None:
+        """Audit a non-fatal Torbox problem once per distinct message (no log spam)."""
+        previous = self._torbox_notified.get(release_id)
+        if previous == message:
+            return
+        self._torbox_notified[release_id] = message
+        self._log_activity("TORBOX_FAILED", f"Torbox download issue: '{title}'", message)
+        logger.warning("Torbox download issue for '%s': %s", title, message)
+
+    def _select_torbox_files(self, release: Dict[str, Any], files: List[Dict[str, Any]], wanted_volumes: List[float]):
+        """Choose the Torbox files for a volume subset.
+
+        Returns ``(selection, reason)`` where ``selection is None`` means "download the
+        whole torrent as a zip".  If ANY file name cannot be mapped to volumes, the
+        whole torrent is downloaded (logged) instead of risking a missing volume.
+        """
+        if not wanted_volumes:
+            return None, "all volumes wanted: whole-torrent zip"
+        if not files:
+            return None, "Torbox returned no file list: whole-torrent zip fallback"
+        wanted = {float(value) for value in wanted_volumes}
+        file_volumes: Dict[int, Set[float]] = {}
+        unmapped: List[str] = []
+        for index, item in enumerate(files):
+            name = str((item or {}).get("name") or "")
+            try:
+                parsed = extract_manga_bundle_and_volumes(name)
+                volumes = {float(value) for value in (parsed.get("volumes") or [])}
+                if not volumes and parsed.get("volume_start") is not None:
+                    volumes = {float(parsed["volume_start"])}
+            except Exception:
+                volumes = set()
+            if not volumes:
+                unmapped.append(name or f"file #{index}")
+                continue
+            file_volumes[index] = volumes
+        if unmapped:
+            logger.info(
+                "Torbox: %s file(s) could not be mapped to volumes (%s); downloading the whole torrent.",
+                len(unmapped), ", ".join(unmapped[:3]),
+            )
+            return None, f"unmappable file name(s): {len(unmapped)} -> whole-torrent zip"
+        selected = [item for index, item in enumerate(files) if file_volumes.get(index, set()) & wanted]
+        if not selected:
+            return None, "volume subset matched no files: whole-torrent zip fallback"
+        if len(selected) == len(files):
+            return None, "subset selects every file: whole-torrent zip"
+        return selected, f"subset: {len(selected)}/{len(files)} file(s) for volumes {sorted(wanted)}"
+
+    def poll_torbox_downloads(self) -> Dict[str, Any]:
+        """Advance Torbox releases: poll → fetch when ready → complete → optional delete.
+
+        Bounded by ``torbox_max_concurrent`` at submission time and by
+        ``torbox_timeout_hours`` here; stalled/no-seed torrents are surfaced as
+        activity events instead of being retried silently forever.
+        """
+        downloader = build_downloader(self.db, engine="torbox")
+        if not getattr(downloader, "enabled", False):
+            return {"status": "disabled", "processed": 0, "completed": 0, "failed": 0}
+
+        try:
+            timeout_hours = float(self.db.get_setting("torbox_timeout_hours", "6") or 6)
+        except ValueError:
+            timeout_hours = 6.0
+        rows = self.db.get_active_torbox_downloads()
+        if not rows:
+            return {"status": "idle", "processed": 0, "completed": 0, "failed": 0}
+
+        staging_dir = self.db.get_setting("staging_dir", "/staging")
+        delete_after = as_bool(self.db.get_setting("torbox_delete_after_download", "true"), default=True)
+        processed = completed = failed = 0
+        rate_limited = False
+
+        for release in rows:
+            release_id = int(release.get("id"))
+            title = str(release.get("title") or "")
+            started = self._parse_db_timestamp(release.get("downloader_started_at"))
+            if started is not None and timeout_hours > 0:
+                age_hours = (datetime.utcnow() - started).total_seconds() / 3600.0
+                if age_hours > timeout_hours:
+                    self._torbox_fail_release(
+                        release_id, title,
+                        f"Timed out after {age_hours:.1f}h (limit {timeout_hours:g}h); "
+                        "the release stays REQUESTED for a retry.",
+                    )
+                    failed += 1
+                    continue
+
+            handle = {
+                "torrent_id": int(release.get("downloader_id") or 0),
+                "hash": str(release.get("torrent_hash") or ""),
+            }
+            if not handle["torrent_id"]:
+                self._torbox_fail_release(release_id, title, "Missing Torbox torrent_id on the release row.")
+                failed += 1
+                continue
+
+            try:
+                info = downloader.status(handle)
+            except DownloaderRateLimitError as exc:
+                self._torbox_surface_once(release_id, str(exc), title)
+                rate_limited = True
+                break
+            except (DownloaderAuthError, DownloaderNotFoundError) as exc:
+                self._torbox_fail_release(release_id, title, str(exc))
+                failed += 1
+                continue
+            except DownloaderError as exc:
+                self._torbox_surface_once(release_id, str(exc), title)
+                continue
+
+            processed += 1
+            state = str(info.get("state") or "queued")
+            if state == "failed":
+                self._torbox_fail_release(
+                    release_id, title,
+                    f"Torbox reported state '{info.get('raw_state') or 'failed'}'.",
+                )
+                failed += 1
+                continue
+            if state == "stalled":
+                self._torbox_surface_once(
+                    release_id,
+                    f"Torbox reports '{info.get('raw_state') or 'stalled'}' (no seeds/progress); "
+                    "it is not retried automatically.",
+                    title,
+                )
+                continue
+            if state != "ready":
+                continue
+
+            files = info.get("files") or []
+            wanted = self._release_missing_volumes(release)
+            selection, reason = self._select_torbox_files(release, files, wanted)
+            dest_dir = os.path.join(staging_dir, self._safe_torrent_dirname(title))
+            try:
+                saved = downloader.fetch_files(handle, selection, dest_dir)
+            except (DownloaderFileError, DownloaderError) as exc:
+                self._torbox_fail_release(release_id, title, f"Fetch failed ({reason}): {exc}")
+                failed += 1
+                continue
+
+            self.db.update_downloader_state(release_id, "COMPLETED", "torbox")
+            try:
+                rel_row = self.db.get_release_by_id(release_id)
+                if rel_row:
+                    self.get_notifier().notify_acquired(rel_row)
+            except Exception as e:
+                logger.debug(f"Webhook notification failed for acquired release: {e}")
+            detail = f"Saved {len(saved)} file(s) to {dest_dir} ({reason})."
+            deleted = ""
+            if delete_after:
+                deleted = " Torbox torrent deleted." if downloader.cancel(handle) else " Torbox delete failed."
+            self._log_activity("TORBOX_DOWNLOADED", f"Torbox download complete: '{title}'", detail + deleted)
+            completed += 1
+            self._torbox_notified.pop(release_id, None)
+
+        return {
+            "status": "rate_limited" if rate_limited else "ok",
+            "processed": processed,
+            "completed": completed,
+            "failed": failed,
+        }
+
+
     # --- Calibre Sync Task ---
     def sync_calibre_library(self) -> Dict[str, Any]:
         """
@@ -958,6 +1254,7 @@ class MangaScheduler:
         global_auto_download = self.db.get_setting("auto_download", "true").lower() == "true"
         staging_dir = self.db.get_setting("staging_dir", "/staging")
         qbit = self.get_qbit_client()
+        downloader_engine = self.get_downloader_engine()
 
         for feed in feeds:
             if not feed.get("enabled"):
@@ -1135,30 +1432,44 @@ class MangaScheduler:
                                 logger.debug(f"Webhook notification failed for new request: {e}")
 
                         if (is_new or is_transition) and global_auto_download and feed.get("auto_download"):
-                            success = qbit.add_torrent(
-                                url_or_magnet=rel.download_url,
-                                savepath=staging_dir,
-                                category="manga",
-                                tags="mangatrax"
-                            )
-                            if success:
-                                total_sent_to_downloader += 1
-                                torrent_h = qbit.extract_torrent_hash(rel.download_url) if hasattr(qbit, "extract_torrent_hash") else None
-                                if not isinstance(torrent_h, str):
-                                    torrent_h = None
-                                self.db.update_download_status(rel_id, "DOWNLOADING", torrent_h)
-                                self._log_activity(
-                                    "AUTO_DOWNLOAD",
-                                    f"Sent to downloader: '{rel.title}' (Missing: {missing_vols})",
-                                    f"Source: {feed_name}"
+                            if downloader_engine == "torbox":
+                                # Torbox engine: submit + persist handle; the poll task
+                                # fetches files (volume-scoped) into staging.
+                                result = self.submit_torbox_download(
+                                    rel_id,
+                                    rel.title,
+                                    rel.download_url,
+                                    link=rel.link,
+                                    missing_volumes=[float(v) for v in (missing_vols or [])],
+                                    source=feed_name,
                                 )
-                                if torrent_h and rel.is_bundle and missing_vols and len(missing_vols) < len(rel.volumes):
-                                    sel_res = qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing_vols])
-                                    if sel_res.get("status") == "filtered":
-                                        self._log_activity(
-                                            "SELECTIVE_DOWNLOAD",
-                                            f"Selective download applied for '{rel.title}': skipped {len(sel_res.get('skipped_volumes', []))} owned volumes; downloading {len(sel_res.get('kept_volumes', []))} missing volumes."
-                                        )
+                                if result.get("success"):
+                                    total_sent_to_downloader += 1
+                            else:
+                                success = qbit.add_torrent(
+                                    url_or_magnet=rel.download_url,
+                                    savepath=staging_dir,
+                                    category="manga",
+                                    tags="mangatrax"
+                                )
+                                if success:
+                                    total_sent_to_downloader += 1
+                                    torrent_h = qbit.extract_torrent_hash(rel.download_url) if hasattr(qbit, "extract_torrent_hash") else None
+                                    if not isinstance(torrent_h, str):
+                                        torrent_h = None
+                                    self.db.update_download_handle(rel_id, "qbit", downloader_id=torrent_h or "", torrent_hash=torrent_h)
+                                    self._log_activity(
+                                        "AUTO_DOWNLOAD",
+                                        f"Sent to downloader: '{rel.title}' (Missing: {missing_vols})",
+                                        f"Source: {feed_name}"
+                                    )
+                                    if torrent_h and rel.is_bundle and missing_vols and len(missing_vols) < len(rel.volumes):
+                                        sel_res = qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing_vols])
+                                        if sel_res.get("status") == "filtered":
+                                            self._log_activity(
+                                                "SELECTIVE_DOWNLOAD",
+                                                f"Selective download applied for '{rel.title}': skipped {len(sel_res.get('skipped_volumes', []))} owned volumes; downloading {len(sel_res.get('kept_volumes', []))} missing volumes."
+                                            )
 
                 self.db.update_feed_status(feed_id, "OK", None)
             except Exception as e:
@@ -1507,6 +1818,7 @@ class MangaScheduler:
         global_auto_download = self.db.get_setting("auto_download", "true").lower() == "true"
         staging_dir = self.db.get_setting("staging_dir", "/staging")
         qbit = self.get_qbit_client()
+        downloader_engine = self.get_downloader_engine()
 
         # 3. Query Nyaa targeted series search across primary and alternate titles
         nyaa = NyaaMangaProvider(name=f"Nyaa: {primary_title}", config={"delay_seconds": 1.0, "base_url": self._nyaa_base_url()})
@@ -1541,20 +1853,32 @@ class MangaScheduler:
                     except Exception as e:
                         logger.debug(f"Webhook notification failed for backfill request: {e}")
                 if is_new and global_auto_download and rel_id:
-                    success = qbit.add_torrent(
-                        url_or_magnet=rel.download_url,
-                        savepath=staging_dir,
-                        category="manga",
-                        tags="mangatrax"
-                    )
-                    if success:
-                        total_sent_to_downloader += 1
-                        torrent_h = qbit.extract_torrent_hash(rel.download_url) if hasattr(qbit, "extract_torrent_hash") else None
-                        if not isinstance(torrent_h, str):
-                            torrent_h = None
-                        self.db.update_download_status(rel_id, "DOWNLOADING", torrent_h)
-                        if torrent_h and rel.is_bundle and missing_vols and len(missing_vols) < len(rel.volumes):
-                            qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing_vols])
+                    if downloader_engine == "torbox":
+                        result = self.submit_torbox_download(
+                            rel_id,
+                            rel.title,
+                            rel.download_url,
+                            link=rel.link,
+                            missing_volumes=[float(v) for v in (missing_vols or [])],
+                            source=f"Nyaa: {primary_title}",
+                        )
+                        if result.get("success"):
+                            total_sent_to_downloader += 1
+                    else:
+                        success = qbit.add_torrent(
+                            url_or_magnet=rel.download_url,
+                            savepath=staging_dir,
+                            category="manga",
+                            tags="mangatrax"
+                        )
+                        if success:
+                            total_sent_to_downloader += 1
+                            torrent_h = qbit.extract_torrent_hash(rel.download_url) if hasattr(qbit, "extract_torrent_hash") else None
+                            if not isinstance(torrent_h, str):
+                                torrent_h = None
+                            self.db.update_download_handle(rel_id, "qbit", downloader_id=torrent_h or "", torrent_hash=torrent_h)
+                            if torrent_h and rel.is_bundle and missing_vols and len(missing_vols) < len(rel.volumes):
+                                qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing_vols])
 
         summary = f"Backfilled {title_display}: found {total_found} releases ({total_requested} wanted/missing volumes, {total_sent_to_downloader} sent to downloader)."
         self._log_activity("SERIES_BACKFILLED", summary)
@@ -1769,7 +2093,8 @@ class MangaScheduler:
             cur.execute("""
                 SELECT id, title, series_name, torrent_hash, download_url, volumes_json AS volumes, missing_vols_json AS missing_volumes, is_bundle
                 FROM releases
-                WHERE download_status = 'DOWNLOADING' AND is_bundle = 1;
+                WHERE download_status = 'DOWNLOADING' AND is_bundle = 1
+                  AND (downloader IS NULL OR downloader != 'torbox');
             """)
             rows = [dict(r) for r in cur.fetchall()]
 
@@ -1990,6 +2315,7 @@ class MangaScheduler:
         last_feed_check = 0
         last_tag_check = 0
         last_dl_check = 0
+        last_torbox_poll = 0
         last_complete_check = time.time()
 
         while self.running:
@@ -2027,6 +2353,16 @@ class MangaScheduler:
                 if now - last_dl_check >= 30:
                     self.check_and_filter_active_downloads()
                     last_dl_check = time.time()
+
+                # Advance Torbox downloads (cadence: torbox_poll_seconds, min 5s)
+                try:
+                    torbox_poll_seconds = float(self.db.get_setting("torbox_poll_seconds", "10") or 10)
+                except ValueError:
+                    torbox_poll_seconds = 10.0
+                torbox_poll_seconds = max(5.0, torbox_poll_seconds)
+                if now - last_torbox_poll >= torbox_poll_seconds:
+                    self.poll_torbox_downloads()
+                    last_torbox_poll = time.time()
 
             except Exception as e:
                 logger.error(f"Error in background worker loop: {e}")

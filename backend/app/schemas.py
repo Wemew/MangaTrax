@@ -46,6 +46,7 @@ __all__ = [
     "SettingsUpdateRequest",
     "DownloaderConfigureRequest",
     "DownloaderTestRequest",
+    "TorboxTestRequest",
     "WebhookTestRequest",
     "BackfillStartRequest",
     "DebugActionRequest",
@@ -357,7 +358,18 @@ SETTINGS_KEYS = (
     "discard_unmarked_chapters",
     # Nyaa/tracker base URL (mirror/proxy support).
     "nyaa_base_url",
+    # task-20: download engine selection + Torbox credentials/tuning.
+    "downloader_engine",
+    "torbox_enabled",
+    "torbox_api_key",
+    "torbox_delete_after_download",
+    "torbox_poll_seconds",
+    "torbox_max_concurrent",
+    "torbox_timeout_hours",
 )
+# Placeholder returned by GET /api/settings and rendered in the Settings UI instead of
+# the real Torbox key.  Saving the placeholder back is a no-op.
+TORBOX_API_KEY_MASK = "••••••••••••"
 
 
 def _clean_text(value: str) -> str:
@@ -652,6 +664,65 @@ class SettingsUpdateRequest(BaseModel):
     # Nyaa/tracker base URL (mirror/proxy support).  Accepts a bare base or a full
     # Nyaa-style URL; normalised to scheme://host[:port][/path] with query dropped.
     nyaa_base_url: Optional[str] = Field(default=None, max_length=security.MAX_URL_LENGTH)
+    # task-20: default download engine + Torbox configuration.  The API key is a
+    # secret: the UI/API only ever receive a masked placeholder, and an unchanged
+    # placeholder is ignored on save.
+    downloader_engine: Optional[str] = Field(default=None, max_length=20)
+    torbox_enabled: Optional[str] = Field(default=None, max_length=20)
+    torbox_api_key: Optional[str] = Field(default=None, max_length=500)
+    torbox_delete_after_download: Optional[str] = Field(default=None, max_length=20)
+    torbox_poll_seconds: Optional[str] = Field(default=None, max_length=20)
+    torbox_max_concurrent: Optional[str] = Field(default=None, max_length=20)
+    torbox_timeout_hours: Optional[str] = Field(default=None, max_length=20)
+
+    @field_validator("downloader_engine")
+    @classmethod
+    def _validate_downloader_engine(cls, value):
+        if value is None:
+            return None
+        engine = str(value).strip().lower()
+        if engine not in ("qbit", "torbox"):
+            raise ValueError("downloader_engine must be 'qbit' or 'torbox'")
+        return engine
+
+    @field_validator("torbox_poll_seconds")
+    @classmethod
+    def _validate_torbox_poll_seconds(cls, value):
+        if value is None or not str(value).strip():
+            return "10"
+        try:
+            seconds = int(str(value).strip())
+        except ValueError:
+            raise ValueError("torbox_poll_seconds must be an integer")
+        if not 5 <= seconds <= 3600:
+            raise ValueError("torbox_poll_seconds must be between 5 and 3600")
+        return str(seconds)
+
+    @field_validator("torbox_max_concurrent")
+    @classmethod
+    def _validate_torbox_max_concurrent(cls, value):
+        if value is None or not str(value).strip():
+            return "2"
+        try:
+            count = int(str(value).strip())
+        except ValueError:
+            raise ValueError("torbox_max_concurrent must be an integer")
+        if not 1 <= count <= 20:
+            raise ValueError("torbox_max_concurrent must be between 1 and 20")
+        return str(count)
+
+    @field_validator("torbox_timeout_hours")
+    @classmethod
+    def _validate_torbox_timeout_hours(cls, value):
+        if value is None or not str(value).strip():
+            return "6"
+        try:
+            hours = float(str(value).strip())
+        except ValueError:
+            raise ValueError("torbox_timeout_hours must be a number")
+        if not 0.25 <= hours <= 168:
+            raise ValueError("torbox_timeout_hours must be between 0.25 and 168")
+        return str(hours)
 
     @field_validator("calibre_path")
     @classmethod
@@ -714,6 +785,14 @@ class DownloaderTestRequest(BaseModel):
     qbit_username: Optional[str] = Field(default=None, max_length=200)
     qbit_password: Optional[str] = Field(default=None, max_length=500)
     qbit_enabled: Optional[Union[bool, str]] = None
+
+
+class TorboxTestRequest(BaseModel):
+    """Optional key lets Settings test an unsaved Torbox API key."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    torbox_api_key: Optional[str] = Field(default=None, max_length=500)
 
 
 class WebhookTestRequest(BaseModel):
