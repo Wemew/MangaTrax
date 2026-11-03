@@ -22,9 +22,9 @@
                 <i data-lucide="activity" class="w-3.5 h-3.5 text-cyan-400"></i>
                 Test Downloader Connection
             </button>
-            <button type="button" onclick="triggerStagingTag()" id="btn-tag-staging" aria-label="Tag completed CBZ files in staging" title="Tag completed .cbz files in staging with inherited Calibre metadata" class="px-3.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all shadow-md shadow-cyan-600/20 active:scale-95">
+            <button type="button" onclick="triggerStagingTag()" id="btn-tag-staging" aria-label="Process downloads: tag and move eligible CBZ files to staging" title="Tag downloads whose series exists in Calibre and move them to staging (untagged/unmatched files stay in downloads)" class="px-3.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all shadow-md shadow-cyan-600/20 active:scale-95">
                 <i data-lucide="tag" class="w-3.5 h-3.5" id="icon-staging-tag"></i>
-                Tag Staging Now
+                Process Downloads
             </button>
         </div>
     </div>
@@ -87,6 +87,37 @@
                     Save & Test Connection
                 </button>
             </div>
+        </div>
+    </div>
+
+    <!-- Awaiting Calibre series (task-22 downloads routing) -->
+    <div class="space-y-3">
+        <div class="flex items-center justify-between">
+            <h2 class="text-lg font-bold text-white tracking-tight flex items-center gap-2">
+                <i data-lucide="library" class="w-5 h-5 text-amber-400"></i>
+                Awaiting Calibre Series
+            </h2>
+            <span class="text-xs text-slate-500">{{ awaiting_series|length }} series · {{ awaiting_total }} file(s)</span>
+        </div>
+        <div class="bg-darkcard border border-slate-800 rounded-2xl p-4 shadow-xl">
+            {% if awaiting_series %}
+            <p class="text-xs text-slate-400 mb-2">
+                These raw downloads in <code class="text-slate-300">{{ downloads_dir }}</code> are kept untouched until their
+                series exists in Calibre; the next Calibre sync unlocks them (they are then tagged and moved to staging).
+            </p>
+            <ul class="divide-y divide-slate-800/60">
+                {% for item in awaiting_series %}
+                <li class="py-2 flex items-center justify-between gap-3 text-xs">
+                    <span class="font-semibold text-white">{{ item.series }}</span>
+                    <span class="text-slate-400">
+                        {{ item.count }} file(s){% if item.volumes %} · vol {{ item.volumes|join(', ') }}{% endif %}
+                    </span>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="text-xs text-slate-500">Nothing waiting: every downloaded series is either known to Calibre or not downloaded yet.</p>
+            {% endif %}
         </div>
     </div>
 

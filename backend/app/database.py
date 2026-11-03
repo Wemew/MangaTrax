@@ -674,6 +674,9 @@ class MangaDatabase:
                     "qbit_category": "manga",
                     "qbit_tags": "mangatrax",
                     "staging_dir": os.getenv("STAGING_DIR", "/staging"),
+                    # Raw download destination for both engines; STAGING_DIR is the
+                    # final destination after the tag+move routing pass (task-22).
+                    "downloads_dir": os.getenv("DOWNLOADS_DIR", "/downloads"),
                     "auto_download": "true",
                     "auto_tag": "true",
                     # Context-guarded discard of marker-less chapter releases
@@ -740,6 +743,10 @@ class MangaDatabase:
                     "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",
                     (torbox_key, torbox_default),
                 )
+            cur.execute(
+                "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",
+                ("downloads_dir", os.getenv("DOWNLOADS_DIR", "/downloads")),
+            )
             # One-shot marker for the D1 re-typing pass ('' = not applied yet).
             cur.execute(
                 "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);",

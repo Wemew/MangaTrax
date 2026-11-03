@@ -22,6 +22,7 @@ from app.downloader import as_bool, build_downloader, resolve_downloader_engine
 from app.downloader.base import DownloaderError, parse_queued_handle_id
 from app.downloader.torbox import TorboxDownloader
 from app.tagger import cbz_tagger, series_audit
+from app.tagger import pipeline as downloads_pipeline
 from app.tagger.cbz_tagger import has_comicinfo
 from app.metadata.mangaupdates import MangaUpdatesService
 from app.parser import extract_manga_bundle_and_volumes
@@ -904,6 +905,17 @@ async def downloads_view(request: Request):
                 "has_comicinfo": has_comicinfo(entry["path"]),
             })
 
+    # task-22: raw downloads awaiting a Calibre series (read-only scan for the UI).
+    downloads_dir = db.get_setting("downloads_dir", "/downloads")
+    try:
+        awaiting_series = downloads_pipeline.scan_awaiting_series(
+            downloads_dir, db.get_series_templates_map(),
+        )
+    except Exception as exc:  # pragma: no cover - a broken scan must not break the page
+        logger.debug("Could not scan awaiting downloads series: %s", exc)
+        awaiting_series = []
+    awaiting_total = sum(int(item.get("count") or 0) for item in awaiting_series)
+
     return templates.TemplateResponse(
         request=request,
         name="downloads.html",
@@ -913,7 +925,10 @@ async def downloads_view(request: Request):
             "engine": download_status.get("engine") or "qbit",
             "torrents": torrents,
             "staging_dir": staging_dir,
+            "downloads_dir": downloads_dir,
             "staging_files": staging_files,
+            "awaiting_series": awaiting_series,
+            "awaiting_total": awaiting_total,
             "settings": db.get_all_settings()
         }
     )
@@ -1098,9 +1113,28 @@ async def api_toggle_feed(feed_id: int, payload: Dict[str, Any]):
 
 @app.post("/api/staging/tag")
 async def api_staging_tag():
-    """Trigger ComicInfo.xml tagging on .cbz files in staging folder using inherited series metadata."""
-    res = scheduler.tag_staging_files()
-    return JSONResponse(res)
+    """Process downloads: tag+moved into staging when the series is in Calibre.
+
+    Also keeps the legacy staging pass (already-staged archives) so files that were
+    put in staging manually still get tagged.  The manual action runs with the
+    request actor (not 'scheduler') in the audit trail.
+    """
+    routing = await asyncio.to_thread(scheduler.process_downloads_to_staging, None)
+    legacy = await asyncio.to_thread(scheduler.tag_staging_files)
+    message = (
+        f"Processed downloads: {routing.get('tagged_and_moved', 0)} tagged and moved to staging, "
+        f"{routing.get('awaiting_calibre', 0)} awaiting a Calibre series, "
+        f"{routing.get('failed', 0)} failed, {routing.get('skipped_existing', 0)} already present; "
+        f"{legacy.get('tagged_count', 0)} existing staging file(s) tagged."
+    )
+    return JSONResponse({
+        "status": "success" if routing.get("failed", 0) == 0 else "partial",
+        "success": routing.get("failed", 0) == 0,
+        "message": message,
+        "tagged_count": routing.get("tagged_and_moved", 0) + legacy.get("tagged_count", 0),
+        "tagged_files": legacy.get("tagged_files", []),
+        **routing,
+    })
 
 
 # --- Live downloader progress (PROJECT.md feature 15) ---
@@ -1501,7 +1535,7 @@ async def api_release_download(release_id: int):
         raise HTTPException(status_code=404, detail="Release not found")
 
     download_url = target.get("download_url") or target.get("link")
-    staging_dir = db.get_setting("staging_dir", "/staging")
+    downloads_dir = scheduler.get_downloads_dir()
     missing = target.get("missing_volumes") or json.loads(target.get("missing_vols_json") or "[]")
     vols = target.get("volumes") or []
 
@@ -1516,6 +1550,7 @@ async def api_release_download(release_id: int):
         )
         if result.get("success"):
             db.log_activity("MANUAL_DOWNLOAD", f"Sent to Torbox: '{target['title']}'", "Engine: torbox")
+            await asyncio.to_thread(scheduler.process_downloads_to_staging, None)
             return JSONResponse({
                 "status": "success",
                 "engine": "torbox",
@@ -1531,7 +1566,7 @@ async def api_release_download(release_id: int):
 
     success = qbit.add_torrent(
         url_or_magnet=download_url,
-        savepath=staging_dir,
+        savepath=downloads_dir,
         category="manga",
         tags="mangatrax"
     )
@@ -1549,6 +1584,7 @@ async def api_release_download(release_id: int):
                     f"Selective download applied for '{target['title']}': skipped {len(sel_res.get('skipped_volumes', []))} owned volumes; downloading {len(sel_res.get('kept_volumes', []))} missing volumes."
                 )
 
+        await asyncio.to_thread(scheduler.process_downloads_to_staging, None)
         return JSONResponse({"status": "success", "engine": "qbit", "message": "Sent to downloader successfully"})
     else:
         return JSONResponse({"status": "error", "engine": "qbit", "message": "Failed to add release to downloader"}, status_code=500)
@@ -1737,12 +1773,26 @@ async def api_save_settings(payload: Dict[str, Any]):
     provided = model.model_dump(exclude_unset=True, exclude_none=True) if hasattr(model, "model_dump") else {}
     operator_roots = _operator_allowed_path_roots()
     if operator_roots:
-        for key in ("calibre_path", "staging_dir"):
+        for key in ("calibre_path", "staging_dir", "downloads_dir"):
             if key in provided:
                 try:
                     security.ensure_path_within_roots(str(provided[key]), operator_roots)
                 except security.UnsafePathError as exc:
                     raise HTTPException(status_code=400, detail=f"{key}: {exc}") from exc
+    # task-22: downloads_dir holds raw downloads and must not be the staging folder.
+    if "downloads_dir" in provided:
+        staging_value = str(provided.get("staging_dir") or db.get_setting("staging_dir", "/staging"))
+        try:
+            staging_real = os.path.realpath(security.validate_directory_setting(
+                staging_value, setting_name="staging_dir"))
+            downloads_real = os.path.realpath(str(provided["downloads_dir"]))
+        except security.UnsafePathError as exc:
+            raise HTTPException(status_code=400, detail=f"downloads_dir: {exc}") from exc
+        if os.path.normcase(staging_real) == os.path.normcase(downloads_real):
+            raise HTTPException(
+                status_code=400,
+                detail="downloads_dir must differ from staging_dir (raw downloads vs processed files)",
+            )
     # Never persist the masked placeholder back over a real Torbox key (and an empty
     # value from the UI means "unchanged", not "clear").
     if "torbox_api_key" in provided:

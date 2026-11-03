@@ -31,6 +31,7 @@ from app.downloader.base import (
     parse_queued_handle_id,
 )
 from app.tagger.cbz_tagger import auto_tag_staging_cbz_files
+from app.tagger import pipeline as downloads_pipeline
 from app.providers.registry import create_provider
 from app.providers.nyaa import NyaaMangaProvider
 from app.providers.base import ProviderFetchError
@@ -708,6 +709,47 @@ class MangaScheduler:
         except ValueError:
             return None
 
+    def get_downloads_dir(self, create: bool = True) -> str:
+        """Raw download destination for both engines (task-22 routing model)."""
+        path = self.db.get_setting("downloads_dir", downloads_pipeline.DEFAULT_DOWNLOADS_DIR) or downloads_pipeline.DEFAULT_DOWNLOADS_DIR
+        if create:
+            try:
+                os.makedirs(path, exist_ok=True)
+            except OSError as exc:
+                logger.warning("Could not create downloads_dir '%s': %s", path, exc)
+        return path
+
+    def process_downloads_to_staging(self, actor: Optional[str] = "scheduler") -> Dict[str, Any]:
+        """Tag+move downloads whose series exists in Calibre into staging.
+
+        Series not in Calibre are left untouched in downloads_dir (summarised via
+        AWAITING_CALIBRE_SERIES).  Never raises: a routing failure must not break the
+        worker or an API call.
+        """
+        try:
+            downloads_dir = self.get_downloads_dir(create=False)
+            staging_dir = self.db.get_setting("staging_dir", "/staging")
+            series_templates = self.db.get_series_templates_map()
+            result = downloads_pipeline.process_downloads_to_staging(
+                downloads_dir, staging_dir, series_templates, self.db, actor=actor,
+            )
+            try:
+                self.db.set_setting("downloads_routing_summary", json.dumps(result))
+            except Exception:
+                pass
+            return result
+        except Exception as exc:
+            logger.error("Downloads routing pass failed: %s", exc)
+            return {
+                "scanned": 0,
+                "tagged_and_moved": 0,
+                "awaiting_calibre": 0,
+                "failed": 0,
+                "skipped_existing": 0,
+                "series_awaiting": [],
+                "error": str(exc),
+            }
+
     def submit_torbox_download(
         self,
         release_id: int,
@@ -737,8 +779,8 @@ class MangaScheduler:
             return {"success": False, "engine": engine, "message": message, "retryable": True}
 
         downloader = build_downloader(self.db, engine=engine)
-        staging_dir = self.db.get_setting("staging_dir", "/staging")
-        savepath = os.path.join(staging_dir, self._safe_torrent_dirname(title))
+        downloads_dir = self.get_downloads_dir()
+        savepath = os.path.join(downloads_dir, self._safe_torrent_dirname(title))
         release = {"download_url": download_url, "link": link, "title": title}
         wanted = [float(v) for v in (missing_volumes or [])]
         try:
@@ -877,8 +919,9 @@ class MangaScheduler:
         if not rows:
             return {"status": "idle", "processed": 0, "completed": 0, "failed": 0}
 
-        staging_dir = self.db.get_setting("staging_dir", "/staging")
+        downloads_dir = self.get_downloads_dir()
         delete_after = as_bool(self.db.get_setting("torbox_delete_after_download", "true"), default=True)
+
         processed = completed = failed = 0
         rate_limited = False
 
@@ -995,7 +1038,7 @@ class MangaScheduler:
             files = info.get("files") or []
             wanted = self._release_missing_volumes(release)
             selection, reason = self._select_torbox_files(release, files, wanted)
-            dest_dir = os.path.join(staging_dir, self._safe_torrent_dirname(title))
+            dest_dir = os.path.join(downloads_dir, self._safe_torrent_dirname(title))
             try:
                 saved = downloader.fetch_files(handle, selection, dest_dir)
             except (DownloaderFileError, DownloaderError) as exc:
@@ -1017,6 +1060,11 @@ class MangaScheduler:
             self._log_activity("TORBOX_DOWNLOADED", f"Torbox download complete: '{title}'", detail + deleted)
             completed += 1
             self._torbox_notified.pop(release_id, None)
+            # A finished download is immediately eligible for tag+route to staging.
+            try:
+                self.process_downloads_to_staging(actor="scheduler")
+            except Exception as exc:
+                logger.debug("Downloads routing after Torbox completion failed: %s", exc)
 
         return {
             "status": "rate_limited" if rate_limited else "ok",
@@ -1094,6 +1142,11 @@ class MangaScheduler:
                 summary = f"Synced {synced_count} manga series from Calibre; auto-resolved {len(resolved)} acquired requests."
                 logger.info(summary)
                 self._log_activity("CALIBRE_SYNC", summary)
+                # A newly registered series immediately unlocks its waiting downloads.
+                try:
+                    self.process_downloads_to_staging(actor="scheduler")
+                except Exception as exc:
+                    logger.debug("Downloads routing after Calibre sync failed: %s", exc)
                 return {
                     "success": True,
                     "message": summary,
@@ -1338,7 +1391,7 @@ class MangaScheduler:
         known_series_keys = self._known_series_keys(matcher)
 
         global_auto_download = self.db.get_setting("auto_download", "true").lower() == "true"
-        staging_dir = self.db.get_setting("staging_dir", "/staging")
+        downloads_dir = self.get_downloads_dir()
         qbit = self.get_qbit_client()
         downloader_engine = self.get_downloader_engine()
 
@@ -1534,7 +1587,7 @@ class MangaScheduler:
                             else:
                                 success = qbit.add_torrent(
                                     url_or_magnet=rel.download_url,
-                                    savepath=staging_dir,
+                                    savepath=downloads_dir,
                                     category="manga",
                                     tags="mangatrax"
                                 )
@@ -1572,6 +1625,13 @@ class MangaScheduler:
             detail = "; ".join(f"{item['feed']}: {item['error']}" for item in feed_errors[:5])
             summary += f" {feeds_failed} feed(s) failed: {detail}"
         logger.info(summary)
+        if total_sent_to_downloader:
+            # New downloads may already be present (e.g. cached Torbox jobs) and can be
+            # tagged/routed right away; the 5-minute cadence covers the rest.
+            try:
+                self.process_downloads_to_staging(actor="scheduler")
+            except Exception as exc:
+                logger.debug("Downloads routing after feed poll failed: %s", exc)
         self._log_activity(
             "FEED_POLL_COMPLETED",
             summary,
@@ -1902,7 +1962,7 @@ class MangaScheduler:
         known_series_keys = self._known_series_keys(matcher)
 
         global_auto_download = self.db.get_setting("auto_download", "true").lower() == "true"
-        staging_dir = self.db.get_setting("staging_dir", "/staging")
+        downloads_dir = self.get_downloads_dir()
         qbit = self.get_qbit_client()
         downloader_engine = self.get_downloader_engine()
 
@@ -1953,7 +2013,7 @@ class MangaScheduler:
                     else:
                         success = qbit.add_torrent(
                             url_or_magnet=rel.download_url,
-                            savepath=staging_dir,
+                            savepath=downloads_dir,
                             category="manga",
                             tags="mangatrax"
                         )
@@ -2433,6 +2493,11 @@ class MangaScheduler:
                 # Auto-tag staging every 5 minutes if enabled
                 if auto_tag_enabled and (now - last_tag_check >= 300):
                     self.tag_staging_files()
+                    # task-22: also route eligible raw downloads into staging.
+                    try:
+                        self.process_downloads_to_staging(actor="scheduler")
+                    except Exception as exc:
+                        logger.debug("Periodic downloads routing failed: %s", exc)
                     last_tag_check = time.time()
 
                 # Check and optimize bundle downloads every 30 seconds

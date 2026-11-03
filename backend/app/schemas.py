@@ -344,6 +344,7 @@ SETTINGS_KEYS = (
     "qbit_category",
     "qbit_tags",
     "staging_dir",
+    "downloads_dir",
     "auto_download",
     "auto_tag",
     "calibre_sync_interval_minutes",
@@ -642,6 +643,9 @@ class SettingsUpdateRequest(BaseModel):
     qbit_category: Optional[str] = Field(default=None, max_length=100)
     qbit_tags: Optional[str] = Field(default=None, max_length=200)
     staging_dir: Optional[str] = Field(default=None, max_length=security.MAX_PATH_LENGTH)
+    # Raw download destination (both engines); staging_dir is the final destination
+    # after tag+move (task-22).  Must differ from staging_dir (enforced in the API).
+    downloads_dir: Optional[str] = Field(default=None, max_length=security.MAX_PATH_LENGTH)
     auto_download: Optional[str] = Field(default=None, max_length=20)
     auto_tag: Optional[str] = Field(default=None, max_length=20)
     calibre_sync_interval_minutes: Optional[str] = Field(default=None, max_length=20)
@@ -733,6 +737,11 @@ class SettingsUpdateRequest(BaseModel):
     @classmethod
     def _validate_staging_dir(cls, value):
         return _validate_directory_value("staging_dir")(value)
+
+    @field_validator("downloads_dir")
+    @classmethod
+    def _validate_downloads_dir(cls, value):
+        return _validate_directory_value("downloads_dir")(value)
 
     @field_validator("discord_webhook_url", "apprise_url")
     @classmethod
