@@ -1036,6 +1036,98 @@ class MangaDatabase:
             cur.execute("UPDATE series_tracking SET website_url = ? WHERE id = ?;", (website_url.strip(), series_id))
             conn.commit()
 
+    def get_series_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        """Case-insensitive lookup of one tracked series row."""
+        clean = str(name or "").strip()
+        if not clean:
+            return None
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM series_tracking WHERE lower(name) = lower(?) LIMIT 1;", (clean,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def get_series_by_id(self, series_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM series_tracking WHERE id = ? LIMIT 1;", (series_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    _SERIES_UPDATABLE_COLUMNS = (
+        "authors",
+        "publisher",
+        "tags",
+        "description",
+        "book_count",
+        "latest_index",
+        "owned_volumes_json",
+        "website_url",
+        "calibre_series_id",
+        "last_sync",
+    )
+
+    def update_series_metadata(self, series_id: int, fields: Dict[str, Any]) -> bool:
+        """Update whitelisted display/enrichment columns of one tracked series.
+
+        Deliberately cannot touch ``name``/``is_monitored``: provider metadata is
+        enrichment only and must never change the stable matching key.
+        """
+        if not series_id or not fields:
+            return False
+        updates = {
+            key: value for key, value in fields.items()
+            if key in self._SERIES_UPDATABLE_COLUMNS and value is not None
+        }
+        if not updates:
+            return False
+        assignments = ", ".join(f"{key} = ?" for key in updates)
+        params = list(updates.values()) + [series_id]
+        if "last_sync" not in updates:
+            assignments += ", last_sync = CURRENT_TIMESTAMP"
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"UPDATE series_tracking SET {assignments} WHERE id = ?;",
+                tuple(params),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def update_series_cover_on_releases(self, series_name: str, cover_url: str) -> int:
+        """Point this series' releases at a refreshed provider cover (display only)."""
+        clean_name = str(series_name or "").strip()
+        clean_url = str(cover_url or "").strip()
+        if not clean_name or not clean_url:
+            return 0
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET cover_url = ? WHERE lower(series_name) = lower(?);",
+                (clean_url, clean_name),
+            )
+            conn.commit()
+            return cur.rowcount or 0
+
+    def get_releases_for_series(self, series_name: str, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Releases belonging to one series (case-insensitive, vetoed rows excluded)."""
+        clean_name = str(series_name or "").strip()
+        if not clean_name:
+            return []
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT * FROM releases
+                WHERE lower(series_name) = lower(?)
+                  AND status NOT IN ('BLACKLISTED', 'IGNORED')
+                ORDER BY id ASC
+                LIMIT ?;
+                """,
+                (clean_name, int(limit)),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
     def get_series_templates_map(self) -> Dict[str, Dict[str, Any]]:
         """Returns map of normalized series name -> template dict for ComicInfo.xml metadata injection."""
         series_list = self.get_all_series()

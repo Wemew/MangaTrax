@@ -114,14 +114,15 @@ class MangaScheduler:
             "result": None,
         }
 
-    def _log_activity(self, event_type: str, message: str, details: str = ""):
-        """Audit helper for background work: always stamps ``actor='scheduler'``.
+    def _log_activity(self, event_type: str, message: str, details: str = "", actor: Optional[str] = "scheduler"):
+        """Audit helper for background work: stamps ``actor='scheduler'`` by default.
 
         The scheduler thread has no HTTP request context, so without an explicit
         actor every automated event would be indistinguishable from a user
-        action in the audit trail.
+        action in the audit trail.  Callers that represent a user-triggered job can
+        pass the request actor explicitly.
         """
-        self.db.log_activity(event_type, message, details, actor="scheduler")
+        self.db.log_activity(event_type, message, details, actor=actor)
 
     # --- Naming model: STABLE MATCHING KEY vs. DISPLAY TITLE ---
     #
@@ -1948,7 +1949,283 @@ class MangaScheduler:
 
         return search_titles or [clean_name]
 
-    def backfill_series(self, series_name: str, max_pages: int = 3) -> Dict[str, Any]:
+    # --- Per-series refresh (task-24): provider metadata + Calibre + Nyaa crawl ---
+    @staticmethod
+    def _coerce_total_volumes(value: Any) -> Optional[int]:
+        try:
+            if value is None or value == "":
+                return None
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    def _series_refresh_matcher(self) -> MangaCalibreMatcher:
+        """Fresh matcher built after the metadata/Calibre phases."""
+        calibre_path = self.db.get_setting("calibre_path", "/calibre")
+        scanner = CalibreMangaScanner(calibre_path)
+        series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
+        volumes_map = scanner.get_series_volumes_map() if scanner.is_available() else {}
+        meta_cache = self.db.get_all_manga_metadata_cache()
+        return MangaCalibreMatcher(series_list, volumes_map, meta_cache)
+
+    def refresh_series_provider_metadata(self, series_name: str, actor: str = "scheduler") -> Dict[str, Any]:
+        """Phase 1: force-refresh AniList (MangaUpdates fallback) enrichment data.
+
+        Display/enrichment only: the stable ``series_tracking.name`` (and therefore
+        release matching keys) is never changed.  Provider data is written through
+        the existing metadata cache; if the provider is unavailable the cached values
+        are kept and the phase reports a skip.
+        """
+        series_row = self.db.get_series_by_name(series_name)
+        stable_name = str((series_row or {}).get("name") or series_name).strip()
+        if not stable_name:
+            return {"updated": False, "skipped": True, "reason": "series name required", "changes": []}
+        try:
+            previous = self.db.get_cached_manga_metadata(stable_name) or {}
+        except Exception:
+            previous = {}
+
+        provider_error = ""
+        try:
+            fetched = self.anilist.resolve_manga_series(stable_name, force_refresh=True) or {}
+        except Exception as exc:  # provider down must never fail the phase/job
+            fetched = {}
+            provider_error = str(exc)
+        authoritative = bool(fetched) and fetched.get("source") not in ("fallback", "cleaned", None)
+
+        fallback_info: Dict[str, Any] = {}
+        if not authoritative:
+            try:
+                fallback_info = self.mangaupdates.get_series_info(stable_name) or {}
+            except Exception as exc:
+                fallback_info = {}
+                provider_error = provider_error or str(exc)
+
+        def pick(primary_key: str, fallback_key: str = "") -> Any:
+            value = fetched.get(primary_key)
+            if value not in (None, "", []):
+                return value
+            if fallback_key:
+                value = fallback_info.get(fallback_key)
+                if value not in (None, "", []):
+                    return value
+            return previous.get(primary_key)
+
+        canonical = pick("canonical_title") or stable_name
+        romaji = pick("romaji_title") or ""
+        total_volumes = (
+            self._coerce_total_volumes(pick("total_volumes")) if authoritative
+            else self._coerce_total_volumes(previous.get("total_volumes"))
+        )
+        status = pick("status") or previous.get("status") or "UNKNOWN"
+        cover_url = pick("cover_url", "cover_url") or ""
+        synopsis = pick("synopsis", "description") or ""
+        provider_authors = str(fetched.get("authors") or fallback_info.get("authors") or "").strip()
+
+        changes: List[str] = []
+        if authoritative:
+            prev_canonical = str(previous.get("canonical_title") or "")
+            if canonical and prev_canonical and canonical != prev_canonical:
+                changes.append(f"title '{prev_canonical}' -> '{canonical}'")
+            prev_romaji = str(previous.get("romaji_title") or "")
+            if romaji and prev_romaji and romaji != prev_romaji:
+                changes.append(f"romaji '{prev_romaji}' -> '{romaji}'")
+            prev_total = self._coerce_total_volumes(previous.get("total_volumes"))
+            if total_volumes is not None and total_volumes != prev_total:
+                changes.append(f"total volumes {prev_total if prev_total is not None else '?'} -> {total_volumes}")
+            prev_status = str(previous.get("status") or "UNKNOWN")
+            if status and status != prev_status:
+                changes.append(f"status {prev_status} -> {status}")
+            prev_cover = str(previous.get("cover_url") or "")
+            if cover_url and cover_url != prev_cover:
+                changes.append("cover updated" if prev_cover else "cover added")
+            prev_synopsis = str(previous.get("synopsis") or "")
+            if synopsis and prev_synopsis and synopsis != prev_synopsis:
+                changes.append("synopsis updated")
+
+        update_fields: Dict[str, Any] = {}
+        provider_metadata_available = authoritative or bool(fallback_info.get("description"))
+        if series_row and provider_metadata_available:
+            if synopsis and synopsis != str(series_row.get("description") or ""):
+                update_fields["description"] = synopsis
+            if provider_authors and provider_authors != str(series_row.get("authors") or ""):
+                update_fields["authors"] = provider_authors
+            fallback_url = str(fallback_info.get("url") or "").strip()
+            if fallback_url and not str(series_row.get("website_url") or "").strip():
+                update_fields["website_url"] = fallback_url
+        if update_fields and series_row:
+            try:
+                self.db.update_series_metadata(series_row["id"], update_fields)
+            except Exception as exc:
+                logger.debug("Could not update series display metadata for '%s': %s", stable_name, exc)
+
+        if cover_url and (not previous.get("cover_url") or cover_url != previous.get("cover_url")):
+            try:
+                self.cover_cache.cache_sync(cover_url)
+            except Exception as exc:  # cover failures are tolerated
+                logger.debug("Cover refresh failed for '%s': %s", stable_name, exc)
+            try:
+                self.db.update_series_cover_on_releases(stable_name, cover_url)
+            except Exception as exc:
+                logger.debug("Could not update release cover URLs for '%s': %s", stable_name, exc)
+
+        updated = bool(changes or update_fields)
+        if authoritative:
+            message = (
+                f"Metadata refreshed for '{stable_name}': " + ", ".join(changes)
+                if changes else f"Metadata refreshed for '{stable_name}': no changes"
+            )
+            skipped = False
+        else:
+            message = (
+                f"Metadata refresh for '{stable_name}' skipped (provider unavailable"
+                + (f": {provider_error}" if provider_error else "")
+                + "); kept cached values."
+            )
+            skipped = True
+        details = json.dumps({
+            "canonical_title": canonical,
+            "romaji_title": romaji,
+            "total_volumes": total_volumes,
+            "status": status,
+            "cover_url": cover_url,
+            "authors": provider_authors,
+            "changes": changes,
+            "source": fetched.get("source") or ("mangaupdates" if fallback_info else "cache"),
+            "skipped": skipped,
+        })
+        self._log_activity("SERIES_METADATA_REFRESHED", message, details, actor=actor)
+        return {
+            "updated": updated,
+            "skipped": skipped,
+            "changes": changes,
+            "source": fetched.get("source") or ("mangaupdates" if fallback_info else "cache"),
+            "total_volumes": total_volumes,
+            "status": status,
+            "cover_url": cover_url,
+        }
+
+    def refresh_series_calibre_info(self, series_name: str, actor: str = "scheduler") -> Dict[str, Any]:
+        """Phase 2: re-read one series from Calibre (zero-lock) and update its row."""
+        series_row = self.db.get_series_by_name(series_name)
+        if not series_row:
+            return {"updated": False, "skipped": True, "reason": "series is not tracked", "changes": []}
+        stable_name = str(series_row.get("name") or series_name)
+        calibre_path = self.db.get_setting("calibre_path", "/calibre")
+        scanner = CalibreMangaScanner(calibre_path)
+        if not scanner.is_available():
+            message = f"Calibre refresh for '{stable_name}' skipped: library unavailable at {calibre_path}."
+            self._log_activity("SERIES_CALIBRE_REFRESHED", message, json.dumps({"skipped": True}), actor=actor)
+            return {"updated": False, "skipped": True, "reason": "Calibre unavailable", "changes": []}
+        try:
+            entries = scanner.get_all_series() or []
+            volumes_map = scanner.get_series_volumes_map() or {}
+        except Exception as exc:
+            message = f"Calibre refresh for '{stable_name}' failed: {exc}"
+            self._log_activity("SERIES_CALIBRE_REFRESHED", message, json.dumps({"error": str(exc)}), actor=actor)
+            return {"updated": False, "skipped": True, "reason": str(exc), "changes": []}
+
+        target = None
+        norm_target = normalize_text(stable_name)
+        for entry in entries:
+            entry_name = str(entry.get("series_name") or "")
+            if entry_name.lower() == stable_name.lower() or normalize_text(entry_name) == norm_target:
+                target = entry
+                break
+        if not target:
+            message = f"Calibre refresh for '{stable_name}' skipped: series not found in the library."
+            self._log_activity("SERIES_CALIBRE_REFRESHED", message, json.dumps({"skipped": True}), actor=actor)
+            return {"updated": False, "skipped": True, "reason": "series not found in Calibre", "changes": []}
+
+        owned_volumes = sorted(volumes_map.get(str(target.get("series_name") or "").lower(), set()))
+        updates: Dict[str, Any] = {
+            "calibre_series_id": target.get("series_id"),
+            "book_count": int(target.get("book_count") or 0),
+            "latest_index": float(target.get("latest_index") or 0.0),
+            "owned_volumes_json": json.dumps(owned_volumes),
+        }
+        for field in ("authors", "publisher", "tags", "description", "website_url"):
+            value = str(target.get(field) or "").strip()
+            if value:
+                updates[field] = value
+
+        changes: List[str] = []
+        for field in ("authors", "publisher", "tags", "description", "website_url"):
+            if field not in updates:
+                continue
+            new_value = updates[field]
+            old_value = str(series_row.get(field) or "")
+            if new_value != old_value:
+                changes.append(f"{field} '{old_value}' -> '{new_value}'")
+        if int(series_row.get("book_count") or 0) != updates["book_count"]:
+            changes.append(f"book count {int(series_row.get('book_count') or 0)} -> {updates['book_count']}")
+        if float(series_row.get("latest_index") or 0.0) != updates["latest_index"]:
+            changes.append(f"latest index {float(series_row.get('latest_index') or 0.0):g} -> {updates['latest_index']:g}")
+        try:
+            previous_owned = sorted(json.loads(series_row.get("owned_volumes_json") or "[]"))
+        except Exception:
+            previous_owned = []
+        if previous_owned != owned_volumes:
+            changes.append(f"owned volumes {previous_owned} -> {owned_volumes}")
+        try:
+            self.db.update_series_metadata(series_row["id"], updates)
+        except Exception as exc:
+            logger.debug("Could not update Calibre info for '%s': %s", stable_name, exc)
+            return {"updated": False, "skipped": True, "reason": str(exc), "changes": []}
+
+        # Refresh the cached cover when the series' cover URL changed (tolerate failure).
+        cover_url = str(target.get("cover_url") or "").strip()
+        if not cover_url:
+            try:
+                live_series = self.db.get_all_series(search=stable_name)
+                cover_url = next(
+                    (str(item.get("cover_url") or "").strip() for item in live_series
+                     if str(item.get("name") or "").lower() == stable_name.lower()),
+                    "",
+                )
+            except Exception:
+                cover_url = ""
+        if cover_url:
+            try:
+                self.cover_cache.cache_sync(cover_url)
+            except Exception as exc:
+                logger.debug("Cover refresh failed for '%s': %s", stable_name, exc)
+
+        message = (
+            f"Calibre info refreshed for '{stable_name}': " + ", ".join(changes)
+            if changes else f"Calibre info refreshed for '{stable_name}': no changes"
+        )
+        self._log_activity(
+            "SERIES_CALIBRE_REFRESHED", message,
+            json.dumps({"changes": changes, "book_count": updates["book_count"], "owned_volumes": owned_volumes}),
+            actor=actor,
+        )
+        return {"updated": bool(changes), "skipped": False, "changes": changes,
+                "book_count": updates["book_count"], "owned_volumes": owned_volumes}
+
+    def _reconcile_series_releases(self, series_name: str, matcher: MangaCalibreMatcher) -> int:
+        """Recompute missing volumes/status for one series' releases only."""
+        changed = 0
+        try:
+            releases = self.db.get_releases_for_series(series_name)
+        except Exception as exc:
+            logger.error("Series reconcile: could not load releases for '%s': %s", series_name, exc)
+            return 0
+        for release in releases:
+            try:
+                result = matcher.check_release(release, auto_request_monitored=True)
+                new_missing = result.get("missing_volumes", [])
+                new_status = result.get("status")
+                if new_missing != release.get("missing_volumes", []) or new_status != release.get("status"):
+                    self.db.update_release_volumes_and_status(
+                        release["id"], release.get("volumes", []), new_missing, new_status,
+                    )
+                    changed += 1
+            except Exception as exc:
+                logger.debug("Series reconcile skipped release %s: %s", release.get("id"), exc)
+        return changed
+
+    def backfill_series(self, series_name: str, max_pages: int = 3, actor: Optional[str] = None) -> Dict[str, Any]:
         """
         Targeted historical backfill for an individual manga series on Nyaa.
         Queries all past volume releases & bundles on Nyaa for the series and resolves them against Calibre.
@@ -1964,16 +2241,56 @@ class MangaScheduler:
         alt_titles = detected_titles[1:]
 
         title_display = " & ".join(f"'{t}'" for t in detected_titles)
-        self.db.set_setting("backfill_progress", f"Backfilling {title_display} on Nyaa (up to {max_pages} pages each)...")
-        logger.info(f"Starting targeted backfill for {title_display} on Nyaa (max_pages={max_pages})")
+        refresh_actor = actor or "scheduler"
+        logger.info(f"Starting series refresh + targeted backfill for {title_display} (max_pages={max_pages})")
 
-        # 2. Build Calibre matcher context
-        calibre_path = self.db.get_setting("calibre_path", "/calibre")
-        scanner = CalibreMangaScanner(calibre_path)
-        series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
-        volumes_map = scanner.get_series_volumes_map() if scanner.is_available() else {}
-        meta_cache = self.db.get_all_manga_metadata_cache()
-        matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
+        # Phase 1: provider metadata (display/enrichment only; never the stable key).
+        self.db.set_setting("backfill_progress", f"Refreshing metadata for {title_display}...")
+        try:
+            metadata_summary = self.refresh_series_provider_metadata(clean_name, actor=refresh_actor)
+        except Exception as exc:  # phase isolation: never abort the job
+            logger.error("Metadata refresh phase failed for '%s': %s", clean_name, exc)
+            metadata_summary = {"updated": False, "skipped": True, "reason": str(exc), "changes": []}
+            self._log_activity(
+                "SERIES_METADATA_REFRESHED",
+                f"Metadata refresh failed for '{clean_name}': {exc}",
+                json.dumps({"error": str(exc)}),
+                actor=refresh_actor,
+            )
+
+        # Phase 2: Calibre info for this one series (skips cleanly when unavailable).
+        self.db.set_setting("backfill_progress", f"Refreshing Calibre info for {title_display}...")
+        try:
+            calibre_summary = self.refresh_series_calibre_info(clean_name, actor=refresh_actor)
+        except Exception as exc:
+            logger.error("Calibre refresh phase failed for '%s': %s", clean_name, exc)
+            calibre_summary = {"updated": False, "skipped": True, "reason": str(exc), "changes": []}
+            self._log_activity(
+                "SERIES_CALIBRE_REFRESHED",
+                f"Calibre refresh failed for '{clean_name}': {exc}",
+                json.dumps({"error": str(exc)}),
+                actor=refresh_actor,
+            )
+
+        # Reconcile only this series' releases against the refreshed metadata/ownership.
+        self.db.set_setting("backfill_progress", f"Reconciling releases for {title_display}...")
+        matcher = self._series_refresh_matcher()
+        try:
+            reconciled = self._reconcile_series_releases(clean_name, matcher)
+        except Exception as exc:
+            logger.error("Series reconcile phase failed for '%s': %s", clean_name, exc)
+            reconciled = 0
+        total_volume_changed = any(
+            str(change).startswith("total volumes") for change in (metadata_summary.get("changes") or [])
+        ) or any(
+            str(change).startswith("book count") for change in (calibre_summary.get("changes") or [])
+        )
+        expanded = 0
+        if total_volume_changed:
+            try:
+                expanded = self.expand_unresolved_complete_releases(matcher=matcher, series_name=clean_name)
+            except Exception as exc:
+                logger.debug("Complete-series expansion after refresh failed for '%s': %s", clean_name, exc)
 
         # Context for the whole backfill run: the chapter guard and the
         # numbered-series key protection both need the known-series set.
@@ -1985,13 +2302,27 @@ class MangaScheduler:
         downloader_engine = self.get_downloader_engine()
 
         # 3. Query Nyaa targeted series search across primary and alternate titles
+        def _crawl_progress(page, _max_pages, _url):
+            self.db.set_setting(
+                "backfill_progress",
+                f"Crawling Nyaa page {page} for {title_display} (up to {max_pages} pages each)...",
+            )
+
         nyaa = NyaaMangaProvider(name=f"Nyaa: {primary_title}", config={"delay_seconds": 1.0, "base_url": self._nyaa_base_url()})
-        releases = nyaa.search_series(
-            primary_title,
-            max_pages=max_pages,
-            alt_names=alt_titles,
-            stop_check=lambda: self.stop_backfill_requested
-        )
+        crawl_error = ""
+        try:
+            releases = nyaa.search_series(
+                primary_title,
+                max_pages=max_pages,
+                alt_names=alt_titles,
+                stop_check=lambda: self.stop_backfill_requested,
+                progress_cb=_crawl_progress,
+            )
+        except Exception as exc:
+            # Phase isolation: metadata/Calibre updates stay applied even if the crawl fails.
+            crawl_error = str(exc)
+            releases = []
+            logger.error("Nyaa crawl phase failed for '%s': %s", primary_title, exc)
 
         total_found = 0
         total_requested = 0
@@ -2045,22 +2376,59 @@ class MangaScheduler:
                             if torrent_h and rel.is_bundle and missing_vols and len(missing_vols) < len(rel.volumes):
                                 qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing_vols])
 
-        summary = f"Backfilled {title_display}: found {total_found} releases ({total_requested} wanted/missing volumes, {total_sent_to_downloader} sent to downloader)."
+        if metadata_summary.get("skipped"):
+            metadata_text = "metadata skipped (provider unavailable)"
+        elif metadata_summary.get("updated"):
+            metadata_text = "metadata updated (" + ", ".join(metadata_summary.get("changes") or []) + ")"
+        else:
+            metadata_text = "metadata up to date"
+        if calibre_summary.get("skipped"):
+            calibre_text = "Calibre skipped (" + str(calibre_summary.get("reason") or "unavailable") + ")"
+        elif calibre_summary.get("updated"):
+            calibre_text = "Calibre updated (" + ", ".join(calibre_summary.get("changes") or []) + ")"
+        else:
+            calibre_text = "Calibre up to date"
+        summary = (
+            f"Series refresh for {title_display}: {metadata_text}; {calibre_text}; "
+            f"backfilled {total_found} releases ({total_requested} wanted/missing volumes, "
+            f"{total_sent_to_downloader} sent to downloader; {reconciled} release(s) reconciled"
+            + (f", {expanded} complete release(s) expanded" if expanded else "")
+            + ")."
+        )
+        if crawl_error:
+            summary += f" Nyaa crawl failed: {crawl_error}"
+        logger.info(summary)
         self._log_activity("SERIES_BACKFILLED", summary)
         return {
-            "status": "success",
+            "status": "partial" if crawl_error else "success",
             "message": summary,
             "series_name": primary_title,
             "searched_titles": detected_titles,
             "releases_found": total_found,
             "requested": total_requested,
-            "sent_to_downloader": total_sent_to_downloader
+            "sent_to_downloader": total_sent_to_downloader,
+            "reconciled": reconciled,
+            "expanded": expanded,
+            "summary": {
+                "metadata": metadata_summary,
+                "calibre": calibre_summary,
+                "backfill": {
+                    "status": "error" if crawl_error else "success",
+                    "error": crawl_error,
+                    "releases_found": total_found,
+                    "requested": total_requested,
+                    "sent_to_downloader": total_sent_to_downloader,
+                    "reconciled": reconciled,
+                    "expanded": expanded,
+                },
+            },
         }
 
-    def run_series_backfill_async(self, series_name: str, max_pages: int = 3) -> Dict[str, Any]:
+    def run_series_backfill_async(self, series_name: str, max_pages: int = 3, actor: Optional[str] = None) -> Dict[str, Any]:
         """
-        Launches targeted series backfill in a background daemon thread,
-        allowing the user to navigate pages while tracking live progress globally.
+        Launches the three-phase series refresh + targeted backfill in a background
+        daemon thread, allowing the user to navigate pages while tracking live progress
+        globally: metadata refresh -> Calibre info -> Nyaa crawl.
         """
         if self.is_backfilling:
             return {"status": "in_progress", "message": "Another backfill is already running"}
@@ -2070,21 +2438,35 @@ class MangaScheduler:
 
         def _worker():
             self.db.set_setting("backfill_status", "running")
-            self.db.set_setting("backfill_progress", f"Backfilling '{series_name}' on Nyaa (up to {max_pages} pages)...")
+            self.db.set_setting(
+                "backfill_progress",
+                f"Refreshing metadata and Calibre info for '{series_name}', then crawling Nyaa...",
+            )
             try:
-                res = self.backfill_series(series_name, max_pages=max_pages)
+                res = self.backfill_series(series_name, max_pages=max_pages, actor=actor)
                 self.db.set_setting("backfill_status", "idle")
-                self.db.set_setting("backfill_progress", res.get("message", f"Backfill for '{series_name}' complete."))
+                self.db.set_setting("backfill_progress", res.get("message", f"Series refresh for '{series_name}' complete."))
             except Exception as e:
-                logger.error(f"Error in async series backfill: {e}")
+                logger.error(f"Error in async series refresh/backfill: {e}")
                 self.db.set_setting("backfill_status", "error")
-                self.db.set_setting("backfill_progress", f"Backfill failed: {e}")
+                self.db.set_setting("backfill_progress", f"Series refresh failed: {e}")
             finally:
                 self.is_backfilling = False
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
-        return {"status": "started", "message": f"Historical backfill for '{series_name}' started in background."}
+        return {
+            "status": "started",
+            "message": (
+                f"Series refresh for '{series_name}' started in background "
+                "(metadata, Calibre info, Nyaa backfill)."
+            ),
+            "summary": {
+                "metadata": {"status": "pending"},
+                "calibre": {"status": "pending"},
+                "backfill": {"status": "pending"},
+            },
+        }
 
     def run_polite_backfill(self, max_pages: Optional[int] = None, delay_seconds: Optional[float] = None, start_page: int = 1) -> Dict[str, Any]:
         """
@@ -2307,21 +2689,37 @@ class MangaScheduler:
                 )
         return filtered_count
 
-    def expand_unresolved_complete_releases(self, matcher: Optional[MangaCalibreMatcher] = None) -> int:
+    def expand_unresolved_complete_releases(
+        self, matcher: Optional[MangaCalibreMatcher] = None, series_name: Optional[str] = None,
+    ) -> int:
         """
         Scans releases in the database that are complete series compilations
         but have no parsed volume numbers. Queries AniList/MangaUpdates for total volume count,
         expands into individual volumes [1.0 .. N], and matches against Calibre to calculate
         missing volumes and accurate status (e.g. IN_CALIBRE, REQUESTED, DISCOVERY).
+
+        ``series_name`` limits the pass to one series (used by the per-series refresh).
         """
         try:
             with self.db.get_connection() as conn:
                 cur = conn.cursor()
-                cur.execute("""
-                    SELECT id, guid, title, series_name, volumes_json, missing_vols_json, status, download_url, link, cover_url
-                    FROM releases
-                    WHERE is_complete = 1 OR lower(title) LIKE '%(complete)%' OR lower(title) LIKE '%[complete]%' OR lower(title) LIKE '%complete series%';
-                """)
+                complete_clause = (
+                    "(is_complete = 1 OR lower(title) LIKE '%(complete)%' "
+                    "OR lower(title) LIKE '%[complete]%' OR lower(title) LIKE '%complete series%')"
+                )
+                if series_name:
+                    cur.execute(f"""
+                        SELECT id, guid, title, series_name, volumes_json, missing_vols_json, status, download_url, link, cover_url
+                        FROM releases
+                        WHERE {complete_clause}
+                          AND lower(series_name) = lower(?);
+                    """, (str(series_name).strip(),))
+                else:
+                    cur.execute(f"""
+                        SELECT id, guid, title, series_name, volumes_json, missing_vols_json, status, download_url, link, cover_url
+                        FROM releases
+                        WHERE {complete_clause};
+                    """)
                 rows = [dict(r) for r in cur.fetchall()]
         except Exception as e:
             logger.error(f"Error querying unexpanded complete releases: {e}")

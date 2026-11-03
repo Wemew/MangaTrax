@@ -82,7 +82,7 @@
                         <span class="hidden sm:inline">Track</span>
                     </button>
                     {% endif %}
-                    <button type="button" onclick="backfillSeriesGlobal('{{ (group.stable_name or group.series_name)|escape }}', this)" title="Search Nyaa for all past releases of {{ group.series_name }}" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-brand-600/30 text-slate-300 hover:text-brand-300 border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm">
+                    <button type="button" onclick="backfillSeriesGlobal('{{ (group.stable_name or group.series_name)|escape }}', this)" title="Refresh metadata + Calibre info, then search Nyaa for all past releases of {{ group.series_name }}" class="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-brand-600/30 text-slate-300 hover:text-brand-300 border border-slate-700/80 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm">
                         <i data-lucide="history" class="w-3.5 h-3.5 text-brand-400"></i>
                         <span class="hidden sm:inline">Backfill</span>
                     </button>

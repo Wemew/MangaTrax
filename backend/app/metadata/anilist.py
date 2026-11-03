@@ -135,12 +135,20 @@ class AniListMetadataService:
         self.db = db
         self.timeout = timeout
 
-    def resolve_manga_series(self, raw_series_name: str) -> Dict[str, Any]:
+    def resolve_manga_series(self, raw_series_name: str, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Resolves a canonical manga series title and metadata.
-        1. Checks local cache first.
-        2. Queries AniList GraphQL if not cached.
+
+        1. Checks local cache first (unless ``force_refresh`` is set).
+        2. Queries AniList GraphQL if not cached / a refresh is forced.
         3. Gracefully returns cleaned title on failure or offline environment.
+
+        ``force_refresh=True`` bypasses the cached read and freshness check (so a
+        stale cache row is never returned as fresh), still goes through the AniList
+        rate limiter, and still writes authoritative results through
+        ``db.cache_manga_metadata`` for the search term, romaji and canonical titles.
+        If the forced lookup fails or yields nothing authoritative, the existing cached
+        values are returned instead of a blank fallback so callers can keep them.
         """
         cleaned_term = clean_query_term(raw_series_name)
         if not cleaned_term:
@@ -156,10 +164,19 @@ class AniListMetadataService:
 
         cache_key = cleaned_term.lower()
 
-        # 1. Check local DB cache (ignore failed fallback cache entries)
+        # Snapshot the current cache row: a forced refresh falls back to it when the
+        # provider is unavailable, and normal callers use it for the cache hit path.
+        cached_snapshot: Optional[Dict[str, Any]] = None
         if self.db:
             try:
-                cached = self.db.get_cached_manga_metadata(cache_key)
+                cached_snapshot = self.db.get_cached_manga_metadata(cache_key)
+            except Exception as e:
+                logger.debug(f"Cache lookup failed for '{cache_key}': {e}")
+
+        # 1. Check local DB cache (ignore failed fallback cache entries)
+        if self.db and not force_refresh:
+            try:
+                cached = cached_snapshot
                 if cached and cached.get("source") not in ("fallback", "cleaned") and cached.get("total_volumes"):
                     return cached
                 # Check candidate parts from delimiters in cache
@@ -195,6 +212,12 @@ class AniListMetadataService:
             simplified = re.split(r"[-:]", cleaned_term)[0].strip()
             if len(simplified) >= 3 and simplified.lower() != cleaned_term.lower():
                 metadata = self._fetch_from_anilist(simplified)
+
+        if force_refresh and (not metadata or metadata.get("source") in ("fallback", "cleaned")):
+            # Provider unavailable/empty during a forced refresh: keep the known values.
+            if cached_snapshot and cached_snapshot.get("source") not in ("fallback", "cleaned"):
+                logger.info("Forced metadata refresh for '%s' unavailable; keeping cached values.", cache_key)
+                return cached_snapshot
 
         if not metadata:
             # Fallback preserving raw_series_name and its delimiters

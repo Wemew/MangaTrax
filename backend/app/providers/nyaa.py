@@ -95,11 +95,13 @@ class NyaaMangaProvider(BaseFeedProvider):
         series_name: str,
         max_pages: int = 3,
         alt_names: Optional[List[str]] = None,
-        stop_check: Optional[Callable[[], bool]] = None
+        stop_check: Optional[Callable[[], bool]] = None,
+        progress_cb: Optional[Any] = None,
     ) -> List[ReleaseItem]:
         """
         Executes a targeted search on Nyaa for a specific series.
         Also searches any alternate names (e.g. Romaji or English aliases) if given.
+        ``progress_cb(page, max_pages, url)`` is forwarded to each page crawl.
         """
         clean_name = series_name.strip()
         if not clean_name:
@@ -112,7 +114,9 @@ class NyaaMangaProvider(BaseFeedProvider):
             return []
 
         # Search primary series title
-        primary_results = self.crawl_pages(max_pages=max_pages, query=clean_name, stop_check=stop_check)
+        primary_results = self.crawl_pages(
+            max_pages=max_pages, query=clean_name, stop_check=stop_check, progress_cb=progress_cb,
+        )
         for r in primary_results:
             if r.link not in seen_links:
                 seen_links.add(r.link)
@@ -128,7 +132,9 @@ class NyaaMangaProvider(BaseFeedProvider):
                     time.sleep(self.delay_seconds)
                     if stop_check and stop_check():
                         break
-                    alt_res = self.crawl_pages(max_pages=max_pages, query=alt_clean, stop_check=stop_check)
+                    alt_res = self.crawl_pages(
+                        max_pages=max_pages, query=alt_clean, stop_check=stop_check, progress_cb=progress_cb,
+                    )
                     for r in alt_res:
                         if r.link not in seen_links:
                             seen_links.add(r.link)

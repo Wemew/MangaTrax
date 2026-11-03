@@ -39,7 +39,7 @@
     </td>
     <td class="py-3 px-4 text-right">
         <div class="flex items-center justify-end gap-2">
-            <button onclick="backfillSeries({{ s.id }}, '{{ s.name|escape }}', this)" title="Search Nyaa for all past releases and missing volumes of {{ s.name }}" class="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-brand-600/30 text-slate-300 hover:text-brand-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+            <button onclick="backfillSeries({{ s.id }}, '{{ s.name|escape }}', this)" title="Refresh metadata + Calibre info, then search Nyaa for all past releases and missing volumes of {{ s.name }}" class="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-brand-600/30 text-slate-300 hover:text-brand-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
                 <i data-lucide="history" class="w-3.5 h-3.5 text-brand-400"></i>
                 <span>Backfill</span>
             </button>

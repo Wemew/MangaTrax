@@ -1606,21 +1606,25 @@ async def api_update_series_link(series_id: int, payload: Dict[str, Any]):
 
 @app.post("/api/series/{series_id}/backfill")
 async def api_series_backfill(series_id: int, payload: Optional[Dict[str, Any]] = None):
-    """Executes a targeted Nyaa search backfill in background for a tracked series."""
+    """Refresh one series in the background: metadata, Calibre info, then Nyaa crawl."""
     model = _validated_payload(schemas.SeriesBackfillRequest, payload or {})
     series_list = db.get_all_series()
     target = next((s for s in series_list if s["id"] == series_id), None)
     if not target:
         raise HTTPException(status_code=404, detail="Series not found")
 
-    res = scheduler.run_series_backfill_async(target["name"], max_pages=model.max_pages)
+    res = scheduler.run_series_backfill_async(
+        target["name"], max_pages=model.max_pages, actor=auth_module.get_current_actor(),
+    )
     return JSONResponse(res)
 
 @app.post("/api/series/backfill")
 async def api_series_backfill_by_name(payload: Dict[str, Any]):
-    """Executes a targeted Nyaa search backfill in background by series name."""
+    """Refresh one series by name in the background: metadata, Calibre info, then Nyaa crawl."""
     model = _validated_payload(schemas.SeriesBackfillByNameRequest, payload)
-    res = scheduler.run_series_backfill_async(model.series_name, max_pages=model.max_pages)
+    res = scheduler.run_series_backfill_async(
+        model.series_name, max_pages=model.max_pages, actor=auth_module.get_current_actor(),
+    )
     return JSONResponse(res)
 
 @app.post("/api/releases/{release_id}/status")

@@ -272,7 +272,7 @@ async function backfillSeries(seriesId, seriesName, btn) {
     btn.innerHTML = `<i data-lucide="refresh-cw" class="w-3.5 h-3.5 animate-spin text-brand-400"></i> <span>Starting...</span>`;
     if (window.lucide) lucide.createIcons();
     
-    showToast(`Starting historical search for "${seriesName}"...`, 'info');
+    showToast(`Refreshing metadata and Calibre info, then searching Nyaa for "${seriesName}"...`, 'info');
 
     try {
         const res = await fetch(`/api/series/${seriesId}/backfill`, {
@@ -282,7 +282,7 @@ async function backfillSeries(seriesId, seriesName, btn) {
         });
         const data = await res.json();
         if (data.status === 'started' || data.status === 'success') {
-            showToast(data.message || `Backfill for "${seriesName}" started in background!`, 'success');
+            showToast(data.message || `Series refresh for "${seriesName}" started in background!`, 'success');
             if (typeof initGlobalBackfillPolling === 'function') {
                 initGlobalBackfillPolling();
             }

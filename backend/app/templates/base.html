@@ -890,7 +890,7 @@
                 });
                 const data = await res.json();
                 if (data.status === 'started') {
-                    showToast(`Searching Nyaa for past releases of "${seriesName}"...`, 'success');
+                    showToast(`Refreshing metadata and Calibre info, then searching Nyaa for "${seriesName}"...`, 'success');
                     const banner = document.getElementById('global-backfill-banner');
                     if (banner) banner.classList.remove('hidden');
                     initGlobalBackfillPolling();
