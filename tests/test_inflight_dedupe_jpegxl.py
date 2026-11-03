@@ -99,6 +99,11 @@ def _events(ctx, event_type):
 # ===========================================================================
 def test_jpegxl_detection_and_feed_discard():
     print("--> Testing JPEG XL detection and feed discard...")
+    real_world = (
+        "Reading Our Way to a Happy New World 001-009 as v01-02 "
+        "(Digital-Compilation) (Oak-JXL) [JPEG-XL]"
+    )
+    assert is_jpegxl_release(real_world), real_world
     assert is_jpegxl_release("[JPEGXL] Known Series v03")
     assert is_jpegxl_release("Known Series v01 (JPEG XL)")
     assert is_jpegxl_release("Known Series v02 JXL")
@@ -113,7 +118,7 @@ def test_jpegxl_detection_and_feed_discard():
         _enable_feed_auto_download(ctx)
         qbit = _fake_qbit()
         with patch.object(ctx.scheduler, "get_qbit_client", return_value=qbit):
-            result = ctx.poll(_release("[JPEGXL] Known Series v03", "jxl-guid"))
+            result = ctx.poll(_release(real_world, "jxl-guid"))
         assert result["releases_found"] == 0, result
         assert ctx.releases() == [], "JPEG XL releases must not be ingested"
         qbit.add_torrent.assert_not_called()
@@ -123,7 +128,7 @@ def test_jpegxl_detection_and_feed_discard():
         assert len(discards) == 1 and "[JPEGXL]" in discards[0]["message"], discards
         # Re-polling the same release must not spam the audit log.
         with patch.object(ctx.scheduler, "get_qbit_client", return_value=qbit):
-            ctx.poll(_release("[JPEGXL] Known Series v03", "jxl-guid"))
+            ctx.poll(_release(real_world, "jxl-guid"))
         assert len(_events(ctx, "JPEGXL_DISCARDED")) == 1, _events(ctx, "JPEGXL_DISCARDED")
         print("    [PASSED] JPEG XL tags/formats are recognised, discarded and marked [JPEGXL] once.")
     finally:
