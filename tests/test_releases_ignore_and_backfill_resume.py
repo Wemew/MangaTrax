@@ -105,7 +105,7 @@ def test_backfill_start_page_and_resume():
 
         # Mock NyaaMangaProvider crawl_pages
         crawled_pages = []
-        def mock_crawl_pages(self, max_pages=15, start_page=1, delay=0, stop_check=None):
+        def mock_crawl_pages(self, max_pages=15, start_page=1, delay=0, stop_check=None, raise_on_fetch_error=True):
             # Record which pages were requested
             crawled_pages.append((start_page, max_pages))
             return [ReleaseItem(

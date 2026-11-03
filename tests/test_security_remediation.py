@@ -624,7 +624,8 @@ def test_outbound_timeout_shields():
     # for explicit urlopen timeouts as a regression guard.
     for module_path, needle in (
         (os.path.join(BACKEND_DIR, "app", "providers", "html_scraper.py"), "timeout=15.0"),
-        (os.path.join(BACKEND_DIR, "app", "providers", "nyaa.py"), "timeout=15.0"),
+        # task-19: the Nyaa HTML fetch timeout moved to a named constant (same 15s).
+        (os.path.join(BACKEND_DIR, "app", "providers", "nyaa.py"), "NYAA_HTML_TIMEOUT_SECONDS = 15.0"),
         (os.path.join(BACKEND_DIR, "app", "metadata", "anilist.py"), "timeout=self.timeout"),
     ):
         with open(module_path, "r", encoding="utf-8") as handle:

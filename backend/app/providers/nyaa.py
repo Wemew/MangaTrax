@@ -1,10 +1,12 @@
 import time
+import random
 import logging
 import urllib.parse
 import urllib.request
 import urllib.error
-from typing import List, Dict, Any, Optional, Callable
-from datetime import datetime
+from email.utils import parsedate_to_datetime
+from typing import List, Dict, Any, Optional, Callable, Tuple
+from datetime import datetime, timezone
 
 from bs4 import BeautifulSoup
 
@@ -20,6 +22,20 @@ logger = logging.getLogger("mangatrax.providers.nyaa")
 # crawl pages (backfill), post view URLs, .torrent URLs and relative-href joins.
 NYAA_BASE_URL = DEFAULT_NYAA_BASE_URL
 NYAA_MANGA_CAT = "3_1"  # Literature - English-translated
+
+# --- Fetch resilience / mirror politeness -----------------------------------
+# Only a GENUINE end (HTTP 404 or a parsed page with zero torrent rows) may end a
+# crawl normally.  Transient failures (429/5xx/timeouts/empty bodies) are retried
+# and, if they persist, raised as ProviderFetchError so a backfill cannot report
+# success after one flaky page.
+NYAA_FETCH_ATTEMPTS = 3
+NYAA_BACKOFF_SECONDS = (1.0, 3.0)   # waits after attempts 1 and 2, plus jitter
+NYAA_RETRY_JITTER_SECONDS = 0.5
+NYAA_MAX_RETRY_AFTER_SECONDS = 30.0  # cap for an advertised Retry-After
+# A mirror/proxy is one serverless function; rapid sequential page requests are
+# exactly what trips it into 429.  Never fetch HTML pages closer than this.
+NYAA_MIN_PAGE_INTERVAL_SECONDS = 1.0
+NYAA_HTML_TIMEOUT_SECONDS = 15.0
 
 class NyaaMangaProvider(BaseFeedProvider):
     """
@@ -39,6 +55,12 @@ class NyaaMangaProvider(BaseFeedProvider):
         # Mirror support: config["base_url"] wins over the saved nyaa_base_url
         # setting (injected here by the registry/scheduler); default nyaa.si last.
         self.base_url = resolve_nyaa_base_url(self.config)
+        # Crawl observability consumed by the backfill worker: why the crawl stopped
+        # and per-page (status, rows, items) info for the log/summary.
+        self.last_crawl_reason: str = ""
+        self.last_crawl_pages: List[Dict[str, Any]] = []
+        self._page_interval: float = NYAA_MIN_PAGE_INTERVAL_SECONDS
+        self._last_page_fetch_at: Optional[float] = None
 
     def _join_url(self, href: str) -> str:
         """Join a mirror-returned href against the configured base URL.
@@ -114,6 +136,109 @@ class NyaaMangaProvider(BaseFeedProvider):
 
         return all_results
 
+    # --- Fetch resilience / politeness (task-19) ---------------------------
+    @staticmethod
+    def _retry_after_seconds(headers) -> Optional[float]:
+        """Parse a Retry-After header (seconds or HTTP-date), capped for sanity."""
+        if not headers:
+            return None
+        try:
+            raw = headers.get("Retry-After") if hasattr(headers, "get") else None
+        except Exception:  # pragma: no cover - defensive
+            return None
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+        seconds: Optional[float]
+        try:
+            seconds = float(text)
+        except ValueError:
+            try:
+                when = parsedate_to_datetime(text)
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                seconds = (when - datetime.now(timezone.utc)).total_seconds()
+            except Exception:
+                return None
+        if seconds is None:
+            return None
+        return max(0.0, min(float(seconds), NYAA_MAX_RETRY_AFTER_SECONDS))
+
+    def _wait_for_page_interval(self) -> None:
+        """Keep at least NYAA_MIN_PAGE_INTERVAL_SECONDS between page fetches.
+
+        The interval also includes the configured delay (max of the two).  State
+        lives on the provider, so the backfill's one-page-at-a-time calls are just
+        as gentle as a single multi-page crawl.
+        """
+        if self._last_page_fetch_at is None:
+            return
+        logger.debug("Nyaa politeness: waiting %.2fs before the next page fetch.", self._page_interval)
+        time.sleep(self._page_interval)
+
+    def _fetch_page_html(self, page_url: str, headers: Dict[str, str], page: int) -> Tuple[int, str]:
+        """Fetch one HTML page with bounded retries; raise ProviderFetchError if it fails.
+
+        Only HTTP 404 is returned as a genuine end (``(404, "")``).  Everything else
+        -- 429, 5xx, timeouts, connection resets, empty bodies -- is retried up to
+        NYAA_FETCH_ATTEMPTS times with exponential backoff + jitter, honouring an
+        advertised Retry-After.  A persistent failure raises instead of pretending
+        the crawl ended, so callers cannot mistake flakiness for "no more pages".
+        """
+        last_error: Optional[Exception] = None
+        last_status: Optional[int] = None
+        for attempt in range(1, NYAA_FETCH_ATTEMPTS + 1):
+            self._wait_for_page_interval()
+            retry_after: Optional[float] = None
+            try:
+                req = urllib.request.Request(page_url, headers=headers)
+                with urllib.request.urlopen(req, timeout=NYAA_HTML_TIMEOUT_SECONDS) as resp:
+                    if resp.status == 404:
+                        return 404, ""
+                    html = resp.read().decode("utf-8", errors="replace")
+                if not html or not html.strip():
+                    raise ValueError("empty response body")
+                return int(getattr(resp, "status", 200) or 200), html
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    return 404, ""
+                last_error = exc
+                last_status = exc.code
+                retry_after = self._retry_after_seconds(getattr(exc, "headers", None))
+            except Exception as exc:
+                last_error = exc
+                last_status = None
+            finally:
+                # Start-to-start spacing guarantees the polite minimum even when the
+                # fetch itself was slow.
+                self._last_page_fetch_at = time.time()
+
+            if attempt >= NYAA_FETCH_ATTEMPTS:
+                break
+            if retry_after is not None:
+                wait_seconds = retry_after
+                logger.warning(
+                    "Nyaa page %s fetch failed (attempt %s/%s, HTTP %s); Retry-After %.1fs.",
+                    page, attempt, NYAA_FETCH_ATTEMPTS, last_status, wait_seconds,
+                )
+            else:
+                backoff = NYAA_BACKOFF_SECONDS[min(attempt - 1, len(NYAA_BACKOFF_SECONDS) - 1)]
+                wait_seconds = backoff + random.uniform(0.0, NYAA_RETRY_JITTER_SECONDS)
+                logger.warning(
+                    "Nyaa page %s fetch failed (attempt %s/%s): %s; retrying in %.1fs.",
+                    page, attempt, NYAA_FETCH_ATTEMPTS, last_error, wait_seconds,
+                )
+            time.sleep(wait_seconds)
+
+        reason = f"HTTP {last_status}" if last_status is not None else str(last_error)
+        self.last_crawl_reason = f"failed on page {page} ({reason})"
+        raise ProviderFetchError(
+            f"Failed to fetch Nyaa page {page} ({page_url}) after "
+            f"{NYAA_FETCH_ATTEMPTS} attempts: {reason}"
+        ) from last_error
+
     def crawl_pages(
         self,
         max_pages: int = 1,
@@ -123,23 +248,36 @@ class NyaaMangaProvider(BaseFeedProvider):
         delay: Optional[float] = None,
         progress_cb: Optional[Any] = None,
         stop_check: Optional[Any] = None,
-        raise_on_fetch_error: bool = False
+        raise_on_fetch_error: bool = True
     ) -> List[ReleaseItem]:
         """
         Crawls through Nyaa pages sequentially with polite rate-limiting.
-        Optionally stops when reaching a date_cutoff or max_pages.
+
+        Stop reasons are exposed on ``last_crawl_reason`` (and per-page details on
+        ``last_crawl_pages``) so callers can distinguish a genuine end of results
+        from a failure: ``max pages reached (N)``, ``reached end of results (page N:
+        ...)``, ``stopped by user (page N)``, ``date cutoff reached (page N)`` or
+        ``failed on page N (...)``.  Transient page failures are retried; if they
+        persist a ProviderFetchError is raised (page 1 always; later pages always
+        with the default raise_on_fetch_error=True, which the backfill relies on).
         """
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
         delay_sec = delay if delay is not None else self.delay_seconds
+        # The user's delay is an override, but never below the mirror-safe floor.
+        self._page_interval = max(NYAA_MIN_PAGE_INTERVAL_SECONDS, float(delay_sec or 0.0))
+        self.last_crawl_reason = ""
+        self.last_crawl_pages = []
         results: List[ReleaseItem] = []
         seen_links = set()
+        stop_reason = ""
 
         for page in range(start_page, start_page + max_pages):
             if stop_check and stop_check():
-                logger.info("Nyaa crawl stop requested by caller.")
+                stop_reason = f"stopped by user (page {page})"
+                logger.info("Nyaa crawl stop requested by caller at page %s.", page)
                 break
 
             # Construct page URL
@@ -158,36 +296,42 @@ class NyaaMangaProvider(BaseFeedProvider):
                 progress_cb(page, max_pages, page_url)
 
             try:
-                req = urllib.request.Request(page_url, headers=headers)
-                with urllib.request.urlopen(req, timeout=15.0) as resp:
-                    if resp.status == 404:
-                        logger.info(f"Nyaa reached end of results at page {page}.")
-                        break
-                    html = resp.read().decode("utf-8", errors="replace")
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    logger.info(f"Nyaa reached end of results at page {page}.")
-                    break
-                logger.warning(f"Error fetching Nyaa page {page} ({page_url}): {e}")
-                if raise_on_fetch_error and not results:
-                    raise ProviderFetchError(
-                        f"Failed to fetch Nyaa page {page} ({page_url}): HTTP {e.code}"
-                    ) from e
+                http_status, html = self._fetch_page_html(page_url, headers, page)
+            except ProviderFetchError:
+                self.last_crawl_pages.append({
+                    "page": page, "status": None, "rows": 0, "items": 0,
+                    "kind": "failed", "error": self.last_crawl_reason,
+                })
+                if raise_on_fetch_error or page == start_page:
+                    raise
+                stop_reason = self.last_crawl_reason
+                logger.warning(
+                    "Nyaa crawl stopping on page %s after a fetch failure (partial results kept): %s",
+                    page, self.last_crawl_reason,
+                )
                 break
-            except Exception as e:
-                logger.warning(f"Error fetching Nyaa page {page} ({page_url}): {e}")
-                if raise_on_fetch_error and not results:
-                    raise ProviderFetchError(
-                        f"Failed to fetch Nyaa page {page} ({page_url}): {e}"
-                    ) from e
+
+            if http_status == 404:
+                stop_reason = f"reached end of results (page {page}: HTTP 404)"
+                self.last_crawl_pages.append({
+                    "page": page, "status": 404, "rows": 0, "items": 0,
+                    "kind": "end_of_results", "error": "",
+                })
+                logger.info("Nyaa reached end of results at page %s (HTTP 404).", page)
                 break
 
             soup = BeautifulSoup(html, "html.parser")
             rows = soup.select("table.torrent-list tbody tr")
             if not rows:
-                logger.info(f"No torrent rows found on Nyaa page {page}. End of search.")
+                stop_reason = f"reached end of results (page {page}: no rows)"
+                self.last_crawl_pages.append({
+                    "page": page, "status": http_status, "rows": 0, "items": 0,
+                    "kind": "end_of_results", "error": "",
+                })
+                logger.info("No torrent rows found on Nyaa page %s. End of results.", page)
                 break
 
+            page_items = 0
             reached_date_cutoff = False
             for r in rows:
                 # 1. Parse Title & View Link from 2nd Column
@@ -288,12 +432,25 @@ class NyaaMangaProvider(BaseFeedProvider):
                         "magnet_url": magnet_url
                     }
                 ))
+                page_items += 1
+
+            self.last_crawl_pages.append({
+                "page": page, "status": http_status, "rows": len(rows),
+                "items": page_items, "kind": "ok", "error": "",
+            })
+            logger.info(
+                "Nyaa crawl page %s: HTTP %s, %s rows, %s item(s) parsed (run total %s).",
+                page, http_status, len(rows), page_items, len(results),
+            )
 
             if reached_date_cutoff:
+                stop_reason = f"date cutoff reached (page {page})"
                 break
+        else:
+            stop_reason = f"max pages reached ({max_pages})"
 
-            # Polite delay between pages (respects start_page offset)
-            if page < (start_page + max_pages - 1) and delay_sec > 0:
-                time.sleep(delay_sec)
-
+        if not stop_reason:
+            stop_reason = f"max pages reached ({max_pages})"
+        self.last_crawl_reason = stop_reason
+        logger.info("Nyaa crawl finished: %s.", stop_reason)
         return results

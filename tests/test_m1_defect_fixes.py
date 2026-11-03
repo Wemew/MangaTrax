@@ -541,20 +541,25 @@ def test_feature_12_nyaa_crawl_delay():
             _check(len(res) >= 1)
             # Must sleep between page 5 and 6, and between page 6 and 7 -> exactly 2 sleeps!
             _check(len(sleep_calls) == 2, f"Expected 2 sleep calls, got {len(sleep_calls)}")
-            _check(all(s == 0.25 for s in sleep_calls))
+            # Task-19: the mirror-safe floor is 1.0s, so a configured 0.25 is clamped up.
+            _check(all(s >= 1.0 for s in sleep_calls), f"Inter-page delay below the 1.0s floor: {sleep_calls}")
 
-    # Test 2: Single page crawl with offset (max_pages=1, start_page=5) -> 0 sleeps
+    # Test 2: Single page crawl with offset (max_pages=1, start_page=5) -> 0 sleeps.
+    # A fresh provider has no previous fetch, so the mirror-safe interval does not
+    # apply before its very first page.
     sleep_calls.clear()
+    provider_single = NyaaMangaProvider(name="Test Nyaa Single", config={"delay_seconds": 0.5})
     with patch("urllib.request.urlopen", return_value=DummyResponse()):
         with patch("time.sleep", side_effect=fake_sleep):
-            provider.crawl_pages(max_pages=1, start_page=5, delay=0.25)
+            provider_single.crawl_pages(max_pages=1, start_page=5, delay=0.25)
             _check(len(sleep_calls) == 0, f"Expected 0 sleep calls for single page, got {len(sleep_calls)}")
 
     # Test 3: Normal crawl starting at page 1 (max_pages=3, start_page=1) -> 2 sleeps
     sleep_calls.clear()
+    provider_normal = NyaaMangaProvider(name="Test Nyaa Normal", config={"delay_seconds": 0.5})
     with patch("urllib.request.urlopen", return_value=DummyResponse()):
         with patch("time.sleep", side_effect=fake_sleep):
-            provider.crawl_pages(max_pages=3, start_page=1, delay=0.25)
+            provider_normal.crawl_pages(max_pages=3, start_page=1, delay=0.25)
             _check(len(sleep_calls) == 2, f"Expected 2 sleep calls for page 1 crawl, got {len(sleep_calls)}")
 
     print("    [PASSED] Feature 12: Nyaa crawl delay properly honors start offsets.")

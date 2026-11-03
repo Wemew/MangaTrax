@@ -20,6 +20,7 @@ from app.downloader.qbit import QBitClient
 from app.tagger.cbz_tagger import auto_tag_staging_cbz_files
 from app.providers.registry import create_provider
 from app.providers.nyaa import NyaaMangaProvider
+from app.providers.base import ProviderFetchError
 from app.metadata.anilist import AniListMetadataService
 from app.metadata.mangaupdates import MangaUpdatesService
 from app.parser import (
@@ -1654,9 +1655,15 @@ class MangaScheduler:
 
             nyaa_provider = NyaaMangaProvider(name="Nyaa Manga Backfill", config={"delay_seconds": delay_seconds, "base_url": self._nyaa_base_url()})
 
+            # Backfill bookkeeping (task-19): every stop must state WHY, and a failed
+            # page must never be reported as a successful completion.
+            stop_reason = ""
+            last_crawled_page = 0
+
             for page_num in range(start_p, end_p + 1):
                 if self.stop_backfill_requested:
                     self.db.set_setting("backfill_last_page", str(page_num))
+                    stop_reason = f"stopped by user (page {page_num})"
                     break
 
                 self.db.set_setting("backfill_last_page", str(page_num))
@@ -1665,16 +1672,42 @@ class MangaScheduler:
                     f"Crawling Nyaa Manga Page {page_num} of {end_p} (Found {total_discovered} discoveries, {total_processed} processed)..."
                 )
 
+                # One page per call so every page gets its own retry/stop reporting;
+                # hard-fail on exhausted retries (never mistake flakiness for an end).
                 page_releases = nyaa_provider.crawl_pages(
                     max_pages=1,
                     start_page=page_num,
-                    delay=0,
-                    stop_check=lambda: self.stop_backfill_requested
+                    delay=delay_seconds,
+                    stop_check=lambda: self.stop_backfill_requested,
+                    raise_on_fetch_error=True,
                 )
-
-                if not page_releases:
-                    logger.info(f"Nyaa backfill reached end of available pages at page {page_num}.")
+                page_info = (nyaa_provider.last_crawl_pages or [{}])[-1]
+                page_kind = page_info.get("kind", "")
+                logger.info(
+                    "Nyaa backfill page %s: HTTP %s, %s rows, %s item(s) parsed "
+                    "(processed=%s, discoveries=%s).",
+                    page_num, page_info.get("status"), page_info.get("rows", 0),
+                    page_info.get("items", 0), total_processed, total_discovered,
+                )
+                if page_kind == "failed":
+                    # raise_on_fetch_error=True should have raised; be explicit anyway.
+                    reason = nyaa_provider.last_crawl_reason or f"failed on page {page_num}"
+                    raise ProviderFetchError(f"Backfill {reason}")
+                if page_kind == "end_of_results":
+                    stop_reason = nyaa_provider.last_crawl_reason or (
+                        f"reached end of results (page {page_num})"
+                    )
                     break
+                if page_kind == "stopped":
+                    stop_reason = nyaa_provider.last_crawl_reason or f"stopped by user (page {page_num})"
+                    break
+                if not page_releases and page_kind == "ok":
+                    # The page existed but every row was filtered out (chapters /
+                    # light novels) -- this is NOT end-of-results.
+                    logger.info(
+                        "Nyaa backfill page %s had rows but no ingestable releases; continuing.",
+                        page_num,
+                    )
 
                 for rel in page_releases:
                     if self.stop_backfill_requested:
@@ -1690,11 +1723,24 @@ class MangaScheduler:
                     if is_new and status == "DISCOVERY":
                         total_discovered += 1
 
-                # Polite delay between pages
-                if page_num < end_p and delay_seconds > 0 and not self.stop_backfill_requested:
-                    time.sleep(delay_seconds)
+                last_crawled_page = page_num
+                if self.stop_backfill_requested:
+                    stop_reason = f"stopped by user (page {page_num})"
+                    break
 
-            summary = f"Historical backfill complete: crawled up to page {page_num if 'page_num' in locals() else start_p}, processed {total_processed} releases, found {total_discovered} new discoveries."
+            if not stop_reason:
+                stop_reason = (
+                    f"max pages reached ({max_pages})" if max_pages > 0
+                    else "max pages reached (unlimited)"
+                )
+
+            crawled_upto = last_crawled_page or start_p
+            summary = (
+                f"Historical backfill complete: stop reason: {stop_reason}; "
+                f"crawled pages {start_p}-{crawled_upto}, processed {total_processed} releases, "
+                f"found {total_discovered} new discoveries."
+            )
+            logger.info(summary)
             self.db.set_setting("backfill_status", "idle")
             self.db.set_setting("backfill_progress", summary)
             self._log_activity("BACKFILL_COMPLETED", summary)
