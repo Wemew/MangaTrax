@@ -25,6 +25,14 @@ def _release_group_list(release: Dict[str, Any]):
             groups = [primary]
     return groups
 
+
+def _release_author_list(release: Dict[str, Any]):
+    """Author credits for a release payload (surfaced, never groups)."""
+    authors = release.get("authors")
+    if isinstance(authors, list):
+        return [str(author).strip() for author in authors if str(author).strip()]
+    return []
+
 class SimpleHttpResponse:
     def __init__(self, status_code: int, text: str):
         self.status_code = status_code
@@ -69,6 +77,7 @@ class NotificationService:
         feed = release.get("source_feed_name", "")
         group = release.get("release_group", "")
         groups = _release_group_list(release)
+        authors = _release_author_list(release)
         revision = release.get("revision")
         publisher = (release.get("publisher") or "").strip()
 
@@ -88,6 +97,9 @@ class NotificationService:
         if len(groups) > 1:
             # Joint tag "(1r0n, Ushi)": primary above, full set here.
             fields.append({"name": "Groups", "value": ", ".join(groups), "inline": True})
+        if authors:
+            # Author credits are metadata, never groups.
+            fields.append({"name": "Authors", "value": ", ".join(authors), "inline": True})
         if publisher:
             # Publisher = official-release quality signal.
             fields.append({"name": "Publisher", "value": publisher, "inline": True})
@@ -112,6 +124,7 @@ class NotificationService:
         """Release payload carrying the full group list plus the primary group."""
         payload = dict(release)
         payload["release_groups"] = _release_group_list(release)
+        payload["authors"] = _release_author_list(release)
         return payload
 
     def notify_acquired(self, release: Dict[str, Any]):

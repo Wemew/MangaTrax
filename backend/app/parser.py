@@ -702,34 +702,201 @@ def _split_group_list(candidate: str) -> Optional[List[str]]:
     return groups if groups else None
 
 
+# ---------------------------------------------------------------------------
+# Positional bracket-block layout (canonical Nyaa order)
+# ---------------------------------------------------------------------------
+# Canonical layout: <Title> (<Author credits>) [Manga] [CBZ] [Vol 1-11 Complete] (Group A & Group B)
+# Author credits sit immediately after the title, BEFORE the trailing cluster of
+# format/volume/status blocks; release groups sit in that trailing cluster.
+# Position (not vocabulary) separates credits from groups: "(Ryu Fujisaki/Fuyumi
+# Ono)" splits into valid-looking candidates just like a joint group tag, so it
+# must be excluded positionally.
+_BRACKET_BLOCK_RE = re.compile(r"\[([^\]]+)\]|\(([^)]+)\)")
+_COMPLETE_WORD_RE = re.compile(r"(?i)\b(?:complete|completed|full)\b")
+_VOLUME_REFERENCE_RE = re.compile(
+    r"(?i)(?:\b(?:volumes?|volume|vols?|vol|v)\b\.?\s*\d+|\b\d+\s*[-–—~]\s*\d+\b)"
+)
+_YEAR_BLOCK_RE = re.compile(r"^(?:19|20)\d{2}(?:\s*[-–—~]\s*(?:19|20)\d{2})?$")
+_REVISION_BLOCK_RE = re.compile(r"(?i)^f\s*\d{0,3}$")
+_AUTHOR_SPLIT_RE = re.compile(r"\s*(?:/|&|,|\band\b)\s*", re.IGNORECASE)
+
+
+def _bracket_blocks(raw_title: str) -> List[Dict[str, Any]]:
+    """All bracketed/parenthesised blocks in title order, with their spans."""
+    blocks: List[Dict[str, Any]] = []
+    for match in _BRACKET_BLOCK_RE.finditer(raw_title or ""):
+        text = (match.group(1) or match.group(2) or "").strip()
+        blocks.append({"text": text, "start": match.start(), "end": match.end()})
+    return blocks
+
+
+def _is_format_block(text: str) -> bool:
+    """True when a block is pure format/buzzword metadata ([Manga], [CBZ], [Digital], ...)."""
+    lower = (text or "").strip().lower()
+    if not lower:
+        return True
+    if lower in BUZZWORDS:
+        return True
+    tokens = [token for token in re.split(r"[\s\-_.]+", lower) if token]
+    if tokens and all(
+        token in BUZZWORDS
+        or re.match(r"^\d+p?$", token)
+        or re.match(r"^(?:19|20)\d{2}$", token)
+        for token in tokens
+    ):
+        return True
+    return False
+
+
+def _block_kind(text: str) -> str:
+    """Classify one bracket block for the positional layout rule.
+
+    ``group`` blocks are eligible release groups; ``revision`` markers are trailing
+    metadata that is skipped while scanning (so ``(Group) (f2)`` still resolves);
+    every other kind (format, volume, year, publisher, status/complete, empty,
+    invalid) terminates the trailing cluster.
+    """
+    value = (text or "").strip()
+    if not value:
+        return "empty"
+    if _YEAR_BLOCK_RE.match(value):
+        return "year"
+    if _REVISION_BLOCK_RE.match(value):
+        return "revision"
+    if _is_known_publisher(value):
+        return "publisher"
+    if _COMPLETE_WORD_RE.search(value):
+        return "status"
+    if _VOLUME_REFERENCE_RE.search(value):
+        return "volume"
+    if _is_format_block(value):
+        return "format"
+    if is_valid_group_candidate(value):
+        return "group"
+    return "invalid"
+
+
+def _trailing_cluster_start(blocks: List[Dict[str, Any]]) -> int:
+    """Index of the first block of the trailing group cluster.
+
+    Scans right-to-left while blocks are group-eligible; revision markers ("(f)",
+    "(f2)") are trailing metadata and are skipped rather than ending the cluster.
+    """
+    start = len(blocks)
+    for index in range(len(blocks) - 1, -1, -1):
+        kind = _block_kind(blocks[index]["text"])
+        if kind == "revision":
+            continue
+        if kind == "group":
+            start = index
+            continue
+        break
+    return start
+
+
+def _split_author_list(text: str) -> List[str]:
+    """Split an author-credit block on ``/``, ``&``, ``,`` and ``and``."""
+    authors: List[str] = []
+    for part in _AUTHOR_SPLIT_RE.split(text or ""):
+        name = part.strip(" .-–—")
+        if len(name) < 2 or re.search(r"\d", name):
+            continue
+        if not re.search(r"[^\W\d_]", name):
+            continue
+        if _is_format_block(name) or _is_known_publisher(name):
+            continue
+        if name not in authors:
+            authors.append(name)
+    return authors
+
+
+def _looks_like_author_block(text: str) -> bool:
+    """True when a block is name-like author credits (no digits/formats/buzzwords).
+
+    Only applied to blocks BEFORE the trailing group cluster, so a legitimate group
+    tag can never become an author (see :func:`extract_authors`).
+    """
+    value = (text or "").strip()
+    if not value or len(value) > 100:
+        return False
+    if re.search(r"\d", value):
+        return False
+    if re.search(r"[\[\](){}<>]", value):
+        return False
+    if not re.search(r"[^\W\d_]", value):
+        return False
+    if not re.fullmatch(r"[\w\s.,'’&/\-–—]+", value):
+        return False
+    if _is_format_block(value) or _is_known_publisher(value):
+        return False
+    if _COMPLETE_WORD_RE.search(value):
+        return False
+    words = [word for word in re.split(r"\s+", value) if word]
+    if len(words) < 2:
+        return False
+    return bool(_split_author_list(value))
+
+
+def extract_authors(raw_title: str, known_groups: Optional[Iterable[str]] = None) -> List[str]:
+    """Extract author credits from the positional pre-cluster credit blocks.
+
+    Credits canonically sit immediately after the title, before the trailing
+    cluster of format/volume/status/group blocks; only name-like blocks in that
+    region are credits.  Returns ``[]`` when there are none.
+    """
+    if not raw_title:
+        return []
+    groups_to_check = sorted(list(known_groups or []) + DEFAULT_KNOWN_GROUPS, key=len, reverse=True)
+    blocks = _bracket_blocks(raw_title)
+    if not blocks:
+        return []
+    cluster_start = _trailing_cluster_start(blocks)
+    authors: List[str] = []
+    for block in blocks[:cluster_start]:
+        text = block["text"]
+        if any(text.lower() == known.lower() for known in groups_to_check):
+            continue
+        if not _looks_like_author_block(text):
+            continue
+        for name in _split_author_list(text):
+            if name not in authors:
+                authors.append(name)
+    return authors
+
+
 def extract_release_groups(raw_title: str, known_groups: Optional[Iterable[str]] = None) -> List[str]:
     """Extract release groups as an ordered list; the first entry is primary.
 
-    Ordering rules (position matters, not just vocabulary):
+    Positional rule (canonical Nyaa layout):
 
-    1. known / prioritized groups win;
-    2. otherwise the LAST valid bracket candidate is the group -- the convention is
-       ``... (Publisher) (Group)``, so an unrecognised publisher-shaped token in an
-       earlier bracket must never steal the group slot;
-    3. then the ''-GROUP scene-style suffix, then a bounded known-group substring.
-
-    Format tags, publishers (``KNOWN_PUBLISHERS``), revision markers (``f``/``fN``)
-    and single-character tokens are filtered out before any of this.  "+"-joined
-    candidates are split and validated one by one.
+    1. known / prioritized groups win, in bracket order (credit blocks excluded);
+    2. the group cluster is the TRAILING suffix of group-eligible blocks: scan
+       right-to-left while blocks are group-eligible (skipping trailing revision
+       markers) and stop at the first format/volume/year/publisher/status block.
+       Only blocks INSIDE that cluster can be groups -- credit blocks before it are
+       authors, never groups.  Unknown blocks inside the cluster use prefer-last
+       (``... (Bogus) (RealGroup)`` -> RealGroup), while a joint tag keeps its own
+       split order ("(GroupA/GroupB)" -> GroupA primary);
+    3. a legacy last-valid-block fallback for layouts without a format block before
+       the group, then the scene-style ``-GROUP`` suffix, then a bounded
+       known-group substring.
     """
     if not raw_title:
         return []
 
     groups_to_check = sorted(list(known_groups or []) + DEFAULT_KNOWN_GROUPS, key=len, reverse=True)
+    blocks = _bracket_blocks(raw_title)
+    cluster_start = _trailing_cluster_start(blocks)
 
-    # 1. Bracket candidates, already filtered to real group names.
-    bracket_groups: List[List[str]] = []
-    for b1, b2 in re.findall(r'\[([^\]]+)\]|\(([^\)]+)\)', raw_title):
-        cand = (b1 or b2).strip()
-        if not is_valid_group_candidate(cand) or _is_known_publisher(cand):
+    # Credit blocks are positional: name-like, before the trailing cluster, and not
+    # naming a known group.  They may never become release groups.
+    author_indices: Set[int] = set()
+    for index, block in enumerate(blocks[:cluster_start]):
+        text = block["text"]
+        if any(text.lower() == known.lower() for known in groups_to_check):
             continue
-        split = _split_group_list(cand)
-        bracket_groups.append(split if split else [cand])
+        if _looks_like_author_block(text):
+            author_indices.add(index)
 
     ordered: List[str] = []
 
@@ -737,23 +904,42 @@ def extract_release_groups(raw_title: str, known_groups: Optional[Iterable[str]]
         if name and not _is_known_publisher(name) and name not in ordered:
             ordered.append(name)
 
-    # 1a. Known/prioritized groups win (in bracket order).
-    for parts in bracket_groups:
-        for part in parts:
-            for kg in groups_to_check:
-                if part.lower() == kg.lower() and not _is_known_publisher(kg):
-                    _add(part)
-
-    # 1b. Prefer-last: the last valid bracket candidate is the conventional group;
-    #     its "+"-split parts keep their order, so the first part stays primary.
-    for parts in reversed(bracket_groups):
-        for part in parts:
+    def _add_block(index: int):
+        text = blocks[index]["text"].strip()
+        if not is_valid_group_candidate(text) or _is_known_publisher(text):
+            return
+        for part in (_split_group_list(text) or [text]):
             _add(part)
 
+    # 1. Known/prioritized groups win (bracket order; credits excluded).
+    for index, block in enumerate(blocks):
+        if index in author_indices:
+            continue
+        text = block["text"].strip()
+        if not is_valid_group_candidate(text) or _is_known_publisher(text):
+            continue
+        for known in groups_to_check:
+            if text.lower() == known.lower() and not _is_known_publisher(known):
+                _add(text)
+
+    # 2. Trailing group cluster, prefer-last for unknown blocks.
+    for index in range(len(blocks) - 1, cluster_start - 1, -1):
+        if index in author_indices:
+            continue
+        _add_block(index)
     if ordered:
         return ordered
 
-    # 2. Scene release group pattern: -GROUP before trailing brackets or end of string
+    # 3. Legacy fallback: last valid non-credit bracket block (layouts without a
+    #    format block between the group and the end of the title).
+    for index in range(len(blocks) - 1, -1, -1):
+        if index in author_indices:
+            continue
+        _add_block(index)
+        if ordered:
+            return ordered
+
+    # 4. Scene release group pattern: -GROUP before trailing brackets or end of string
     # e.g., Manga.Million.SiteRip.1600p.AVIF.2026-TenmaLand (Multi)
     m_scene = re.search(r'[-–—]([A-Za-z0-9_]{2,30})(?:\s*[\(\[]|\s*$)', raw_title)
     if m_scene:
@@ -761,13 +947,13 @@ def extract_release_groups(raw_title: str, known_groups: Optional[Iterable[str]]
         if is_valid_group_candidate(cand) and not _is_known_publisher(cand):
             return [cand]
 
-    # 3. Known groups substring search (publishers are not groups)
-    for kg in groups_to_check:
-        if _is_known_publisher(kg):
+    # 5. Known groups substring search (publishers are not groups)
+    for known in groups_to_check:
+        if _is_known_publisher(known):
             continue
-        escaped = re.escape(kg)
+        escaped = re.escape(known)
         if re.search(r'(?:^|[\s_.\-\(\[])' + escaped + r'(?:$|[\s_.\-\)\]])', raw_title, re.IGNORECASE):
-            return [kg]
+            return [known]
 
     return []
 
@@ -866,6 +1052,14 @@ def is_complete_series_release(raw_title: str) -> bool:
     if not raw_title:
         return False
     t_lower = raw_title.lower()
+    # A bracket that combines a complete-word with a volume reference, e.g.
+    # "[vol.1-11 Complete]" / "(Vol 1-3 complete)" / "[Vol 1-11 full]".  The volume
+    # range parser already turns the volume reference into the volume set; this only
+    # adds the "complete" flag (a bare "[Vol 1-3]" is NOT complete).
+    for block in re.findall(r"\[([^\]]+)\]|\(([^)]+)\)", raw_title):
+        text = (block[0] or block[1] or "").strip()
+        if _COMPLETE_WORD_RE.search(text) and _VOLUME_REFERENCE_RE.search(text):
+            return True
     # Explicit bracketed tags
     if re.search(r'[\(\[]\s*(?:complete|completed|complete\s*series|completed\s*series|all\s*volumes?|full\s*series)\s*[\)\]]', t_lower):
         return True
@@ -1074,6 +1268,8 @@ def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iter
         "release_groups": release_groups,
         # Publisher is a quality signal (official release), surfaced not filtered.
         "publisher": extract_publisher(raw_title),
+        # Author credits (positional, pre-cluster blocks): surfaced, never groups.
+        "authors": extract_authors(raw_title, known_groups=known_groups),
         # "(f)" / "(f2)" re-release/fix markers: metadata only, never pollution.
         "revision": revision,
         "is_rerelease": revision is not None,
