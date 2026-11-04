@@ -31,6 +31,17 @@ def _insert(ctx, guid, series, status, title=None):
         return cur.lastrowid
 
 
+def _insert_with_download_status(ctx, guid, series, status, download_status, title=None):
+    with ctx.db.get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO releases (guid, title, series_name, status, download_status) "
+            "VALUES (?, ?, ?, ?, ?);",
+            (guid, title or f"{series} v01", series, status, download_status),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
 def _release_count(ctx):
     with ctx.db.get_connection() as conn:
         return int(conn.execute("SELECT COUNT(*) FROM releases;").fetchone()[0])
@@ -156,7 +167,47 @@ def test_endpoint_confirm_and_counts():
 
 
 # ===========================================================================
-# 5. Second run purge: empty (idempotent), active remains untouched
+# 5. Active guard uses download_status (authoritative), not release status
+# ===========================================================================
+def test_active_guard_uses_download_status():
+    print("--> Testing download_status active guard (status=REQUESTED)...")
+    ctx = Ctx()
+    try:
+        _insert(ctx, "cached1", "Series A", "REQUESTED")
+        _insert(ctx, "cached2", "Series A", "DISCOVERY")
+        active_id = _insert_with_download_status(
+            ctx, "active1", "Series A", "REQUESTED", "DOWNLOADING",
+        )
+        queued_id = _insert_with_download_status(
+            ctx, "active2", "Series A", "NEW", "QUEUED",
+        )
+        preview = ctx.db.count_cached_releases()
+        assert preview["count"] == 2, preview
+        with patch.object(ctx.db, "_invalidate_grouped_cache") as invalidate:
+            result = ctx.db.clear_cached_releases(actor="tester")
+        invalidate.assert_called_once()
+        assert result["deleted"] == 2, result
+        assert result["skipped_active"] == 2, result
+        with ctx.db.get_connection() as conn:
+            remaining = {row["guid"] for row in conn.execute("SELECT guid FROM releases;").fetchall()}
+        assert remaining == {"active1", "active2"}, remaining
+        assert active_id and queued_id  # rows still present (engine owns them)
+
+        # Once the downloader releases ownership, the rows become eligible.
+        with ctx.db.get_connection() as conn:
+            conn.execute("UPDATE releases SET download_status = 'FAILED' WHERE guid = 'active1';")
+            conn.execute("UPDATE releases SET download_status = 'IDLE' WHERE guid = 'active2';")
+            conn.commit()
+        second = ctx.db.clear_cached_releases(actor="tester")
+        assert second["deleted"] == 2 and second["skipped_active"] == 0, second
+        assert _release_count(ctx) == 0, _release_count(ctx)
+        print("    [PASSED] download_status DOWNLOADING/QUEUED rows excluded/reported/preserved, then eligible after reset.")
+    finally:
+        ctx.close()
+
+
+# ===========================================================================
+# 6. Second run purge: empty (idempotent), active remains untouched
 # ===========================================================================
 def test_second_purge_noop():
     print("--> Testing second purge is a no-op...")
@@ -181,6 +232,7 @@ def main():
         test_filters,
         test_exclude_filter_and_preview,
         test_endpoint_confirm_and_counts,
+        test_active_guard_uses_download_status,
         test_second_purge_noop,
     ]
     failures = 0

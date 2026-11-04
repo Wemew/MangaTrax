@@ -1045,10 +1045,17 @@ class MangaDatabase:
                 params.extend(cleaned)
         return clauses, params
 
+    # Downloader ownership lives in download_status; legacy rows may still carry an
+    # active-looking release status, so the guard is belt-and-braces on both columns.
+    _ACTIVE_RELEASE_SQL = (
+        "upper(COALESCE(download_status, 'IDLE')) IN ('DOWNLOADING', 'QUEUED') "
+        "OR upper(COALESCE(status, '')) IN ('DOWNLOADING', 'QUEUED')"
+    )
+
     def count_cached_releases(self, series_name=None, statuses=None, exclude_statuses=None) -> Dict[str, Any]:
         """Cheap preview: cached release rows matching the filters (excludes active)."""
         clauses, params = self._release_filter_clause(series_name, statuses, exclude_statuses)
-        clauses.append("upper(status) NOT IN ('DOWNLOADING', 'QUEUED')")
+        clauses.append(f"NOT ({self._ACTIVE_RELEASE_SQL})")
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self.get_connection() as conn:
             row = conn.execute(f"SELECT COUNT(*) AS count FROM releases{where};", params).fetchone()
@@ -1060,9 +1067,9 @@ class MangaDatabase:
     ) -> Dict[str, Any]:
         """Delete cached release rows (all/series/status filtered), never active rows."""
         clauses, params = self._release_filter_clause(series_name, statuses, exclude_statuses)
-        active_clauses = list(clauses) + ["upper(status) IN ('DOWNLOADING', 'QUEUED')"]
+        active_clauses = list(clauses) + [self._ACTIVE_RELEASE_SQL]
         active_where = " WHERE " + " AND ".join(active_clauses)
-        delete_clauses = list(clauses) + ["upper(status) NOT IN ('DOWNLOADING', 'QUEUED')"]
+        delete_clauses = list(clauses) + [f"NOT ({self._ACTIVE_RELEASE_SQL})"]
         delete_where = " WHERE " + " AND ".join(delete_clauses)
         deleted = 0
         skipped_active = 0
