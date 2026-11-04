@@ -507,19 +507,69 @@ async function removePrioritizedGroup(id, name) {
     }
 }
 
-async function downloadRelease(relId) {
+let _priorityReleaseTimers = {};
+
+function _priorityUpdateState(releaseId, state) {
+    if (!state) return;
+    document.querySelectorAll(`[data-release-id="${releaseId}"]`).forEach(function (row) {
+        const chip = row.querySelector('.release-state-chip');
+        if (chip) {
+            chip.dataset.state = state.state;
+            chip.textContent = state.label;
+            chip.title = state.error || state.label;
+        }
+        const btn = row.querySelector('.download-release-btn');
+        if (btn) {
+            btn.classList.toggle('hidden', !state.can_download);
+            btn.disabled = !state.can_download;
+            btn.textContent = state.can_download ? 'Download' : 'Sending...';
+        }
+    });
+}
+
+function _priorityPoll(releaseId) {
+    clearTimeout(_priorityReleaseTimers[releaseId]);
+    const poll = async function () {
+        try {
+            const res = await fetch(`/api/releases/${releaseId}/state`);
+            if (!res.ok) return;
+            const state = await res.json();
+            _priorityUpdateState(releaseId, state);
+            if (['downloading', 'waiting_inflight', 'downloaded'].includes(state.state)) {
+                _priorityReleaseTimers[releaseId] = setTimeout(poll, 1500);
+            }
+        } catch (err) { /* best-effort */ }
+    };
+    _priorityReleaseTimers[releaseId] = setTimeout(poll, 1500);
+}
+
+async function downloadRelease(relId, button) {
+    const btn = button || document.querySelector(`[data-release-id="${relId}"] .download-release-btn`);
+    if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
     try {
         const res = await fetch(`/api/releases/${relId}/download`, { method: 'POST' });
         const data = await res.json();
-        if (data.status === 'success') {
-            showToast('Sent release to downloader!', 'success');
-            setTimeout(() => location.reload(), 1500);
+        if (res.ok && (data.status === 'success' || data.status === 'skipped')) {
+            _priorityUpdateState(relId, data.state || { state: 'downloading', label: 'Downloading', can_download: false });
+            _priorityPoll(relId);
+            showToast(data.message || 'Sent release to downloader', 'success');
         } else {
+            if (btn) { btn.disabled = false; btn.textContent = 'Download'; }
             showToast(data.message || 'Download failed', 'error');
+            if (data.state) _priorityUpdateState(relId, data.state);
         }
     } catch (err) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Download'; }
         showToast('Error: ' + err, 'error');
     }
 }
+
+document.addEventListener('click', function (event) {
+    const button = event.target.closest('.download-release-btn');
+    if (!button) return;
+    event.preventDefault();
+    downloadRelease(button.dataset.releaseId, button);
+});
+
 </script>
 {% endblock %}

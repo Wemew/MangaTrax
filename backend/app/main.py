@@ -1168,13 +1168,76 @@ async def prioritized_view(request: Request, status: Optional[str] = None, view:
 # --- Lazy Loading API Endpoints ---
 _SERIES_CARD_RELEASE_CAP = 10
 
+_RELEASE_STATE_LABELS = {
+    "downloading": "Downloading",
+    "downloaded": "Downloaded (awaiting staging)",
+    "in_staging": "In staging",
+    "in_calibre": "In Calibre",
+    "failed": "Failed",
+    "waiting_inflight": "Waiting for in-flight download",
+    "not_downloaded": "Not downloaded",
+}
+
+
+def release_download_state(release: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Derived download/staging/Calibre state for a release row (task-46)."""
+    release = release or {}
+    download_status = str(release.get("download_status") or "").upper()
+    release_status = str(release.get("status") or "").upper()
+    progress: Dict[str, Any] = {}
+    try:
+        payload = json.loads(release.get("torbox_progress_json") or "{}")
+        if isinstance(payload, dict):
+            progress = payload
+    except (TypeError, ValueError):
+        progress = {}
+    progress_pct = progress.get("progress_pct")
+    if progress_pct is None:
+        try:
+            progress_pct = round(float(progress.get("downloaded_bytes") or 0)
+                                 / max(1.0, float(progress.get("total_bytes") or 0)) * 100.0, 1)
+        except (TypeError, ValueError):
+            progress_pct = 0.0
+    speed_bps = int(progress.get("speed_bps") or release.get("download_speed") or 0)
+    error = str(release.get("download_error") or "").strip()
+    if download_status == "FAILED" or release_status == "FAILED":
+        state = "failed"
+    elif release_status == "IN_CALIBRE":
+        state = "in_calibre"
+    elif download_status == "COMPLETED" and release.get("routed_at"):
+        state = "in_staging"
+    elif download_status in ("DOWNLOADING", "QUEUED"):
+        state = "downloading"
+    elif download_status == "PENDING_DEDUPE":
+        state = "waiting_inflight"
+    elif download_status == "COMPLETED":
+        state = "downloaded"
+    else:
+        state = "not_downloaded"
+    return {
+        "release_id": release.get("id"),
+        "state": state,
+        "label": _RELEASE_STATE_LABELS.get(state, "Not downloaded"),
+        "progress_pct": round(float(progress_pct or 0.0), 1),
+        "speed_bps": speed_bps,
+        "error": error,
+        "can_download": state in ("not_downloaded", "failed"),
+        "can_retry": state == "failed",
+        "terminal": state in ("in_staging", "in_calibre"),
+    }
+
+
+def _decorate_release_state(release: Dict[str, Any]) -> Dict[str, Any]:
+    release["download_state"] = release_download_state(release)
+    return release
+
 
 def _cap_group_releases(groups: list, cap: int = _SERIES_CARD_RELEASE_CAP) -> list:
     for group in groups or []:
         releases = list(group.get("releases") or [])
         group["release_total"] = len(releases)
         group["releases_shown"] = min(cap, len(releases))
-        group["releases"] = releases[:cap]
+        group["releases"] = [_decorate_release_state(r) for r in releases[:cap]]
     return groups
 
 
@@ -1251,6 +1314,7 @@ async def api_releases_flat_rows(
             seen_sigs.add(sig)
             deduped.append(r)
     has_more = (offset + len(releases)) < total
+    deduped = [_decorate_release_state(r) for r in deduped]
     html = templates.get_template("partials/flat_release_row_chunk.html").render(
         {"request": request, "releases": deduped}
     )
@@ -1283,7 +1347,7 @@ async def api_series_releases(
             break
     releases = list((group or {}).get("releases") or [])
     total = len(releases)
-    page = releases[offset:offset + limit]
+    page = [_decorate_release_state(r) for r in releases[offset:offset + limit]]
     html = templates.get_template("partials/series_release_rows_chunk.html").render(
         {"request": request, "releases": page}
     )
@@ -2533,6 +2597,14 @@ async def api_torbox_remove(release_id: int):
     db.clear_download_error(release_id)
     return JSONResponse({"status": "success" if deleted else "error", "removed": deleted})
 
+@app.get("/api/releases/{release_id}/state")
+async def api_release_download_state(release_id: int):
+    target = db.get_release_by_id(release_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Release not found")
+    return JSONResponse({"status": "success", **release_download_state(target)})
+
+
 @app.post("/api/releases/{release_id}/download")
 async def api_release_download(release_id: int):
     """Manually send a release to the configured download engine (qBittorrent or Torbox)."""
@@ -2563,6 +2635,7 @@ async def api_release_download(release_id: int):
                     "status": "skipped",
                     "engine": "torbox",
                     "message": result.get("message") or "Nothing missing; Torbox submit skipped",
+                    "state": release_download_state(db.get_release_by_id(release_id)),
                 })
             db.log_activity("MANUAL_DOWNLOAD", f"Sent to Torbox: '{target['title']}'", "Engine: torbox")
             await asyncio.to_thread(scheduler.process_downloads_to_staging, None)
@@ -2571,9 +2644,11 @@ async def api_release_download(release_id: int):
                 "engine": "torbox",
                 "cached": bool(result.get("cached")),
                 "message": "Sent to Torbox successfully",
+                "state": release_download_state(db.get_release_by_id(release_id)),
             })
         return JSONResponse(
-            {"status": "error", "engine": "torbox", "message": result.get("message") or "Torbox rejected the release"},
+            {"status": "error", "engine": "torbox", "message": result.get("message") or "Torbox rejected the release",
+             "state": release_download_state(db.get_release_by_id(release_id))},
             status_code=500,
         )
 
@@ -2603,9 +2678,15 @@ async def api_release_download(release_id: int):
                 )
 
         await asyncio.to_thread(scheduler.process_downloads_to_staging, None)
-        return JSONResponse({"status": "success", "engine": "qbit", "message": "Sent to downloader successfully"})
+        return JSONResponse({
+            "status": "success", "engine": "qbit", "message": "Sent to downloader successfully",
+            "state": release_download_state(db.get_release_by_id(release_id)),
+        })
     else:
-        return JSONResponse({"status": "error", "engine": "qbit", "message": "Failed to add release to downloader"}, status_code=500)
+        return JSONResponse({
+            "status": "error", "engine": "qbit", "message": "Failed to add release to downloader",
+            "state": release_download_state(db.get_release_by_id(release_id)),
+        }, status_code=500)
 
 @app.post("/api/series/{series_id}/toggle")
 async def api_toggle_series(series_id: int):

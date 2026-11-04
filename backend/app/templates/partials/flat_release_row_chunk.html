@@ -1,5 +1,5 @@
 {% for r in releases %}
-<tr class="hover:bg-slate-850/50 transition-colors release-row" data-release-name="{{ r.title|lower }} {{ (r.series_name or '')|lower }} {{ (r.display_series_name or '')|lower }} {{ (r.romaji_name or '')|lower }} {{ (r.release_group or '')|lower }} {{ (r.release_groups or [])|join(' ')|lower }}">
+<tr class="hover:bg-slate-850/50 transition-colors release-row" data-release-id="{{ r.id }}" data-release-name="{{ r.title|lower }} {{ (r.series_name or '')|lower }} {{ (r.display_series_name or '')|lower }} {{ (r.romaji_name or '')|lower }} {{ (r.release_group or '')|lower }} {{ (r.release_groups or [])|join(' ')|lower }}">
     <td class="py-3 px-4 text-center">
         {% if r.cover_url %}
         <img src="/api/covers?url={{ r.cover_url|urlencode }}" alt="Cover" onclick="openImageModal(this.src, '{{ (r.display_series_name or r.series_name or r.title)|escape }}')" class="w-8 h-12 object-cover rounded shadow border border-slate-700/60 inline-block cursor-pointer hover:opacity-90 transition-all cover-placeholder" loading="lazy" decoding="async" title="Click to enlarge cover artwork">
@@ -48,6 +48,9 @@
         {% endif %}
         {% if r.download_status == 'COMPLETED' and r.status != 'IN_CALIBRE' %}
         <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-teal-500/15 border border-teal-500/40 text-teal-300 text-[10px] font-bold mt-1" title="Downloaded to the raw downloads folder — waiting for Calibre/route: {{ r.download_files_json }}">Downloaded — waiting for Calibre/route</span>
+        {% endif %}
+        {% if r.download_state %}
+        <span class="release-state-chip inline-flex items-center px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300 text-[10px] font-bold mt-1" data-state="{{ r.download_state.state }}" title="{{ r.download_state.label }}{% if r.download_state.error %}: {{ r.download_state.error }}{% endif %}">{{ r.download_state.label }}{% if r.download_state.state == 'downloading' and r.download_state.progress_pct %} {{ r.download_state.progress_pct }}%{% endif %}</span>
         {% endif %}
         {% if r.media_type == 'jpegxl' %}
         <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-fuchsia-500/15 border border-fuchsia-500/40 text-fuchsia-300 text-[10px] font-bold mt-1" title="JPEG XL release (throw-away filter: never auto-downloaded)">[JPEGXL]</span>
@@ -156,8 +159,8 @@
     </td>
     <td class="py-3 px-4 text-right">
         <div class="flex items-center justify-end gap-1.5">
-            {% if r.download_url %}
-            <button onclick="downloadRelease({{ r.id }})" title="Send to qBittorrent" class="p-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-medium text-xs flex items-center gap-1 transition-colors">
+            {% if r.download_url and (not r.download_state or r.download_state.can_download) %}
+            <button data-release-id="{{ r.id }}" title="Send to downloader" class="download-release-btn p-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-medium text-xs flex items-center gap-1 transition-colors">
                 <i data-lucide="download" class="w-3.5 h-3.5"></i>
             </button>
             {% endif %}

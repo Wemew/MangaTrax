@@ -293,6 +293,7 @@ async function fetchNextSeriesBatch() {
         if (countEl) countEl.innerText = remaining;
 
         if (window.lucide) lucide.createIcons();
+        updateAllCardSummaries();
 
         const query = (document.getElementById('releaseSearchInput')?.value || '').trim();
         if (query) {
@@ -369,6 +370,7 @@ async function fetchNextFlatBatch() {
         if (countEl) countEl.innerText = flatOffset;
 
         if (window.lucide) lucide.createIcons();
+        updateAllCardSummaries();
 
         const query = (document.getElementById('releaseSearchInput')?.value || '').trim();
         if (query) {
@@ -514,19 +516,102 @@ async function quickPrioritizeGroup(name) {
     }
 }
 
-async function downloadRelease(relId) {
+let _releaseStateTimers = {};
+
+function _releaseStateClass(state) {
+    if (state === 'failed') return 'bg-rose-500/15 border-rose-500/40 text-rose-300';
+    if (state === 'in_calibre') return 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300';
+    if (state === 'in_staging') return 'bg-teal-500/15 border-teal-500/40 text-teal-300';
+    if (state === 'downloading') return 'bg-cyan-500/15 border-cyan-500/40 text-cyan-300';
+    if (state === 'downloaded') return 'bg-teal-500/10 border-teal-500/30 text-teal-200';
+    return 'bg-slate-800 border-slate-700 text-slate-300';
+}
+
+function updateReleaseStateDom(releaseId, state) {
+    if (!state) return;
+    document.querySelectorAll(`[data-release-id="${releaseId}"]`).forEach(function (row) {
+        const chip = row.querySelector('.release-state-chip');
+        if (chip) {
+            chip.dataset.state = state.state;
+            chip.className = `release-state-chip inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-bold ${_releaseStateClass(state.state)}`;
+            chip.textContent = state.label + (state.state === 'downloading' && state.progress_pct ? ` ${state.progress_pct}%` : '');
+            chip.title = state.error ? `${state.label}: ${state.error}` : state.label;
+        }
+        const btn = row.querySelector('.download-release-btn');
+        if (btn) {
+            btn.classList.toggle('hidden', !state.can_download);
+            btn.disabled = !state.can_download;
+            btn.innerHTML = state.state === 'failed' ? '<i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Retry' : '<i data-lucide="download" class="w-3.5 h-3.5"></i> Download';
+        }
+    });
+    if (window.lucide) lucide.createIcons();
+    updateAllCardSummaries();
+}
+
+function updateAllCardSummaries() {
+    document.querySelectorAll('.series-card').forEach(function (card) {
+        const summary = card.querySelector('.release-card-summary');
+        if (!summary) return;
+        const counts = {};
+        card.querySelectorAll('.release-state-chip').forEach(function (chip) {
+            const state = chip.dataset.state || 'not_downloaded';
+            counts[state] = (counts[state] || 0) + 1;
+        });
+        const parts = [];
+        if (counts.downloading) parts.push(`${counts.downloading} downloading`);
+        if (counts.downloaded) parts.push(`${counts.downloaded} downloaded`);
+        if (counts.in_staging) parts.push(`${counts.in_staging} in staging`);
+        if (counts.in_calibre) parts.push(`${counts.in_calibre} in Calibre`);
+        if (counts.failed) parts.push(`${counts.failed} failed`);
+        summary.textContent = parts.join(' · ');
+    });
+}
+
+function _pollReleaseState(releaseId) {
+    if (_releaseStateTimers[releaseId]) clearTimeout(_releaseStateTimers[releaseId]);
+    const poll = async function () {
+        try {
+            const res = await fetch(`/api/releases/${releaseId}/state`);
+            if (!res.ok) return;
+            const state = await res.json();
+            updateReleaseStateDom(releaseId, state);
+            if (['downloading', 'waiting_inflight', 'downloaded'].includes(state.state)) {
+                _releaseStateTimers[releaseId] = setTimeout(poll, 1500);
+            }
+        } catch (err) { /* polling is best-effort */ }
+    };
+    _releaseStateTimers[releaseId] = setTimeout(poll, 1500);
+}
+
+async function downloadRelease(relId, button) {
+    const btn = button || document.querySelector(`[data-release-id="${relId}"] .download-release-btn`);
+    const original = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = 'Sending...'; }
     try {
         const res = await fetch(`/api/releases/${relId}/download`, { method: 'POST' });
         const data = await res.json();
-        if (data.status === 'success') {
-            showToast('Sent release to downloader!', 'success');
-            setTimeout(() => location.reload(), 1500);
+        if (res.ok && (data.status === 'success' || data.status === 'skipped')) {
+            const state = data.state || { state: 'downloading', label: 'Downloading', can_download: false };
+            updateReleaseStateDom(relId, state);
+            _pollReleaseState(relId);
+            showToast(data.message || 'Sent release to downloader', 'success');
         } else {
+            if (btn) { btn.disabled = false; btn.innerHTML = original; }
             showToast(data.message || 'Download failed', 'error');
+            if (data.state) updateReleaseStateDom(relId, data.state);
         }
     } catch (err) {
+        if (btn) { btn.disabled = false; btn.innerHTML = original; }
         showToast('Error: ' + err, 'error');
     }
 }
+
+// Delegated handler keeps paged/expanded rows working without inline bindings.
+document.addEventListener('click', function (event) {
+    const button = event.target.closest('.download-release-btn');
+    if (!button) return;
+    event.preventDefault();
+    downloadRelease(button.dataset.releaseId, button);
+});
 </script>
 {% endblock %}
