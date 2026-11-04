@@ -6,6 +6,13 @@ import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 from typing import Dict, Any, Optional, List
 from app.parser import extract_manga_bundle_and_volumes, normalize_text
+from app.tagger.naming import (
+    format_authors,
+    format_comicinfo_title,
+    format_tags,
+    format_volume,
+    volume_title_parts,
+)
 
 logger = logging.getLogger("mangatrax.tagger")
 
@@ -211,9 +218,11 @@ def generate_comicinfo_xml(metadata: Dict[str, Any]) -> str:
     if vol.endswith(".0"):
         vol = vol[:-2]
 
-    writer = escape(str(metadata.get("authors") or ""))
-    publisher = escape(str(metadata.get("publisher") or ""))
-    genre = escape(str(metadata.get("tags") or ""))
+    # Calibre-format parity for elements that mirror Calibre columns (task-38).
+    writer = escape(format_authors(metadata.get("authors")))
+    publisher = escape(str(metadata.get("publisher") or "").strip())
+    genre = escape(format_tags(metadata.get("tags")))
+    vol = format_volume(vol)
 
     xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <ComicInfo xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -305,12 +314,14 @@ def auto_tag_staging_cbz_files(staging_dir: str, series_templates: Dict[str, Dic
 
                 if template:
                     metadata = {
-                        "title": f"{template['series_name']} Vol. {vol_display}" if vol_display else template['series_name'],
+                        "title": format_comicinfo_title(
+                            template["series_name"], fallback_name=f, **volume_title_parts(parsed),
+                        ),
                         "series_name": template["series_name"],
-                        "volume": vol_display or vol,
-                        "authors": template.get("authors", ""),
+                        "volume": format_volume(vol_display or vol),
+                        "authors": format_authors(template.get("authors")),
                         "publisher": template.get("publisher", ""),
-                        "tags": template.get("tags", "")
+                        "tags": format_tags(template.get("tags"))
                     }
                     if inject_comicinfo(cbz_path, metadata):
                         tagged_files.append({

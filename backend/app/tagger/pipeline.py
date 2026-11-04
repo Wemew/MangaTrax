@@ -28,6 +28,7 @@ from app.parser import (
     split_series_candidate_parts,
 )
 from app.tagger import cbz_tagger
+from app.tagger.naming import format_authors, format_comicinfo_title, format_tags, format_volume
 from app import storage_health
 
 logger = logging.getLogger("mangatrax.tagger.pipeline")
@@ -96,12 +97,20 @@ def _build_metadata(template: Dict[str, Any], parsed: Dict[str, Any]) -> Dict[st
     display = _volume_display(parsed)
     series_name = template.get("series_name") or parsed.get("series_name") or ""
     return {
-        "title": f"{series_name} Vol. {display}" if display else series_name,
+        "title": format_comicinfo_title(
+            series_name,
+            volumes=parsed.get("volumes"),
+            volume=parsed.get("volume_start"),
+            volume_start=parsed.get("volume_start"),
+            volume_end=parsed.get("volume_end"),
+            is_bundle=bool(parsed.get("is_bundle")),
+            fallback_name=parsed.get("raw_title") or parsed.get("clean_title") or "",
+        ),
         "series_name": series_name,
-        "volume": display or parsed.get("volume_start") or "",
-        "authors": template.get("authors", ""),
+        "volume": format_volume(display or parsed.get("volume_start") or ""),
+        "authors": format_authors(template.get("authors")),
         "publisher": template.get("publisher", ""),
-        "tags": template.get("tags", ""),
+        "tags": format_tags(template.get("tags")),
     }
 
 

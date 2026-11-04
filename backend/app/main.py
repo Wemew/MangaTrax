@@ -1908,6 +1908,7 @@ def _repair_staging_cbz_series(
     reference = series_audit.build_series_reference(db, calibre_series=_calibre_series_snapshot())
 
     counts = {"requested": len(resolved), "repaired": 0, "unchanged": 0, "skipped": 0, "failed": 0}
+    field_counts: Dict[str, int] = {}
     results: list = []
 
     for entry in resolved:
@@ -1954,6 +1955,8 @@ def _repair_staging_cbz_series(
         item["outcome"] = "repaired"
         item["changes"] = plan["changes"]
         counts["repaired"] += 1
+        for field in plan["changes"]:
+            field_counts[field] = field_counts.get(field, 0) + 1
         db.log_activity(
             "CBZ_SERIES_REPAIRED",
             f"Repaired ComicInfo.xml in '{record['file']}' ({', '.join(plan['changes'])})",
@@ -1965,6 +1968,7 @@ def _repair_staging_cbz_series(
     return {
         "status": "success" if counts["failed"] == 0 else "partial",
         **counts,
+        "field_counts": field_counts,
         "results": results,
     }
 

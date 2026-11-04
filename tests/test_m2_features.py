@@ -93,6 +93,10 @@ def _track_calibre_series(ctx, name=STABLE_SERIES, authors=TRACKED_AUTHOR, publi
 def _comicinfo(series=None, writer=None, publisher=None, title=None, volume="1", extra=""):
     # COMICINFO_NS already contains the opening <ComicInfo ...> element.
     parts = [COMICINFO_NS]
+    if title is None and series:
+        # Fixtures default to the same Calibre-compatible title the app writes (task-38).
+        from app.tagger.naming import format_comicinfo_title
+        title = format_comicinfo_title(series, volume=volume)
     if title:
         parts.append(f"<Title>{title}</Title>")
     if series is not None:
@@ -217,7 +221,7 @@ def test_audit_classification_and_read_only():
         assert alias_entry["current_series"] == ANILIST_ENGLISH, alias_entry
         assert alias_entry["suggested_series"] == STABLE_SERIES, alias_entry
         assert alias_entry["safe_to_repair"] is True, alias_entry
-        assert alias_entry["changes"] == ["Series"], alias_entry
+        assert alias_entry["changes"] == ["Series", "Title"], alias_entry
         assert "AniList alias" in alias_entry["reason"], alias_entry["reason"]
 
         ok_entry = files["correct.cbz"]
@@ -459,7 +463,7 @@ def test_repair_series_explicit_selection():
         assert data["repaired"] == 1, data
         assert data["unchanged"] == 0, data
         assert data["results"][0]["outcome"] == "repaired", data
-        assert data["results"][0]["changes"] == ["Series"], data
+        assert data["results"][0]["changes"] == ["Series", "Title"], data
 
         assert cbz_tagger.read_comicinfo(broken_one)["Series"] == STABLE_SERIES
         assert _comicinfo_entry_count(broken_one) == 1

@@ -447,13 +447,14 @@
                             <th class="py-3 px-4">File</th>
                             <th class="py-3 px-4">Current &lt;Series&gt;</th>
                             <th class="py-3 px-4">Suggested</th>
+                            <th class="py-3 px-4">Calibre fields (current &rarr; suggested)</th>
                             <th class="py-3 px-4">Status</th>
                             <th class="py-3 px-4">Why</th>
                         </tr>
                     </thead>
                     <tbody id="audit-rows" class="divide-y divide-slate-800/60">
                         <tr>
-                            <td colspan="6" class="py-8 text-center text-slate-500">
+                            <td colspan="7" class="py-8 text-center text-slate-500">
                                 Not audited yet. Click "Audit Series Tags" to scan the staging directory (read-only).
                             </td>
                         </tr>
@@ -871,6 +872,25 @@ function updateRepairButton() {
     btn.disabled = _selectedAuditFiles.size === 0;
 }
 
+function auditFieldDiff(row) {
+    const pairs = [
+        ['Title', 'current_title', 'suggested_title'],
+        ['Writer', 'current_writer', 'suggested_writer'],
+        ['Penciller', 'current_penciller', 'suggested_penciller'],
+        ['Publisher', 'current_publisher', 'suggested_publisher'],
+        ['Genre', 'current_genre', 'suggested_genre'],
+        ['Number', 'current_number', 'suggested_number'],
+        ['Volume', 'current_volume', 'suggested_volume'],
+        ['Series', 'current_series', 'suggested_series'],
+    ];
+    const diff = pairs
+        .filter(function (pair) { return row.changes && row.changes.indexOf(pair[0]) !== -1; })
+        .map(function (pair) {
+            return `${pair[0]}: ${escapeHtml(row[pair[1]] || '∅')} → ${escapeHtml(row[pair[2]] || '∅')}`;
+        });
+    return diff.length ? diff.join('<br>') : '<span class="text-slate-600">—</span>';
+}
+
 function renderAudit(data) {
     const tbody = document.getElementById('audit-rows');
     const summaryEl = document.getElementById('audit-summary');
@@ -879,7 +899,7 @@ function renderAudit(data) {
     const files = (data && data.files) || [];
     const summary = (data && data.summary) || {};
     if (!files.length) {
-        tbody.innerHTML = '<tr><td colspan="6" class="py-8 text-center text-slate-500">No .cbz files found in the staging directory.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500">No .cbz files found in the staging directory.</td></tr>';
         summaryEl.textContent = '';
         return;
     }
@@ -900,6 +920,7 @@ function renderAudit(data) {
             <td class="py-3 px-4 font-mono text-slate-200 break-all">${escapeHtml(row.file)}</td>
             <td class="py-3 px-4 text-slate-300 font-mono break-all">${escapeHtml(row.current_series || '-')}</td>
             <td class="py-3 px-4 text-amber-300 font-mono break-all">${escapeHtml(row.suggested_series || '-')}</td>
+            <td class="py-3 px-4 text-[10px] font-mono text-slate-400 max-w-md">${auditFieldDiff(row)}</td>
             <td class="py-3 px-4">${auditStatusBadge(row)}${(row.changes && row.changes.length) ? ` <span class="text-[10px] text-slate-400">(${escapeHtml(row.changes.join(', '))})</span>` : ''}</td>
             <td class="py-3 px-4 text-slate-400 text-[11px] max-w-md">${escapeHtml(row.reason || '')}</td>
         </tr>`;
@@ -922,17 +943,17 @@ function toggleAuditSelection(checkbox) {
 
 async function auditSeriesTags() {
     const tbody = document.getElementById('audit-rows');
-    tbody.innerHTML = '<tr><td colspan="6" class="py-8 text-center text-slate-500">Auditing staging directory (read-only)...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500">Auditing staging directory (read-only)...</td></tr>';
     try {
         const res = await fetch('/api/tagger/audit');
         const data = await res.json();
         if (res.ok && data.status === 'success') {
             renderAudit(data);
         } else {
-            tbody.innerHTML = `<tr><td colspan="6" class="py-8 text-center text-rose-400">${escapeHtml(data.detail || 'Audit failed')}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="7" class="py-8 text-center text-rose-400">${escapeHtml(data.detail || 'Audit failed')}</td></tr>`;
         }
     } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="6" class="py-8 text-center text-rose-400">Audit failed: ${escapeHtml(String(err))}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="7" class="py-8 text-center text-rose-400">Audit failed: ${escapeHtml(String(err))}</td></tr>`;
     }
 }
 
@@ -948,7 +969,14 @@ async function repairSelectedSeries() {
         });
         const data = await res.json();
         if (res.ok) {
-            showToast(`Repaired ${data.repaired} file(s); ${data.unchanged} already correct, ${data.skipped} skipped.`, data.failed ? 'warning' : 'success');
+            const fields = Object.entries(data.field_counts || {})
+                .map(function (entry) { return `${entry[0]}: ${entry[1]}`; })
+                .join(', ');
+            showToast(
+                `Repaired ${data.repaired} file(s); ${data.unchanged} already correct, ${data.skipped} skipped.` +
+                (fields ? ` Fields: ${fields}.` : ''),
+                data.failed ? 'warning' : 'success'
+            );
             await auditSeriesTags();
         } else {
             showToast(data.detail || 'Repair failed', 'error');

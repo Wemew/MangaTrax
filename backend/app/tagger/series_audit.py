@@ -51,6 +51,13 @@ import logging
 from typing import Any, Dict, List, Optional, Set
 
 from app.parser import normalize_text
+from app.tagger.naming import (
+    format_authors,
+    format_series,
+    format_tags,
+    format_title_for_volume_value,
+    format_volume,
+)
 from app.tagger.cbz_tagger import (
     MalformedComicInfoError,
     UnreadableArchiveError,
@@ -300,6 +307,16 @@ def audit_entry(entry: Dict[str, Any], reference: Dict[str, Any]) -> Dict[str, A
         "suggested_writer": None,
         "current_publisher": None,
         "suggested_publisher": None,
+        "current_title": None,
+        "suggested_title": None,
+        "current_penciller": None,
+        "suggested_penciller": None,
+        "current_genre": None,
+        "suggested_genre": None,
+        "current_number": None,
+        "suggested_number": None,
+        "current_volume": None,
+        "suggested_volume": None,
         "changes": [],
         "safe_to_repair": False,
         "reason": "",
@@ -328,6 +345,11 @@ def audit_entry(entry: Dict[str, Any], reference: Dict[str, Any]) -> Dict[str, A
     record["volume"] = _clean(fields.get("Volume")) or _clean(fields.get("Number")) or None
     record["current_writer"] = _clean(fields.get("Writer")) or None
     record["current_publisher"] = _clean(fields.get("Publisher")) or None
+    record["current_title"] = _clean(fields.get("Title")) or None
+    record["current_penciller"] = _clean(fields.get("Penciller")) or None
+    record["current_genre"] = _clean(fields.get("Genre")) or None
+    record["current_number"] = _clean(fields.get("Number")) or None
+    record["current_volume"] = _clean(fields.get("Volume")) or None
 
     classification = classify_series_value(record["current_series"], reference)
     record.update(classification)
@@ -340,26 +362,76 @@ def audit_entry(entry: Dict[str, Any], reference: Dict[str, Any]) -> Dict[str, A
         return record
 
     template = (reference.get("templates") or {}).get(normalize_text(target))
-    metadata_changes = _metadata_changes(fields, template)
+    template = template or {}
     changes: List[str] = []
+    reasons: List[str] = []
     if classification["status"] == STATUS_REPAIRABLE and classification.get("suggested_series"):
         changes.append("Series")
-    if "Writer" in metadata_changes:
-        changes.append("Writer")
-        record["suggested_writer"] = metadata_changes["Writer"]
-    if "Publisher" in metadata_changes:
-        changes.append("Publisher")
-        record["suggested_publisher"] = metadata_changes["Publisher"]
+
+    def _consider(element: str, current: Optional[str], suggested: Optional[str], note: str) -> None:
+        # Absent optional elements are not "wrong"; only format differences are repaired.
+        if not current or suggested is None or current == suggested:
+            return
+        changes.append(element)
+        record[f"suggested_{element.lower()}"] = suggested
+        reasons.append(note)
+
+    # Title: shared Calibre-compatible formatter; only unambiguous series are formatted.
+    volume_value = _clean(fields.get("Volume")) or _clean(fields.get("Number"))
+    suggested_title = format_title_for_volume_value(
+        target, volume_value, fallback_name=entry.get("name") or entry.get("relative"),
+    )
+    if suggested_title:
+        record["suggested_title"] = suggested_title
+        if _clean(fields.get("Title")) != suggested_title:
+            changes.append("Title")
+            reasons.append(
+                f"title uses {record['current_title']!r}; standard Calibre title is "
+                f"{suggested_title!r} (Series vNN)"
+            )
+
+    # Author-matching columns: Calibre's display separator is " & ".
+    expected_authors = format_authors(template.get("authors"))
+    if expected_authors:
+        _consider("Writer", record["current_writer"], expected_authors,
+                  f"authors not Calibre ' & ' format ({record['current_writer']!r})")
+        _consider("Penciller", record["current_penciller"],
+                  format_authors(template.get("authors")),
+                  f"penciller not Calibre ' & ' format ({record['current_penciller']!r})")
+
+    # Publisher is an exact Calibre string.
+    expected_publisher = str(template.get("publisher") or "").strip()
+    if expected_publisher and record["current_publisher"]:
+        if record["current_publisher"] != expected_publisher:
+            changes.append("Publisher")
+            record["suggested_publisher"] = expected_publisher
+            reasons.append(f"publisher differs from Calibre ({record['current_publisher']!r})")
+
+    # Tag-matching columns: Calibre displays tags comma-space separated.
+    expected_genre = format_tags(template.get("tags"))
+    if expected_genre:
+        _consider("Genre", record["current_genre"], expected_genre,
+                  f"tags not comma-space format ({record['current_genre']!r})")
+
+    # Number/Volume mirror Calibre's series index display (integer/decimal; bundle
+    # range kept as extra metadata).  Never guess a value that is not already present.
+    for element in ("Number", "Volume"):
+        current = record[f"current_{element.lower()}"]
+        if not current:
+            continue
+        suggested = format_volume(current)
+        if suggested and current != suggested:
+            changes.append(element)
+            record[f"suggested_{element.lower()}"] = suggested
+            reasons.append(f"{element} not Calibre series-index format ({current!r} -> {suggested!r})")
 
     record["changes"] = changes
     record["safe_to_repair"] = bool(changes)
     if changes and classification["status"] == STATUS_OK:
         # Series is already the correct key; only inherited metadata is stale.
         record["status"] = STATUS_REPAIRABLE
-        record["reason"] = (
-            f"<Series> is correct, but {', '.join(changes)} disagree(s) with the tracked "
-            "series metadata."
-        )
+    if reasons:
+        record["reason"] = (record.get("reason") + " " + "; ".join(reasons)).strip() if record.get("reason") else "; ".join(reasons)
     return record
 
 
@@ -394,6 +466,13 @@ def plan_repair(
     if repair_publisher and "Publisher" in (record.get("changes") or []) and record.get("suggested_publisher"):
         updates["Publisher"] = record["suggested_publisher"]
         changes.append("Publisher")
+    for element in ("Penciller", "Genre", "Number", "Volume"):
+        if element in (record.get("changes") or []) and record.get(f"suggested_{element.lower()}"):
+            updates[element] = record[f"suggested_{element.lower()}"]
+            changes.append(element)
+    if "Title" in (record.get("changes") or []) and record.get("suggested_title"):
+        updates["Title"] = record["suggested_title"]
+        changes.append("Title")
 
     if not updates:
         return {
