@@ -2155,18 +2155,38 @@ async def api_downloads_flatten_staging():
 @app.post("/api/downloads/scan")
 async def api_downloads_scan():
     """Rescan the raw downloads folder and return the fresh inventory."""
-    inventory, task = await asyncio.to_thread(
-        _recorded_task, "downloads:rescan", "Rescan downloads folder",
-        lambda reporter: downloads_inventory.refresh_inventory(
+    from app import downloads_reconcile
+
+    def _rescan_worker(reporter):
+        reporter.report(0, 0, "Scanning downloads folder…", force=True)
+        inv = downloads_inventory.refresh_inventory(
             db, scheduler.get_downloads_dir(create=False),
-        ),
+        )
+        reporter.report(0, 0, "Reconciling downloaded/staging release files…", force=True)
+        rec = downloads_reconcile.reconcile_missing_release_files(
+            db, scheduler.get_downloads_dir(create=False), _staging_dir_setting(),
+            calibre_series=_calibre_series_snapshot(),
+        )
+        reporter.report(
+            rec["checked"], rec["checked"],
+            f"Checked {rec['checked']} release(s); reset {rec['reset']} stale "
+            f"({rec['in_calibre']} confirmed in Calibre)",
+            progress_pct=100.0, force=True,
+        )
+        return {"inventory": inv, "reconciled": rec}
+
+    combined, task = await asyncio.to_thread(
+        _recorded_task, "downloads:rescan", "Rescan downloads folder", _rescan_worker,
         auth_module.get_current_actor(), None,
     )
+    inventory = combined["inventory"]
+    reconciled = combined["reconciled"]
     return JSONResponse({
         "status": "success",
         "inventory": inventory,
         "last_scanned_at": inventory.get("scanned_at") or "",
         "entries": inventory.get("entries") or [],
+        "reconciled": reconciled,
         "task_id": task["id"],
         "task": task,
     })

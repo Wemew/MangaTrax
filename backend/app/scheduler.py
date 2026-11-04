@@ -4754,6 +4754,19 @@ class MangaScheduler:
         return expanded_count
 
     # --- Background Loop ---
+    def reconcile_stale_release_files(self, dry_run: bool = False) -> Dict[str, Any]:
+        """Reset COMPLETED releases whose files no longer exist (task-54 self-heal)."""
+        from app import downloads_reconcile
+        try:
+            calibre_series = self.db.get_all_series()
+        except Exception:
+            calibre_series = None
+        return downloads_reconcile.reconcile_missing_release_files(
+            self.db, self.get_downloads_dir(create=False),
+            self.db.get_setting("staging_dir", "/staging"),
+            calibre_series=calibre_series, dry_run=dry_run,
+        )
+
     def _worker_loop(self):
         logger.info("MangaTrax background worker loop started.")
         # FIRST action: the work that used to block the FastAPI lifespan before
@@ -4784,6 +4797,7 @@ class MangaScheduler:
         last_dedupe_inventory = 0
         last_activity_prune = 0
         last_pickup_sweep = 0
+        last_stale_reconcile = 0
         last_complete_check = time.time()
 
         while self.running:
@@ -4821,6 +4835,19 @@ class MangaScheduler:
                     except Exception as exc:
                         logger.debug("Periodic downloads routing failed: %s", exc)
                     last_tag_check = time.time()
+
+                # task-54: self-heal releases whose staged/downloaded files vanished.
+                if now - last_stale_reconcile >= 300:
+                    try:
+                        rec = self.reconcile_stale_release_files()
+                        if rec.get("reset"):
+                            logger.info(
+                                "Reconciled stale release files: checked %s, reset %s.",
+                                rec.get("checked"), rec.get("reset"),
+                            )
+                        last_stale_reconcile = time.time()
+                    except Exception as exc:
+                        logger.debug("Stale release reconciliation failed: %s", exc)
 
                 # task-52: expire past-due Torbox manual pickups (never-expire stays).
                 if now - last_pickup_sweep >= 300:

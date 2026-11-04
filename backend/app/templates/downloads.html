@@ -1059,7 +1059,13 @@ async function rescanDownloads() {
         const res = await fetch('/api/downloads/scan', { method: 'POST' });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) { showToast(data.detail || 'Rescan failed', 'error'); return; }
-        showToast(`Downloads scanned: ${(data.entries || []).length} entr(ies)`, 'success');
+        const rec = data.reconciled || {};
+        const reset = rec.reset || 0;
+        showToast(
+            `Rescanned · ${reset} stale release(s) reset` +
+            (rec.in_calibre ? ` · ${rec.in_calibre} confirmed in Calibre` : ''),
+            reset ? 'warning' : 'success',
+        );
         await refreshDownloadsNow();
     } catch (err) { showToast('Error: ' + err, 'error'); }
 }
