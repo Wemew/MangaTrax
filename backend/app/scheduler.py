@@ -1510,10 +1510,33 @@ class MangaScheduler:
         self.db.update_torbox_manual_pickup(pickup_id, status="fetching")
         handle = self._pickup_handle(pickup)
         handle["size"] = total_size
-        saved = downloader.fetch_files(
-            handle, descriptors if not whole_torrent else None, dest_dir,
-            progress_cb=(self._torbox_progress_callback(int(pickup.get("release_id") or 0), total_size) if progress is None else None),
-        )
+        saved = []
+        failed_files = 0
+        if progress and not whole_torrent:
+            for index, descriptor in enumerate(descriptors, 1):
+                try:
+                    progress(index - 1, len(descriptors), f"Fetching {descriptor.get('name')}…")
+                    saved.extend(downloader.fetch_files(
+                        handle, [descriptor], dest_dir,
+                        progress_cb=self._torbox_progress_callback(int(pickup.get("release_id") or 0), total_size),
+                    ) or [])
+                    progress(index, len(descriptors), f"Fetched {descriptor.get('name')}",
+                             force=True)
+                except Exception as exc:
+                    failed_files += 1
+                    logger.warning("Manual pickup file failed (%s): %s", descriptor.get("name"), exc)
+                    progress(index, len(descriptors), f"Failed {descriptor.get('name')}: {exc}")
+            if not saved and failed_files:
+                raise DownloaderFileError(f"All selected files failed to fetch (last error above).")
+        else:
+            if progress:
+                progress(0, 1, "Fetching whole torrent…" if whole_torrent else "Fetching selected files…", force=True)
+            saved = downloader.fetch_files(
+                handle, descriptors if not whole_torrent else None, dest_dir,
+                progress_cb=(self._torbox_progress_callback(int(pickup.get("release_id") or 0), total_size) if progress is None else None),
+            ) or []
+            if progress:
+                progress(1, 1, f"Fetched {len(saved)} file(s)", progress_pct=100.0, force=True)
         fetched_names = {str(item.get("name") or "") for item in (descriptors or [])}
         for index, item in enumerate(files):
             if str(item.get("name") or "") in fetched_names:
@@ -1538,7 +1561,8 @@ class MangaScheduler:
                 f"release={release_id}; status={status}",
             )
         return {
-            "status": "success", "pickup_id": pickup_id, "fetched": len(saved or descriptors or []),
+            "status": "success", "pickup_id": pickup_id,
+            "fetched": len(saved or descriptors or []), "failed": failed_files,
             "remaining": len(remaining), "pickup_status": status,
         }
 

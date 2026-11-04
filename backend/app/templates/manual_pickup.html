@@ -33,6 +33,7 @@
                     Release #{{ pickup.release_id }} · {{ pickup.series_name or 'Unknown series' }} · {{ '%.1f'|format((pickup.total_bytes or 0) / 1073741824) }} GiB · Wanted volumes: {{ pickup.wanted_volumes|join(', ') if pickup.wanted_volumes else 'unknown' }}
                 </p>
                 <p class="text-xs text-amber-300 mt-2 break-words" title="{{ pickup.reason }}">{{ pickup.reason }}</p>
+                <p class="pickup-error hidden text-xs text-rose-300 mt-1 break-words" role="alert"></p>
                 <p class="text-[11px] text-slate-500 mt-1">Status: <span class="pickup-status font-semibold">{{ pickup.status }}</span> · Expires: {{ pickup.expires_at or 'never' }}</p>
             </div>
             <div class="flex flex-wrap items-center gap-2 shrink-0">
@@ -144,6 +145,12 @@ async function pickupPostFetch(id, payload) {
         document.querySelectorAll(`[data-task-kind="torbox:pickup:fetch"][data-task-scope="${id}"]`).forEach(function (button) { button.dataset.busy = ''; button.disabled = false; });
         const status = document.querySelector(`.manual-pickup-card[data-pickup-id="${id}"] .pickup-status`);
         if (status && task.result) status.textContent = task.result.pickup_status || status.textContent;
+        const errorEl = document.querySelector(`.manual-pickup-card[data-pickup-id="${id}"] .pickup-error`);
+        if (errorEl) {
+            if (task.status !== 'success') { errorEl.textContent = task.error || 'Fetch failed'; errorEl.classList.remove('hidden'); }
+            else if (task.result && task.result.failed) { errorEl.textContent = `${task.result.failed} file(s) failed to fetch; mapping kept — adjust and retry.`; errorEl.classList.remove('hidden'); }
+            else { errorEl.textContent = ''; errorEl.classList.add('hidden'); }
+        }
         MangaTasks.poll();
     });
 }
@@ -154,6 +161,11 @@ async function pickupRetry(id) {
     if (window.showToast) showToast('Strict retry started', 'success');
     if (window.MangaTasks && data.task_id) MangaTasks.watch(data.task_id, function (task) {
         if (window.showToast) showToast(task.status === 'success' ? 'Strict retry fetched files' : 'Strict retry failed', task.status === 'success' ? 'success' : 'error');
+        const errorEl = document.querySelector(`.manual-pickup-card[data-pickup-id="${id}"] .pickup-error`);
+        if (errorEl) {
+            if (task.status !== 'success') { errorEl.textContent = task.error || 'Strict retry failed; mapping kept — correct the volumes and retry.'; errorEl.classList.remove('hidden'); }
+            else { errorEl.textContent = ''; errorEl.classList.add('hidden'); }
+        }
         MangaTasks.poll();
     });
 }
@@ -168,14 +180,103 @@ async function pickupDiscard(id) {
 function pickupEditSeries(id) {
     const card = document.querySelector(`.manual-pickup-card[data-pickup-id="${id}"]`);
     const title = card ? (card.querySelector('h2') || {}).textContent : '';
-    const source = prompt('Correct series name (manual match)', title || '');
-    if (!source) return;
-    fetch('/api/downloads/awaiting-series/match', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source_series: source, new_series_title: source }),
-    }).then(function (res) {
-        if (window.showToast) showToast(res.ok ? 'Series match updated' : 'Series match failed', res.ok ? 'success' : 'error');
-    }).catch(function () { if (window.showToast) showToast('Series match failed', 'error'); });
+    openPickupMatch(title || '');
+}
+let _pickupMatchSource = '';
+let _pickupMatchItems = [];
+let _pickupMatchSelected = null;
+function pickupEscape(value) {
+    const div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+}
+function openPickupMatch(source) {
+    _pickupMatchSource = source;
+    _pickupMatchItems = [];
+    _pickupMatchSelected = null;
+    const modal = document.getElementById('pickup-match-modal');
+    if (!modal) return;
+    document.getElementById('pickup-match-title').textContent = `Match '${source}' to a series`;
+    document.getElementById('pickup-match-search').value = '';
+    document.getElementById('pickup-match-new-title').value = '';
+    document.getElementById('pickup-match-error').classList.add('hidden');
+    document.getElementById('pickup-match-list').innerHTML = '<p class="p-4 text-center text-slate-500 text-[11px]">Loading Calibre series...</p>';
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    loadPickupMatchSuggestions('');
+}
+function closePickupMatch() {
+    const modal = document.getElementById('pickup-match-modal');
+    if (!modal) return;
+    modal.classList.add('hidden');
+    modal.classList.remove('flex');
+}
+async function loadPickupMatchSuggestions(search) {
+    const list = document.getElementById('pickup-match-list');
+    try {
+        const params = new URLSearchParams();
+        if (search) params.set('search', search);
+        if (_pickupMatchSource) params.set('source', _pickupMatchSource);
+        const res = await fetch('/api/calibre/series?' + params.toString());
+        const data = await res.json();
+        if (!res.ok) { list.innerHTML = `<p class="p-4 text-center text-rose-300 text-[11px]">${pickupEscape(data.detail || 'Could not load Calibre series')}</p>`; return; }
+        _pickupMatchItems = data.series || [];
+        _pickupMatchSelected = _pickupMatchItems.length ? _pickupMatchItems[0].id : null;
+        renderPickupMatchList();
+    } catch (err) {
+        list.innerHTML = `<p class="p-4 text-center text-rose-300 text-[11px]">Error: ${pickupEscape(String(err))}</p>`;
+    }
+}
+function searchPickupMatch() { loadPickupMatchSuggestions(document.getElementById('pickup-match-search').value.trim()); }
+function renderPickupMatchList() {
+    const list = document.getElementById('pickup-match-list');
+    if (!_pickupMatchItems.length) { list.innerHTML = '<p class="p-4 text-center text-slate-500 text-[11px]">No Calibre series found. Create a new title below.</p>'; return; }
+    list.innerHTML = _pickupMatchItems.map(function (item) {
+        const selected = item.id === _pickupMatchSelected;
+        return `<button type="button" onclick="selectPickupMatch(${JSON.stringify(item.id)})" class="w-full text-left px-3 py-2 ${selected ? 'bg-amber-500/15 border-l-2 border-amber-400' : 'hover:bg-slate-800/60'}">
+            <span class="block text-xs font-semibold text-white">${pickupEscape(item.name)}</span>
+            <span class="block text-[10px] text-slate-400">${pickupEscape(item.authors || 'unknown author')} · ${item.book_count || 0} book(s)</span></button>`;
+    }).join('');
+}
+function selectPickupMatch(id) { _pickupMatchSelected = id; renderPickupMatchList(); }
+async function submitPickupMatch() {
+    const newTitle = document.getElementById('pickup-match-new-title').value.trim();
+    const errorEl = document.getElementById('pickup-match-error');
+    const submit = document.getElementById('pickup-match-submit');
+    const body = { source_series: _pickupMatchSource };
+    if (newTitle) body.new_series_title = newTitle;
+    else if (_pickupMatchSelected !== null) body.calibre_series_id = _pickupMatchSelected;
+    else { errorEl.textContent = 'Pick a series or enter a new title.'; errorEl.classList.remove('hidden'); return; }
+    submit.disabled = true;
+    try {
+        const res = await fetch('/api/downloads/awaiting-series/match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const data = await res.json();
+        if (!res.ok) { errorEl.textContent = data.detail || 'Match failed'; errorEl.classList.remove('hidden'); return; }
+        closePickupMatch();
+        if (window.showToast) showToast(`Matched to '${data.target.name}'`, 'success');
+    } catch (err) { errorEl.textContent = 'Error: ' + err; errorEl.classList.remove('hidden'); }
+    finally { submit.disabled = false; }
 }
 </script>
+
+<div id="pickup-match-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm items-center justify-center p-4">
+    <div class="bg-darkcard border border-slate-700 rounded-2xl shadow-2xl w-full max-w-xl p-5 space-y-3">
+        <div class="flex items-start justify-between gap-3">
+            <h3 id="pickup-match-title" class="text-sm font-bold text-white">Match to a series</h3>
+            <button type="button" onclick="closePickupMatch()" aria-label="Close manual match" class="text-slate-400 hover:text-white text-lg leading-none">&times;</button>
+        </div>
+        <p class="text-[11px] text-slate-400">Pick a Calibre series or create a new tracked series. The mapping is remembered so future releases match automatically.</p>
+        <input type="text" id="pickup-match-search" oninput="searchPickupMatch()" placeholder="Search Calibre series..." aria-label="Search Calibre series" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+        <div id="pickup-match-list" class="max-h-64 overflow-y-auto divide-y divide-slate-800/60 rounded-xl border border-slate-800" aria-live="polite"></div>
+        <div>
+            <label for="pickup-match-new-title" class="block text-[11px] font-semibold text-slate-300 mb-1">or create a new series title (not in Calibre)</label>
+            <input type="text" id="pickup-match-new-title" placeholder="e.g. [Oshi No Ko]" aria-label="New series title" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+        </div>
+        <div id="pickup-match-error" class="hidden text-[11px] text-rose-300"></div>
+        <div class="flex items-center justify-end gap-2 pt-1">
+            <button type="button" onclick="closePickupMatch()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Cancel</button>
+            <button type="button" onclick="submitPickupMatch()" id="pickup-match-submit" class="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold">Apply match</button>
+        </div>
+    </div>
+</div>
 {% endblock %}

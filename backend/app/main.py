@@ -1708,9 +1708,14 @@ async def api_manual_pickup_fetch(pickup_id: int, payload: Optional[Dict[str, An
 
     def _worker(reporter):
         reporter.report(0, len(indexes or []), "Fetching manual pickup files…", force=True)
-        result = scheduler._fetch_manual_pickup_files(pickup_id, indexes, actor=actor)
-        reporter.report(result.get("fetched", 0), result.get("fetched", 0),
-                        f"Fetched {result.get('fetched', 0)} file(s)", progress_pct=100.0, force=True)
+        result = scheduler._fetch_manual_pickup_files(
+            pickup_id, indexes, actor=actor, progress=reporter.report,
+        )
+        reporter.report(
+            result.get("fetched", 0), result.get("fetched", 0) + result.get("failed", 0),
+            f"Fetched {result.get('fetched', 0)} file(s); failed {result.get('failed', 0)}",
+            progress_pct=100.0, force=True,
+        )
         return result
 
     info = background_tasks.run_in_background(
@@ -1726,8 +1731,14 @@ async def api_manual_pickup_retry(pickup_id: int, payload: Optional[Dict[str, An
 
     def _worker(reporter):
         reporter.report(0, 1, "Retrying strict volume mapping…", force=True)
-        result = scheduler.retry_manual_pickup_strict(pickup_id, actor=actor)
-        reporter.report(1, 1, "Strict retry complete", progress_pct=100.0, force=True)
+        result = scheduler.retry_manual_pickup_strict(
+            pickup_id, actor=actor, progress=reporter.report,
+        )
+        reporter.report(
+            result.get("fetched", 0), result.get("fetched", 0) + result.get("failed", 0),
+            f"Strict retry fetched {result.get('fetched', 0)} file(s)",
+            progress_pct=100.0, force=True,
+        )
         return result
 
     info = background_tasks.run_in_background(
