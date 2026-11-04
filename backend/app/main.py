@@ -5,6 +5,7 @@ import time
 import threading
 import asyncio
 import logging
+import logging.handlers
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
@@ -65,6 +66,118 @@ db = MangaDatabase(DB_PATH)
 cover_cache = CoverCache(DATA_DIR)
 mangaupdates = MangaUpdatesService(db=db)
 scheduler = MangaScheduler(db, cover_cache)
+
+_FILE_LOG_HANDLER_NAME = "mangatrax-file"
+
+
+def _file_log_path() -> str:
+    return os.path.join(str(DATA_DIR), "logs", "mangatrax.log")
+
+
+def _file_logging_info() -> Dict[str, Any]:
+    path = _file_log_path()
+    handler = next(
+        (h for h in logging.getLogger().handlers if getattr(h, "name", "") == _FILE_LOG_HANDLER_NAME),
+        None,
+    )
+    try:
+        size = os.path.getsize(path) if os.path.isfile(path) else 0
+    except OSError:
+        size = 0
+    return {
+        "enabled": handler is not None,
+        "path": path,
+        "size_bytes": size,
+        "max_mb": db.get_setting("log_file_max_mb", "10"),
+        "backups": db.get_setting("log_file_backups", "5"),
+    }
+
+
+def configure_file_logging(db_handle=None) -> Dict[str, Any]:
+    """Attach exactly one rotating file handler when log_to_file=true (idempotent)."""
+    db_handle = db_handle or db
+    try:
+        enabled = as_bool(db_handle.get_setting("log_to_file", "false"), default=False)
+        root = logging.getLogger()
+        existing = next(
+            (h for h in root.handlers if getattr(h, "name", "") == _FILE_LOG_HANDLER_NAME),
+            None,
+        )
+        if not enabled:
+            if existing is not None:
+                try:
+                    root.removeHandler(existing)
+                    existing.close()
+                except Exception:
+                    pass
+            return _file_logging_info()
+        try:
+            max_mb = max(1, min(int(db_handle.get_setting("log_file_max_mb", "10") or 10), 100))
+        except (TypeError, ValueError):
+            max_mb = 10
+        try:
+            backups = max(1, min(int(db_handle.get_setting("log_file_backups", "5") or 5), 20))
+        except (TypeError, ValueError):
+            backups = 5
+        path = _file_log_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except OSError as exc:
+            logger.warning("Could not create log directory '%s': %s; file logging disabled.", os.path.dirname(path), exc)
+            return _file_logging_info()
+        if existing is not None:
+            root.removeHandler(existing)
+            try:
+                existing.close()
+            except Exception:
+                pass
+        handler = logging.handlers.RotatingFileHandler(
+            path, maxBytes=max_mb * 1024 * 1024, backupCount=backups, encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        handler.setLevel(logging.INFO)
+        handler.name = _FILE_LOG_HANDLER_NAME
+        root.addHandler(handler)
+        logger.info(
+            "File logging enabled: %s (max %s MB, %s backups; total ≈ %s MB).",
+            path, max_mb, backups, max_mb * (backups + 1),
+        )
+    except Exception as exc:  # pragma: no cover - logging must never break startup
+        logger.warning("Could not configure file logging: %s", exc)
+    return _file_logging_info()
+
+
+configure_file_logging(db)
+
+
+def _activity_logs_health() -> Dict[str, Any]:
+    stats = db.activity_log_stats()
+    try:
+        oldest_age_days = None
+        if stats.get("oldest_created_at"):
+            oldest = datetime.strptime(str(stats["oldest_created_at"]), "%Y-%m-%d %H:%M:%S")
+            oldest_age_days = round((datetime.utcnow() - oldest).total_seconds() / 86400.0, 2)
+    except Exception:
+        oldest_age_days = None
+    try:
+        db_size = os.path.getsize(DB_PATH) if os.path.isfile(DB_PATH) else 0
+    except OSError:
+        db_size = 0
+    wal_path = DB_PATH + "-wal"
+    try:
+        wal_size = os.path.getsize(wal_path) if os.path.isfile(wal_path) else 0
+    except OSError:
+        wal_size = 0
+    return {
+        "activity_rows": stats.get("count", 0),
+        "oldest_created_at": stats.get("oldest_created_at", ""),
+        "oldest_age_days": oldest_age_days,
+        "db_size_bytes": db_size,
+        "wal_size_bytes": wal_size,
+        "retention_days": db.get_setting("activity_retention_days", "90"),
+        "max_rows": db.get_setting("activity_max_rows", "50000"),
+        "file_log": _file_logging_info(),
+    }
 
 # --- Authentication (MANGATRAX_AUTH_MODE = none | basic | oidc; default none) ---
 # Misconfiguration in an enabled mode must never silently fall back to an open
@@ -865,6 +978,10 @@ async def health_check():
     except Exception as exc:  # pragma: no cover - /health must never fail on diagnostics
         payload["storage"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     try:
+        payload["logs"] = _activity_logs_health()
+    except Exception as exc:  # pragma: no cover - diagnostics must never fail /health
+        payload["logs"] = {"error": f"{type(exc).__name__}: {exc}"}
+    try:
         payload["network"] = network_diagnostics.collect_network_diagnostics(
             settings=db.get_all_settings(),
         )
@@ -1286,6 +1403,8 @@ async def settings_view(request: Request):
             "network_diagnostics": network_diagnostics.collect_network_diagnostics(
                 settings=db.get_all_settings(),
             ),
+            "file_logging": _file_logging_info(),
+            "activity_logs_health": _activity_logs_health(),
             "debug_actions_enabled": AUTH_CONFIG.debug_actions
         }
     )
@@ -1571,6 +1690,13 @@ async def api_network_speedtest(payload: Optional[Dict[str, Any]] = None):
     ):
         return JSONResponse(result, status_code=400)
     return JSONResponse(result)
+
+
+@app.post("/api/logs/prune")
+async def api_logs_prune():
+    """Manually prune activity_logs (retention + max rows) and checkpoint the WAL."""
+    result = await asyncio.to_thread(scheduler.prune_activity_logs, "user")
+    return JSONResponse({"status": "success", **result})
 
 
 # --- Tagger: preview / manual tagging (PROJECT.md feature 16) ---
@@ -2322,6 +2448,11 @@ async def api_save_settings(payload: Dict[str, Any]):
                 f"Nyaa base URL set to {provided['nyaa_base_url']}; repointed {migrated} built-in feed(s).",
             )
     db.log_activity("SETTINGS_UPDATED", "Application settings updated")
+    if any(key in provided for key in ("log_to_file", "log_file_max_mb", "log_file_backups")):
+        try:
+            configure_file_logging(db)
+        except Exception as exc:  # pragma: no cover - save must succeed
+            logger.debug("File logging reconfigure failed: %s", exc)
     storage = {}
     if "staging_dir" in provided or "downloads_dir" in provided:
         try:

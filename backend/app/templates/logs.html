@@ -17,9 +17,14 @@
             </p>
         </div>
 
-        <div class="relative w-full sm:w-64">
-            <i data-lucide="search" class="w-4 h-4 text-slate-500 absolute left-3 top-2.5"></i>
-            <input type="text" id="log-search" oninput="filterLogs()" placeholder="Search logs..." class="w-full bg-darkcard border border-slate-700/80 rounded-xl pl-9 pr-4 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-brand-500">
+        <div class="flex items-center gap-2 w-full sm:w-auto">
+            <div class="relative flex-1 sm:w-64">
+                <i data-lucide="search" class="w-4 h-4 text-slate-500 absolute left-3 top-2.5"></i>
+                <input type="text" id="log-search" oninput="filterLogs()" placeholder="Search logs..." class="w-full bg-darkcard border border-slate-700/80 rounded-xl pl-9 pr-4 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-brand-500">
+            </div>
+            <button type="button" onclick="pruneActivityLogs()" id="btn-prune-logs" aria-label="Prune activity logs" title="Delete rows older than the retention setting and trim above the max-row cap" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                <i data-lucide="eraser" class="w-3.5 h-3.5"></i> Prune now
+            </button>
         </div>
     </div>
 
@@ -66,6 +71,17 @@
 </div>
 
 <script>
+async function pruneActivityLogs() {
+    try {
+        const res = await fetch('/api/logs/prune', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'Prune failed', 'error'); return; }
+        const total = (data.deleted_old || 0) + (data.deleted_excess || 0);
+        showToast(total ? `Pruned ${total} activity row(s); ${data.remaining} remain` : 'Nothing to prune', total ? 'success' : 'info');
+        setTimeout(() => location.reload(), 800);
+    } catch (err) { showToast('Error: ' + err, 'error'); }
+}
+
 function filterLogs() {
     const q = document.getElementById('log-search').value.toLowerCase().trim();
     const items = document.querySelectorAll('.log-item');

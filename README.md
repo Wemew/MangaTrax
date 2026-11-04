@@ -314,6 +314,50 @@ raise `torbox_download_concurrency` / `torbox_parallel_chunks` in Settings -> Do
 
 ---
 
+## Log rotation & activity retention
+
+MangaTrax logs in two places:
+
+1. **Container stdout/stderr** — written by the app (no file handler by default) and
+   stored by Docker's logging driver. The bundled compose files now cap it:
+   ```yaml
+   logging:
+     driver: json-file
+     options:
+       max-size: "10m"
+       max-file: "5"
+   ```
+   Docker's host file is
+   `/var/lib/docker/containers/<container-id>/<container-id>-json.log` (need root).
+   Check what a running container actually uses:
+   ```bash
+   docker inspect -f '{{.HostConfig.LogConfig.Type}} {{.HostConfig.LogConfig.Config}}' mangatrax
+   ```
+   Existing deployments (TrueNAS apps, plain `docker run`) must be **recreated** with
+   the block above (or start with `--log-opt max-size=10m --log-file=5`); otherwise they
+   keep growing. A host-wide default can be set in `/etc/docker/daemon.json`:
+   ```json
+   {"log-driver": "json-file", "log-opts": {"max-size": "10m", "max-file": "5"}}
+   ```
+   and requires a Docker daemon restart.
+
+2. **In-app Logs page** — SQLite `activity_logs`. It is pruned automatically at startup
+   and at most every 6 h with the Settings → Maintenance values:
+   - `activity_retention_days` (default 90, **0 = keep forever**),
+   - `activity_max_rows` (default 50000, **0 = uncapped**).
+   Pruning deletes old rows plus the oldest excess and runs
+   `PRAGMA wal_checkpoint(TRUNCATE)` so the WAL does not stay inflated. Manual **Prune
+   now**: Logs page button or `POST /api/logs/prune` (also in Settings → Maintenance).
+   `/health` exposes a `logs` block (row count, oldest age, DB/WAL sizes, settings).
+
+3. **Optional rotating app file** — enable `log_to_file` in Settings → Maintenance to
+   write `${DATA_DIR}/logs/mangatrax.log` via `RotatingFileHandler`
+   (`log_file_max_mb` default 10, `log_file_backups` default 5; total ≈ max ×
+   (backups+1)). It attaches idempotently on startup/save and is skipped with a warning
+   if the directory cannot be created.
+
+---
+
 ## 📄 License
 
 MIT License. See [LICENSE](LICENSE) for details.

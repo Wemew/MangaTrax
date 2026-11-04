@@ -1377,6 +1377,39 @@ class MangaScheduler:
             )
         return {"inventory": inventory, "routing": routed}
 
+    def prune_activity_logs(self, actor: str = "scheduler", force: bool = False) -> Dict[str, Any]:
+        """Retention prune for activity_logs (startup + ≤6h), WAL checkpointed."""
+        try:
+            retention_days = int(self.db.get_setting("activity_retention_days", "90") or 90)
+        except (TypeError, ValueError):
+            retention_days = 90
+        try:
+            max_rows = int(self.db.get_setting("activity_max_rows", "50000") or 50000)
+        except (TypeError, ValueError):
+            max_rows = 50000
+        result = self.db.prune_activity_logs(retention_days, max_rows, checkpoint=True)
+        try:
+            self.db.set_setting("activity_last_prune_at", str(time.time()))
+        except Exception:
+            pass
+        deleted = int(result.get("deleted_old", 0)) + int(result.get("deleted_excess", 0))
+        if deleted:
+            message = (
+                f"Activity log pruned: deleted_old={result.get('deleted_old', 0)}, "
+                f"deleted_excess={result.get('deleted_excess', 0)}, "
+                f"remaining={result.get('remaining', 0)}"
+            )
+            logger.info(message)
+            try:
+                self._log_activity(
+                    "ACTIVITY_PRUNED", message,
+                    json.dumps({**result, "retention_days": retention_days, "max_rows": max_rows}),
+                    actor=actor,
+                )
+            except Exception as exc:  # pragma: no cover - audit must not fail the prune
+                logger.debug("Could not audit activity prune: %s", exc)
+        return result
+
     def sweep_pending_dedupe(self, limit: int = 50) -> Dict[str, Any]:
         """Retry auto-downloads that were suppressed by in-flight dedupe.
 
@@ -3956,6 +3989,7 @@ class MangaScheduler:
         last_dl_check = 0
         last_dedupe_sweep = 0
         last_dedupe_inventory = 0
+        last_activity_prune = 0
         last_complete_check = time.time()
 
         while self.running:
@@ -3993,6 +4027,14 @@ class MangaScheduler:
                     except Exception as exc:
                         logger.debug("Periodic downloads routing failed: %s", exc)
                     last_tag_check = time.time()
+
+                # Activity-log retention: once at startup, then at most every 6 hours.
+                if now - last_activity_prune >= 21600:
+                    try:
+                        self.prune_activity_logs()
+                    except Exception as exc:
+                        logger.debug("Activity log prune failed: %s", exc)
+                    last_activity_prune = time.time()
 
                 # task-30: frequent (45 s) inventory + routing pass so finished files
                 # are visible and eligible for staging without pressing anything.

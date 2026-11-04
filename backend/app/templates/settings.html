@@ -516,6 +516,54 @@
                 </div>
             </div>
 
+            <!-- Logs & retention (task-35) -->
+            <div id="log-rotation-card" class="mt-4 bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                    <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i data-lucide="file-clock" class="w-4 h-4 text-emerald-400"></i>
+                        Logs & rotation
+                    </h4>
+                    <button type="button" onclick="pruneActivityNow()" id="btn-prune-activity" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                        <i data-lucide="eraser" class="w-3.5 h-3.5"></i> Prune activity log now
+                    </button>
+                </div>
+                <p class="text-[11px] text-slate-400">
+                    Docker container stdout is rotated by the compose <code class="text-slate-300">logging:</code> block (10 MB × 5).
+                    Optionally write a rotating in-app log file too; the activity log (Logs page) is pruned by retention.
+                </p>
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    <label class="flex items-start gap-2 text-xs text-slate-300">
+                        <input type="checkbox" id="setting-log-to-file" {% if settings.log_to_file == 'true' %}checked{% endif %} class="mt-0.5 rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-0">
+                        <span>Write rotating app log file<span class="block text-[10px] text-slate-500">Default off; Docker stdout already rotates.</span></span>
+                    </label>
+                    <div>
+                        <label for="setting-log-max-mb" class="block text-xs font-semibold text-slate-300 mb-1">Log file max size (MB)</label>
+                        <input type="number" id="setting-log-max-mb" value="{{ settings.log_file_max_mb or '10' }}" min="1" max="100" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white">
+                        <p class="text-[10px] text-slate-500 mt-1">Rotates automatically; total ≈ max size × (backups+1).</p>
+                    </div>
+                    <div>
+                        <label for="setting-log-backups" class="block text-xs font-semibold text-slate-300 mb-1">Log file backups</label>
+                        <input type="number" id="setting-log-backups" value="{{ settings.log_file_backups or '5' }}" min="1" max="20" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white">
+                    </div>
+                    <div>
+                        <label for="setting-activity-retention" class="block text-xs font-semibold text-slate-300 mb-1">Activity retention (days, 0 = forever)</label>
+                        <input type="number" id="setting-activity-retention" value="{{ settings.activity_retention_days or '90' }}" min="0" max="3650" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white">
+                    </div>
+                    <div>
+                        <label for="setting-activity-max-rows" class="block text-xs font-semibold text-slate-300 mb-1">Activity max rows (0 = uncapped)</label>
+                        <input type="number" id="setting-activity-max-rows" value="{{ settings.activity_max_rows or '50000' }}" min="0" max="1000000" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white">
+                    </div>
+                    <div class="text-[11px] text-slate-400">
+                        File: <span class="text-slate-200">{{ file_logging.path if file_logging else 'n/a' }}</span><br>
+                        Enabled: <span class="text-slate-200">{{ 'yes' if file_logging and file_logging.enabled else 'no' }}</span> ·
+                        Size: <span class="text-slate-200">{{ ((file_logging.size_bytes if file_logging else 0) / 1024 / 1024)|round(2) }} MB</span><br>
+                        Activity rows: <span class="text-slate-200">{{ activity_logs_health.activity_rows if activity_logs_health else '?' }}</span> ·
+                        DB: <span class="text-slate-200">{{ (((activity_logs_health.db_size_bytes if activity_logs_health else 0)) / 1024 / 1024)|round(2) }} MB</span> ·
+                        WAL: <span class="text-slate-200">{{ (((activity_logs_health.wal_size_bytes if activity_logs_health else 0)) / 1024 / 1024)|round(2) }} MB</span>
+                    </div>
+                </div>
+            </div>
+
             <!-- Network diagnostics (task-33) -->
             <div id="network-diagnostics-card" class="mt-4 bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3"
                  data-snapshot='{{ network_diagnostics|tojson }}'>
@@ -817,6 +865,11 @@ async function saveSettings(e) {
         torbox_max_download_gb: document.getElementById('setting-torbox-max-download-gb').value,
         torbox_download_concurrency: document.getElementById('setting-torbox-download-concurrency').value,
         torbox_parallel_chunks: document.getElementById('setting-torbox-parallel-chunks').value,
+        log_to_file: document.getElementById('setting-log-to-file').checked ? 'true' : 'false',
+        log_file_max_mb: document.getElementById('setting-log-max-mb').value,
+        log_file_backups: document.getElementById('setting-log-backups').value,
+        activity_retention_days: document.getElementById('setting-activity-retention').value,
+        activity_max_rows: document.getElementById('setting-activity-max-rows').value,
         torbox_poll_seconds: document.getElementById('setting-torbox-poll-seconds').value,
         torbox_max_concurrent: document.getElementById('setting-torbox-max-concurrent').value,
         torbox_timeout_hours: document.getElementById('setting-torbox-timeout-hours').value
@@ -891,6 +944,17 @@ async function copyNetworkDiagnostics() {
     } catch (err) {
         showToast('Copy failed: ' + err, 'error');
     }
+}
+
+async function pruneActivityNow() {
+    try {
+        const res = await fetch('/api/logs/prune', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'Prune failed', 'error'); return; }
+        const total = (data.deleted_old || 0) + (data.deleted_excess || 0);
+        showToast(total ? `Pruned ${total} activity row(s); ${data.remaining} remain` : 'Nothing to prune', total ? 'success' : 'info');
+        setTimeout(() => location.reload(), 900);
+    } catch (err) { showToast('Error: ' + err, 'error'); }
 }
 
 const MAINTENANCE_CONFIRMATIONS = {

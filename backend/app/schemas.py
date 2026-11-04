@@ -372,6 +372,11 @@ SETTINGS_KEYS = (
     "torbox_delete_on_failure",
     "torbox_download_concurrency",
     "torbox_parallel_chunks",
+    "log_to_file",
+    "log_file_max_mb",
+    "log_file_backups",
+    "activity_retention_days",
+    "activity_max_rows",
 )
 # Placeholder returned by GET /api/settings and rendered in the Settings UI instead of
 # the real Torbox key.  Saving the placeholder back is a no-op.
@@ -696,6 +701,12 @@ class SettingsUpdateRequest(BaseModel):
     # fetch for large files (1 = sequential diagnostic mode).
     torbox_download_concurrency: Optional[str] = Field(default=None, max_length=20)
     torbox_parallel_chunks: Optional[str] = Field(default=None, max_length=20)
+    # task-35 logging/retention.
+    log_to_file: Optional[str] = Field(default=None, max_length=20)
+    log_file_max_mb: Optional[str] = Field(default=None, max_length=20)
+    log_file_backups: Optional[str] = Field(default=None, max_length=20)
+    activity_retention_days: Optional[str] = Field(default=None, max_length=20)
+    activity_max_rows: Optional[str] = Field(default=None, max_length=20)
 
     @field_validator("downloader_engine")
     @classmethod
@@ -706,6 +717,68 @@ class SettingsUpdateRequest(BaseModel):
         if engine not in ("qbit", "torbox"):
             raise ValueError("downloader_engine must be 'qbit' or 'torbox'")
         return engine
+
+    @field_validator("log_to_file")
+    @classmethod
+    def _validate_log_to_file(cls, value):
+        if value is None or not str(value).strip():
+            return "false"
+        text = str(value).strip().lower()
+        if text not in ("true", "false", "1", "0", "yes", "no", "on", "off"):
+            raise ValueError("log_to_file must be true or false")
+        return "true" if text in ("true", "1", "yes", "on") else "false"
+
+    @field_validator("log_file_max_mb")
+    @classmethod
+    def _validate_log_file_max_mb(cls, value):
+        if value is None or not str(value).strip():
+            return "10"
+        try:
+            number = int(str(value).strip())
+        except ValueError:
+            raise ValueError("log_file_max_mb must be an integer")
+        if not 1 <= number <= 100:
+            raise ValueError("log_file_max_mb must be between 1 and 100")
+        return str(number)
+
+    @field_validator("log_file_backups")
+    @classmethod
+    def _validate_log_file_backups(cls, value):
+        if value is None or not str(value).strip():
+            return "5"
+        try:
+            number = int(str(value).strip())
+        except ValueError:
+            raise ValueError("log_file_backups must be an integer")
+        if not 1 <= number <= 20:
+            raise ValueError("log_file_backups must be between 1 and 20")
+        return str(number)
+
+    @field_validator("activity_retention_days")
+    @classmethod
+    def _validate_activity_retention_days(cls, value):
+        if value is None or not str(value).strip():
+            return "90"
+        try:
+            number = int(str(value).strip())
+        except ValueError:
+            raise ValueError("activity_retention_days must be an integer")
+        if not 0 <= number <= 3650:
+            raise ValueError("activity_retention_days must be between 0 and 3650 (0 = forever)")
+        return str(number)
+
+    @field_validator("activity_max_rows")
+    @classmethod
+    def _validate_activity_max_rows(cls, value):
+        if value is None or not str(value).strip():
+            return "50000"
+        try:
+            number = int(str(value).strip())
+        except ValueError:
+            raise ValueError("activity_max_rows must be an integer")
+        if not 0 <= number <= 1_000_000:
+            raise ValueError("activity_max_rows must be between 0 and 1000000 (0 = uncapped)")
+        return str(number)
 
     @field_validator("torbox_download_concurrency")
     @classmethod

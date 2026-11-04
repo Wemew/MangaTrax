@@ -13,6 +13,13 @@ services:
     image: mangatrax:latest
     container_name: mangatrax
     restart: unless-stopped
+    # Cap Docker's json-file log so it cannot grow without bound. Host path:
+    # /var/lib/docker/containers/<id>/<id>-json.log (recreate the container to apply).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
     # Security hardening
     security_opt:

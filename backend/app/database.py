@@ -4,7 +4,7 @@ import sqlite3
 import json
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple, Set
 
 import logging
@@ -753,6 +753,11 @@ class MangaDatabase:
         "torbox_max_download_gb": os.getenv("MANGATRAX_TORBOX_MAX_DOWNLOAD_GB", "64"),
         "torbox_download_concurrency": os.getenv("MANGATRAX_TORBOX_DOWNLOAD_CONCURRENCY", "4"),
         "torbox_parallel_chunks": os.getenv("MANGATRAX_TORBOX_PARALLEL_CHUNKS", "4"),
+        "log_to_file": os.getenv("MANGATRAX_LOG_TO_FILE", "false"),
+        "log_file_max_mb": os.getenv("MANGATRAX_LOG_FILE_MAX_MB", "10"),
+        "log_file_backups": os.getenv("MANGATRAX_LOG_FILE_BACKUPS", "5"),
+        "activity_retention_days": os.getenv("MANGATRAX_ACTIVITY_RETENTION_DAYS", "90"),
+        "activity_max_rows": os.getenv("MANGATRAX_ACTIVITY_MAX_ROWS", "50000"),
         "torbox_delete_on_failure": os.getenv("MANGATRAX_TORBOX_DELETE_ON_FAILURE", "true"),
                     "torbox_timeout_hours": os.getenv("MANGATRAX_TORBOX_TIMEOUT_HOURS", "6"),
                     "torbox_strict_volume_selection": os.getenv("MANGATRAX_TORBOX_STRICT_VOLUMES", "true"),
@@ -792,6 +797,11 @@ class MangaDatabase:
                 ("torbox_max_download_gb", os.getenv("MANGATRAX_TORBOX_MAX_DOWNLOAD_GB", "64")),
                 ("torbox_download_concurrency", os.getenv("MANGATRAX_TORBOX_DOWNLOAD_CONCURRENCY", "4")),
                 ("torbox_parallel_chunks", os.getenv("MANGATRAX_TORBOX_PARALLEL_CHUNKS", "4")),
+                ("log_to_file", os.getenv("MANGATRAX_LOG_TO_FILE", "false")),
+                ("log_file_max_mb", os.getenv("MANGATRAX_LOG_FILE_MAX_MB", "10")),
+                ("log_file_backups", os.getenv("MANGATRAX_LOG_FILE_BACKUPS", "5")),
+                ("activity_retention_days", os.getenv("MANGATRAX_ACTIVITY_RETENTION_DAYS", "90")),
+                ("activity_max_rows", os.getenv("MANGATRAX_ACTIVITY_MAX_ROWS", "50000")),
                 ("torbox_delete_on_failure", os.getenv("MANGATRAX_TORBOX_DELETE_ON_FAILURE", "true")),
                 ("torbox_timeout_hours", os.getenv("MANGATRAX_TORBOX_TIMEOUT_HOURS", "6")),
                 ("torbox_strict_volume_selection", os.getenv("MANGATRAX_TORBOX_STRICT_VOLUMES", "true")),
@@ -838,6 +848,7 @@ class MangaDatabase:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_rg ON releases(release_group);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_vol_start ON releases(volume_start);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_releases_media_type ON releases(media_type);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_activity_logs_created_at ON activity_logs(created_at);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_series_tracking_name ON series_tracking(name);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_series_tracking_monitored ON series_tracking(is_monitored);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_meta_cache_term ON manga_metadata_cache(search_term);")
@@ -1012,6 +1023,64 @@ class MangaDatabase:
             self._invalidate_grouped_cache()
             logger.info("Media filter: typed %s stored JPEG XL row(s); nothing deleted.", typed)
         return typed
+
+    def prune_activity_logs(
+        self, retention_days: int = 90, max_rows: int = 50000, checkpoint: bool = True,
+    ) -> Dict[str, Any]:
+        """Delete old/excess activity rows, then truncate-checkpoint the WAL."""
+        result = {"deleted_old": 0, "deleted_excess": 0, "remaining": 0, "checkpointed": False}
+        try:
+            retention_days = int(retention_days)
+        except (TypeError, ValueError):
+            retention_days = 90
+        try:
+            max_rows = int(max_rows)
+        except (TypeError, ValueError):
+            max_rows = 50000
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                if retention_days > 0:
+                    cutoff = (datetime.utcnow() - timedelta(days=retention_days)).strftime("%Y-%m-%d %H:%M:%S")
+                    cur.execute("DELETE FROM activity_logs WHERE created_at < ?;", (cutoff,))
+                    result["deleted_old"] = max(0, int(cur.rowcount or 0))
+                cur.execute("SELECT COUNT(*) AS count FROM activity_logs;")
+                remaining = int(cur.fetchone()["count"] or 0)
+                if max_rows > 0 and remaining > max_rows:
+                    excess = remaining - max_rows
+                    cur.execute(
+                        "DELETE FROM activity_logs WHERE id IN "
+                        "(SELECT id FROM activity_logs ORDER BY id ASC LIMIT ?);",
+                        (excess,),
+                    )
+                    result["deleted_excess"] = max(0, int(cur.rowcount or 0))
+                    remaining -= result["deleted_excess"]
+                conn.commit()
+                result["remaining"] = remaining
+                if checkpoint:
+                    try:
+                        cur.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                        cur.fetchall()
+                        result["checkpointed"] = True
+                    except Exception as exc:
+                        logger.debug("WAL checkpoint failed: %s", exc)
+        except Exception as exc:
+            logger.warning("Activity log prune failed: %s", exc)
+        self._invalidate_grouped_cache()
+        return result
+
+    def activity_log_stats(self) -> Dict[str, Any]:
+        stats = {"count": 0, "oldest_created_at": ""}
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) AS count, MIN(created_at) AS oldest FROM activity_logs;")
+                row = cur.fetchone()
+                stats["count"] = int(row["count"] or 0) if row else 0
+                stats["oldest_created_at"] = str((row["oldest"] if row else "") or "")
+        except Exception as exc:
+            logger.debug("Could not read activity log stats: %s", exc)
+        return stats
 
     # --- Settings ---
     def get_setting(self, key: str, default: str = "") -> str:
