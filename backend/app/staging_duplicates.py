@@ -156,13 +156,20 @@ def purge_staging_duplicates(db, staging_dir: str, filenames: Optional[List[str]
     selected = list(verified.values()) if all_files else []
     unmatched = 0
     if not all_files:
-        lookup = {}
+        # Exact relative path wins.  A bare filename is only accepted when it is
+        # unique: flat staging and legacy nested folders can contain the same
+        # basename, and mapping both through one filename key used to purge the
+        # wrong copy (nested instead of the requested root file).
+        by_filename = {}
         for item in verified.values():
-            lookup[item["relative"]] = item
-            lookup[item["filename"]] = item
+            by_filename.setdefault(item["filename"], []).append(item)
         for raw in filenames or []:
             candidate = str(raw or "").replace("\\", "/").strip().lstrip("/")
-            item = lookup.get(candidate) or lookup.get(os.path.basename(candidate))
+            item = verified.get(candidate)
+            if item is None and "/" not in candidate:
+                matches = by_filename.get(os.path.basename(candidate)) or []
+                if len(matches) == 1:
+                    item = matches[0]
             if item:
                 selected.append(item)
             else:
