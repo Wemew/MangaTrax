@@ -774,7 +774,7 @@ class MangaScheduler:
         # (6) Unknown series: the parsed name IS the stable key (never the AniList title).
         return _make(raw, "raw")
 
-    def audit_series_attribution(self) -> Dict[str, Any]:
+    def audit_series_attribution(self, progress=None) -> Dict[str, Any]:
         """Read-only audit: tracked releases whose own title parses to another series.
 
         Used by Settings -> Maintenance to repair rows that a previous spinoff/
@@ -797,7 +797,10 @@ class MangaScheduler:
                 "WHERE series_name IS NOT NULL AND trim(series_name) != '' "
                 "ORDER BY id ASC;"
             ).fetchall()
-        for row in rows:
+        total_rows = len(rows)
+        for index, row in enumerate(rows, 1):
+            if progress:
+                progress(index - 1, total_rows, f"Auditing release #{row['id']}")
             current = str(row["series_name"] or "").strip()
             current_norm = normalize_text(current)
             if not current_norm or current_norm not in tracked:
@@ -843,6 +846,8 @@ class MangaScheduler:
                     f"release title parses to '{suggested}', not tracked '{current}'"
                 ),
             })
+        if progress:
+            progress(total_rows, total_rows, "Attribution audit complete")
         return {
             "status": "success",
             "summary": {
@@ -853,9 +858,10 @@ class MangaScheduler:
             "files": records,
         }
 
-    def repair_series_attribution(self, release_ids: List[int], actor: str = "user") -> Dict[str, Any]:
+    def repair_series_attribution(self, release_ids: List[int], actor: str = "user",
+                                  progress=None) -> Dict[str, Any]:
         """Re-key explicitly selected, provably mis-attributed releases (idempotent)."""
-        audit = self.audit_series_attribution()
+        audit = self.audit_series_attribution(progress=progress)
         by_id = {item["id"]: item for item in audit.get("files") or []}
         repaired = 0
         skipped = 0
@@ -873,6 +879,8 @@ class MangaScheduler:
                     (item["suggested_series"], int(release_id)),
                 )
                 repaired += 1
+                if progress:
+                    progress(repaired, len(release_ids or []), f"Re-keyed release #{release_id}")
                 results.append({
                     "id": release_id, "outcome": "repaired",
                     "current_series": item["current_series"],

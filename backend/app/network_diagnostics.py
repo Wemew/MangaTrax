@@ -371,6 +371,7 @@ def run_speedtest(
     url: str = SPEEDTEST_URL,
     timeout: float = SPEEDTEST_TIMEOUT_SECONDS,
     settings: Optional[Dict[str, Any]] = None,
+    progress=None,
 ) -> Dict[str, Any]:
     """Bounded, fixed-endpoint parallel speed test (never raises).
 
@@ -399,6 +400,8 @@ def run_speedtest(
     rounds = max(1, int(math.ceil(per_connection_total / SPEEDTEST_MAX_REQUEST_BYTES)))
     errors: List[str] = []
     started = time.monotonic()
+    progress_lock = __import__("threading").Lock()
+    progress_done = [0]
 
     def _connection_worker(index: int) -> Dict[str, Any]:
         remaining = per_connection_total
@@ -409,6 +412,11 @@ def run_speedtest(
             chunk = min(SPEEDTEST_MAX_REQUEST_BYTES, remaining)
             try:
                 status, read, seconds = _download_once(url, chunk, timeout)
+                if progress:
+                    with progress_lock:
+                        progress_done[0] = min(bytes_total, progress_done[0] + int(read or 0))
+                        done_now = progress_done[0]
+                    progress(done_now, bytes_total, f"Speed test: connection {index + 1}, round {len(request_sizes) + 1}")
             except Exception as exc:
                 return {"connection": index + 1, "error": f"{type(exc).__name__}: {exc}",
                         "bytes": transferred, "mbps": 0.0}

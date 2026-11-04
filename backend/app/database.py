@@ -1296,7 +1296,7 @@ class MangaDatabase:
             return max(0, int(cur.rowcount or 0))
 
     # --- Suspicious volume-range repair (task-44) ---
-    def audit_suspicious_volume_ranges(self) -> Dict[str, Any]:
+    def audit_suspicious_volume_ranges(self, progress=None) -> Dict[str, Any]:
         """Read-only audit: stored high/chapter-range volumes that should be chapters."""
         from app.parser import extract_manga_bundle_and_volumes
 
@@ -1306,7 +1306,10 @@ class MangaDatabase:
                 "SELECT id, title, series_name, volumes_json, missing_vols_json, "
                 "volume_start, volume_end, status FROM releases ORDER BY id ASC;"
             ).fetchall()
-        for row in rows:
+        total_rows = len(rows)
+        for index, row in enumerate(rows, 1):
+            if progress:
+                progress(index - 1, total_rows, f"Checking release #{row['id']}")
             try:
                 stored = json.loads(row["volumes_json"] or "[]")
             except (TypeError, ValueError):
@@ -1350,6 +1353,8 @@ class MangaDatabase:
                 ),
                 "safe_to_repair": suggested is None,
             })
+        if progress:
+            progress(total_rows, total_rows, "Volume-range audit complete")
         return {
             "status": "success",
             "summary": {
@@ -1360,8 +1365,9 @@ class MangaDatabase:
             "files": records,
         }
 
-    def repair_suspicious_volume_ranges(self, release_ids: List[int], actor: str = "user") -> Dict[str, Any]:
-        audit = self.audit_suspicious_volume_ranges()
+    def repair_suspicious_volume_ranges(self, release_ids: List[int], actor: str = "user",
+                                        progress=None) -> Dict[str, Any]:
+        audit = self.audit_suspicious_volume_ranges(progress=progress)
         by_id = {item["id"]: item for item in audit.get("files") or []}
         repaired = 0
         skipped = 0
@@ -1378,6 +1384,8 @@ class MangaDatabase:
                     (int(release_id),),
                 )
                 repaired += 1
+                if progress:
+                    progress(repaired, len(release_ids or []), f"Reclassified release #{release_id}")
             conn.commit()
         if repaired:
             self._invalidate_grouped_cache()

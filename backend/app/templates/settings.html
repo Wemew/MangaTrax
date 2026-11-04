@@ -523,7 +523,7 @@
                         <i data-lucide="file-clock" class="w-4 h-4 text-emerald-400"></i>
                         Logs & rotation
                     </h4>
-                    <button type="button" onclick="pruneActivityNow()" id="btn-prune-activity" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                    <button type="button" onclick="pruneActivityNow()" id="btn-prune-activity" data-task-kind="logs:prune" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
                         <i data-lucide="eraser" class="w-3.5 h-3.5"></i> Prune activity log now
                     </button>
                 </div>
@@ -574,7 +574,7 @@
                     </h4>
                     <div class="flex items-center gap-2">
                         <button type="button" onclick="copyNetworkDiagnostics()" aria-label="Copy network diagnostics JSON" title="Copy the full diagnostics JSON" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Copy JSON</button>
-                        <button type="button" onclick="runNetworkSpeedTest()" id="btn-network-speedtest" aria-label="Run network speed test" class="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5">
+                        <button type="button" onclick="runNetworkSpeedTest()" id="btn-network-speedtest" data-task-kind="speedtest" aria-label="Run network speed test" class="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5">
                             <i data-lucide="gauge" class="w-3.5 h-3.5"></i> Run speed test
                         </button>
                     </div>
@@ -647,8 +647,8 @@
                         Suspicious volume ranges
                     </h4>
                     <div class="flex items-center gap-2">
-                        <button type="button" onclick="auditVolumeRanges()" id="btn-audit-volume-ranges" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Audit ranges</button>
-                        <button type="button" onclick="repairVolumeRanges()" id="btn-repair-volume-ranges" disabled class="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold">Repair selected (<span id="volume-range-selected">0</span>)</button>
+                        <button type="button" onclick="auditVolumeRanges()" id="btn-audit-volume-ranges" data-task-kind="audit:volume-ranges" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Audit ranges</button>
+                        <button type="button" onclick="repairVolumeRanges()" id="btn-repair-volume-ranges" data-task-kind="repair:volume-ranges" disabled class="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold">Repair selected (<span id="volume-range-selected">0</span>)</button>
                     </div>
                 </div>
                 <p class="text-[11px] text-slate-400">Finds releases stored with chapter-scale volume bundles (e.g. Vol 205-215) or titles that now parse as chapter-only. Repair clears the phantom volumes, marks them IGNORED and keeps the history; explicit-volume releases are untouched.</p>
@@ -685,10 +685,10 @@
                         Spinoff / series attribution
                     </h4>
                     <div class="flex items-center gap-2">
-                        <button type="button" onclick="auditSeriesAttribution()" id="btn-audit-attribution" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                        <button type="button" onclick="auditSeriesAttribution()" id="btn-audit-attribution" data-task-kind="audit:attribution" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
                             <i data-lucide="scan-search" class="w-3.5 h-3.5"></i> Audit attribution
                         </button>
-                        <button type="button" onclick="repairSeriesAttribution()" id="btn-repair-attribution" disabled class="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold flex items-center gap-1.5">
+                        <button type="button" onclick="repairSeriesAttribution()" id="btn-repair-attribution" data-task-kind="repair:attribution" disabled class="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold flex items-center gap-1.5">
                             <i data-lucide="wrench" class="w-3.5 h-3.5"></i> Repair selected (<span id="attribution-selected-count">0</span>)
                         </button>
                     </div>

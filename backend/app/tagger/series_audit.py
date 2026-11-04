@@ -487,6 +487,7 @@ def audit_staging_cbz_files(
     db,
     staging_dir: str,
     calibre_series: Optional[List[Dict[str, Any]]] = None,
+    progress=None,
 ) -> Dict[str, Any]:
     """Audit every staged ``.cbz`` and return a per-file report plus summary.
 
@@ -503,8 +504,11 @@ def audit_staging_cbz_files(
         summary[status] = 0
 
     files: List[Dict[str, Any]] = []
-    for entry in entries:
+    total_entries = len(entries)
+    for index, entry in enumerate(entries, 1):
         summary["scanned"] += 1
+        if progress:
+            progress(index - 1, total_entries, f"Auditing {entry.get('name') or entry.get('relative') or ''}")
         record = audit_entry(entry, reference)
         summary[record["status"]] = summary.get(record["status"], 0) + 1
         files.append(record)
@@ -516,6 +520,8 @@ def audit_staging_cbz_files(
     )
     summary["tracked_series"] = len(reference.get("names") or {})
     summary["alias_claims"] = len(reference.get("aliases") or {})
+    if progress:
+        progress(total_entries, total_entries, "ComicInfo audit complete")
 
     return {
         "status": "success",

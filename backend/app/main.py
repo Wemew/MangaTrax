@@ -1952,6 +1952,7 @@ async def api_network_speedtest(payload: Optional[Dict[str, Any]] = None):
         outcome = network_diagnostics.run_speedtest(
             bytes_total, connections, network_diagnostics.SPEEDTEST_URL,
             network_diagnostics.SPEEDTEST_TIMEOUT_SECONDS, db.get_all_settings(),
+            progress=reporter.report,
         )
         reporter.report(connections, connections, "Speed test complete", progress_pct=100.0, force=True)
         return outcome
@@ -2162,8 +2163,12 @@ async def api_match_awaiting_series(payload: Optional[Dict[str, Any]] = None):
 
 @app.get("/api/maintenance/suspicious-volume-ranges")
 async def api_suspicious_volume_ranges():
-    result = await asyncio.to_thread(db.audit_suspicious_volume_ranges)
-    return JSONResponse(result)
+    result, task = await asyncio.to_thread(
+        _recorded_task, "audit:volume-ranges", "Audit suspicious volume ranges",
+        lambda reporter: db.audit_suspicious_volume_ranges(progress=reporter.report),
+        auth_module.get_current_actor(), None,
+    )
+    return JSONResponse({**result, "task_id": task["id"], "task": task})
 
 
 @app.post("/api/maintenance/repair-volume-ranges")
@@ -2178,10 +2183,14 @@ async def api_repair_volume_ranges(payload: Optional[Dict[str, Any]] = None):
             cleaned.append(int(value))
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="release_ids must be integers")
-    result = await asyncio.to_thread(
-        db.repair_suspicious_volume_ranges, cleaned, auth_module.get_current_actor(),
+    result, task = await asyncio.to_thread(
+        _recorded_task, "repair:volume-ranges", "Repair suspicious volume ranges",
+        lambda reporter: db.repair_suspicious_volume_ranges(
+            cleaned, auth_module.get_current_actor(), progress=reporter.report,
+        ),
+        auth_module.get_current_actor(), None,
     )
-    return JSONResponse(result)
+    return JSONResponse({**result, "task_id": task["id"], "task": task})
 
 
 @app.get("/api/maintenance/series-aliases")
@@ -2245,8 +2254,12 @@ async def api_clear_releases(payload: Optional[Dict[str, Any]] = None):
 @app.get("/api/maintenance/series-attribution")
 async def api_series_attribution_audit():
     """Read-only audit of releases stamped under the wrong (spinoff/parent) series."""
-    result = await asyncio.to_thread(scheduler.audit_series_attribution)
-    return JSONResponse(result)
+    result, task = await asyncio.to_thread(
+        _recorded_task, "audit:attribution", "Audit series attribution",
+        lambda reporter: scheduler.audit_series_attribution(progress=reporter.report),
+        auth_module.get_current_actor(), None,
+    )
+    return JSONResponse({**result, "task_id": task["id"], "task": task})
 
 
 @app.post("/api/maintenance/series-attribution-repair")
@@ -2261,10 +2274,14 @@ async def api_series_attribution_repair(payload: Optional[Dict[str, Any]] = None
             cleaned.append(int(value))
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="release_ids must be integers")
-    result = await asyncio.to_thread(
-        scheduler.repair_series_attribution, cleaned, auth_module.get_current_actor(),
+    result, task = await asyncio.to_thread(
+        _recorded_task, "repair:attribution", "Repair series attribution",
+        lambda reporter: scheduler.repair_series_attribution(
+            cleaned, auth_module.get_current_actor(), progress=reporter.report,
+        ),
+        auth_module.get_current_actor(), None,
     )
-    return JSONResponse(result)
+    return JSONResponse({**result, "task_id": task["id"], "task": task})
 
 
 @app.post("/api/logs/prune")
@@ -2440,19 +2457,26 @@ def _run_staging_cbz_audit() -> Dict[str, Any]:
 
 @app.get("/api/tagger/audit")
 async def api_tagger_audit():
-    """Read-only audit of staged CBZ ``<Series>`` values (never modifies a file).
-
-    Reports per file the current ``<Series>``, the suggested corrected name, why
-    the file is/ isn't safe to repair, and a summary.  Run this before
-    ``POST /api/tagger/repair-series`` and let the user select the files.
-    """
-    return JSONResponse(await asyncio.to_thread(_run_staging_cbz_audit))
+    """Read-only audit of staged CBZ ``<Series>`` values (never modifies a file)."""
+    def _worker(reporter):
+        reporter.report(0, 0, "Scanning staging files…", force=True)
+        result = series_audit.audit_staging_cbz_files(
+            db, _staging_dir_setting(), calibre_series=_calibre_series_snapshot(),
+            progress=reporter.report,
+        )
+        return result
+    result, task = await asyncio.to_thread(
+        _recorded_task, "audit:comicinfo", "Audit ComicInfo series tags", _worker,
+        auth_module.get_current_actor(), None,
+    )
+    return JSONResponse({**result, "task_id": task["id"], "task": task})
 
 
 def _repair_staging_cbz_series(
     filenames: list,
     repair_writer: bool = True,
     repair_publisher: bool = True,
+    progress=None,
 ) -> Dict[str, Any]:
     """Repair ``<Series>``/Writer/Publisher for the explicitly selected files only.
 
@@ -2469,7 +2493,9 @@ def _repair_staging_cbz_series(
     field_counts: Dict[str, int] = {}
     results: list = []
 
-    for entry in resolved:
+    for index, entry in enumerate(resolved, 1):
+        if progress:
+            progress(index - 1, len(resolved), f"Repairing {entry.get('name') or entry.get('relative') or ''}")
         record = series_audit.audit_entry(entry, reference)
         plan = series_audit.plan_repair(
             record, repair_writer=repair_writer, repair_publisher=repair_publisher
@@ -2523,6 +2549,8 @@ def _repair_staging_cbz_series(
         )
         results.append(item)
 
+    if progress:
+        progress(len(resolved), len(resolved), "ComicInfo repair complete")
     return {
         "status": "success" if counts["failed"] == 0 else "partial",
         **counts,
@@ -2543,10 +2571,14 @@ async def api_tagger_repair_series(payload: Dict[str, Any]):
     authenticated actor.
     """
     model = _validated_payload(schemas.SeriesRepairRequest, payload)
-    result = await asyncio.to_thread(
-        _repair_staging_cbz_series, model.files, model.repair_writer, model.repair_publisher
+    result, task = await asyncio.to_thread(
+        _recorded_task, "repair:comicinfo", "Repair ComicInfo metadata",
+        lambda reporter: _repair_staging_cbz_series(
+            model.files, model.repair_writer, model.repair_publisher, progress=reporter.report,
+        ),
+        auth_module.get_current_actor(), None,
     )
-    return JSONResponse(result)
+    return JSONResponse({**result, "task_id": task["id"], "task": task})
 
 
 # --- Unified search with AniList alias resolution (PROJECT.md feature 17) ---
