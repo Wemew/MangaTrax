@@ -254,6 +254,12 @@ _BARE_TAIL_RANGE_RE = re.compile(
 _VOLUME_KEYWORD_RE = re.compile(
     r"(?i)\b(?:volumes?|vols?|books?|parts?|pts?)\.?\s*\d|\bv\.?\s*\d"
 )
+# "Part 02" / "Pt. 2" is a story-arc marker, not necessarily a volume.  When a title
+# ALSO carries an explicit volume marker ("... Part 02 v01", "... Part 02 Volume 1"),
+# the part number must not shadow the real volume.  Titles where "Part" *is* the
+# volume marker ("Series Part 3", no v/vol) keep the existing behaviour.
+_PART_TOKEN_RE = re.compile(r"(?i)\b(?:parts?|pts?)\.?\s*\d{1,3}(?:\.\d+)?\b")
+_EXPLICIT_VOLUME_MARKER_RE = re.compile(r"(?i)\b(?:volumes?|vols?|books?|book|v)\.?\s*\d")
 # Parenthesised year range "(2024-2026)" -- the convention for a collected digital
 # batch of a series (the batch is usually the full volume set).
 _YEAR_RANGE_PAREN_RE = re.compile(
@@ -1451,6 +1457,15 @@ def _extract_manga_bundle_and_volumes_impl(raw_title: str, known_groups: Optiona
         # Strip extracted release group from cleaned title if present (e.g. from scene format -Group)
         cleaned = re.sub(r'(?i)(?:[-–—]\s*)?' + re.escape(release_group) + r'\b', ' ', cleaned)
         cleaned = " ".join(cleaned.split()).strip(" -–—:,|.")
+
+    # "Part 02" is an arc marker. When an explicit volume marker is also present
+    # ("... - Part 02 v01-11", "... Part 02 Volume 1"), the part number must not be
+    # parsed as a volume; drop the part token before ALL volume/chapter patterns.
+    # Without an explicit volume marker ("Series Part 3") the part number stays a
+    # volume, preserving the light-novel "Part" convention.
+    if _EXPLICIT_VOLUME_MARKER_RE.search(cleaned):
+        without_part = _PART_TOKEN_RE.sub(" ", cleaned)
+        cleaned = " ".join(without_part.split()).strip(" -–—:,|.")
 
     revision = extract_revision(raw_title)
     result = {

@@ -1368,15 +1368,22 @@ class MangaScheduler:
 
         The release parser covers ``v01``/``Vol. 3``/``v01-03``; explicit range
         patterns additionally cover bracket/parenthesised forms such as
-        ``[Vol 1-3]`` and ``(v1-v3)``.  Returns ``[]`` when nothing is parseable,
-        which strict selection treats as an unmappable file.
+        ``[Vol 1-3]`` and ``(v1-v3)``.  Torrent file names frequently carry a
+        story-arc marker (``... Part 02 v01``, ``... Part 2 - 03``): the part number
+        is NEVER a file volume, so it is removed before parsing.  Bare trailing or
+        bracketed numbers are used as a final fallback (torrent file names are
+        usually just ``<series> 03.cbz``) after excluding years and resolutions.
+        Returns ``[]`` when nothing is parseable, which strict selection treats as
+        an unmappable file.
         """
         base = os.path.basename(str(file_name or "").replace("\\", "/").strip())
         if not base:
             return []
+        # "Part 02" / "Pt. 2" is an arc marker, never a volume in a file name.
+        volume_base = re.sub(r"(?i)\b(?:parts?|pts?)\.?\s*\d{1,3}(?:\.\d+)?\b", " ", base)
         volumes: Set[float] = set()
         try:
-            parsed = extract_manga_bundle_and_volumes(base)
+            parsed = extract_manga_bundle_and_volumes(volume_base)
             volumes.update(float(value) for value in (parsed.get("volumes") or []))
             start = parsed.get("volume_start")
             end = parsed.get("volume_end")
@@ -1390,7 +1397,7 @@ class MangaScheduler:
         except Exception:
             pass
         for pattern in MangaScheduler._TORBOX_FILE_RANGE_RES:
-            for match in pattern.finditer(base):
+            for match in pattern.finditer(volume_base):
                 try:
                     first = float(match.group(1))
                     last = float(match.group(2))
@@ -1402,6 +1409,15 @@ class MangaScheduler:
                     volumes.update(float(v) for v in range(int(first), int(last) + 1))
                 else:
                     volumes.update({first, last})
+        if not volumes:
+            # Fallback: the last bare/bracketed number is the volume for torrent file
+            # names without a v/vol marker ("Bookworm Part 2 - 03 (1080p).cbz",
+            # "... [04].cbz").  Years/resolutions are metadata, not volumes.
+            stem = os.path.splitext(volume_base)[0]
+            numbers = [float(m.group(0)) for m in re.finditer(r"(?<!\d)\d{1,4}(?:\.\d+)?(?!\d)", stem)]
+            numbers = [n for n in numbers if not (1900 <= n <= 2099) and n not in (480.0, 720.0, 1080.0, 2160.0)]
+            if numbers:
+                volumes.add(numbers[-1])
         return sorted(volumes)
 
     def _legacy_torbox_selection(self, files: List[Dict[str, Any]], wanted: Set[float]):
