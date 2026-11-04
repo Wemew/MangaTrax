@@ -71,9 +71,46 @@ def test_download_buttons_are_styled():
     print("    [PASSED] card + flat download buttons carry their full styling classes.")
 
 
+def test_no_html_comments_inside_scripts():
+    """HTML markup accidentally placed inside <script> is a JS syntax error.
+
+    That is exactly how the whole Downloads page JS (Clear failed / Remove / Retry /
+    polling / manual match) silently died: the manual-series-match modal was inserted
+    before the script's closing tag, so the browser failed to parse the script and every
+    handler was undefined.  An HTML ``<!--`` comment at the start of a line inside a
+    script block is a reliable, string-literal-safe signal of that mistake.
+    """
+    problems = []
+    for path in _template_paths():
+        with open(path, encoding="utf-8") as fh:
+            source = fh.read()
+        for block in re.findall(r"<script[^>]*>(.*?)</script>", source, re.DOTALL | re.IGNORECASE):
+            for lineno, line in enumerate(block.splitlines(), 1):
+                if line.strip().startswith("<!--"):
+                    problems.append(f"{os.path.basename(path)}: HTML comment inside <script> (block line {lineno})")
+    assert not problems, "HTML markup inside <script> breaks the whole page JS:\n" + "\n".join(problems)
+    print("    [PASSED] no HTML markup/comments are nested inside <script> blocks.")
+
+
+def test_manual_match_modal_outside_script():
+    path = os.path.join(TEMPLATES, "downloads.html")
+    with open(path, encoding="utf-8") as fh:
+        source = fh.read()
+    script_end = source.find("</script>")
+    modal = source.find('id="manual-match-modal"')
+    assert script_end >= 0, "downloads.html has no closing </script>"
+    assert modal > script_end, (
+        "manual-match modal must live outside the <script> block (it currently breaks page JS)"
+    )
+    assert source.count("<script") == 1, "downloads.html should keep a single script block"
+    print("    [PASSED] downloads.html: modal markup sits after the script block.")
+
+
 def run():
     test_no_duplicate_attributes()
     test_download_buttons_are_styled()
+    test_no_html_comments_inside_scripts()
+    test_manual_match_modal_outside_script()
     print("ALL TEMPLATE MARKUP TESTS PASSED")
 
 
