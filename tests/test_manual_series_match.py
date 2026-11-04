@@ -138,13 +138,15 @@ def test_manual_calibre_match():
             row = conn.execute("SELECT series_name FROM releases WHERE id = ?;", (release_id,)).fetchone()
         assert row["series_name"] == OSHI, row
         overrides = ctx.db.get_series_alias_overrides()
-        assert len(overrides) == 1 and overrides[0]["target_name"] == OSHI, overrides
+        assert overrides and all(item["target_name"] == OSHI for item in overrides), overrides
         events = [item for item in ctx.db.get_logs(limit=50) if item["event_type"] == "SERIES_MANUALLY_MATCHED"]
         assert len(events) == 1, events
         # Future ingest with the same parsed source resolves automatically via override.
         with ctx.db.get_connection() as conn:
-            override_row = conn.execute("SELECT source_norm FROM series_alias_overrides;").fetchone()
-        assert override_row["source_norm"] == normalize_text(source), override_row
+            override_sources = {row["source_norm"] for row in conn.execute(
+                "SELECT source_norm FROM series_alias_overrides;"
+            ).fetchall()}
+        assert normalize_text(source) in override_sources, override_sources
         assert downloads_pipeline.resolve_series_template(source, ctx.db.get_series_templates_map())["series_name"] == OSHI
         assert os.path.isfile(good) is False, "original moved to staging"
         print("    [PASSED] Calibre match persists override, tags/moves flat, re-keys release, audits, future auto-match.")
@@ -179,9 +181,10 @@ def test_new_title_and_removal():
         assert "Custom Braces Series" in tracked, tracked
         assert tracked["Custom Braces Series"]["calibre_series_id"] is None, tracked["Custom Braces Series"]
         aliases = ctx.db.get_series_alias_overrides()
-        assert aliases and aliases[0]["target_name"] == "Custom Braces Series", aliases
-        deleted = ctx.client.delete(f"/api/maintenance/series-aliases/{aliases[0]['id']}")
-        assert deleted.status_code == 200, deleted.text
+        assert aliases and all(item["target_name"] == "Custom Braces Series" for item in aliases), aliases
+        for alias in aliases:
+            deleted = ctx.client.delete(f"/api/maintenance/series-aliases/{alias['id']}")
+            assert deleted.status_code == 200, deleted.text
         assert ctx.db.get_series_alias_overrides() == []
         print("    [PASSED] new typed series created/routed; override listed and removable via endpoint.")
     finally:

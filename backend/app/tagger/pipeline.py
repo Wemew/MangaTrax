@@ -93,6 +93,11 @@ def resolve_series_template(series_name: str, series_templates: Any) -> Optional
     if series_name:
         candidates.append(series_name)
     try:
+        from app.parser import series_name_candidates
+        candidates.extend(series_name_candidates(series_name or ""))
+    except Exception:
+        pass
+    try:
         candidates.extend(split_series_candidate_parts(series_name or ""))
     except Exception:
         pass

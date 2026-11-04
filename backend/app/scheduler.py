@@ -700,12 +700,19 @@ class MangaScheduler:
         # (0) Explicit user alias override from a manual Awaiting-Calibre match
         #     (task-42).  This wins over AniList/Calibre identity resolution.
         try:
-            from app.parser import clean_series_for_matching
+            from app.parser import clean_series_for_matching, series_name_candidates
             override = self.db.get_series_alias_override(normalize_text(raw))
             if not override:
+                candidate_values = list(series_name_candidates(raw))
                 cleaned_source = clean_series_for_matching(raw)
-                if cleaned_source and normalize_text(cleaned_source) != normalize_text(raw):
-                    override = self.db.get_series_alias_override(normalize_text(cleaned_source))
+                if cleaned_source:
+                    candidate_values.append(cleaned_source)
+                for candidate in candidate_values:
+                    norm = normalize_text(candidate)
+                    if norm and norm != normalize_text(raw):
+                        override = self.db.get_series_alias_override(norm)
+                        if override:
+                            break
         except Exception as exc:  # pragma: no cover - override lookup must not break identity
             logger.debug("Series alias override lookup failed for '%s': %s", raw, exc)
             override = None

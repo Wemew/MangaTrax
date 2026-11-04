@@ -30,7 +30,12 @@ from app.tagger import cbz_tagger, series_audit
 from app.tagger import pipeline as downloads_pipeline
 from app.tagger.cbz_tagger import has_comicinfo
 from app.metadata.mangaupdates import MangaUpdatesService
-from app.parser import clean_series_for_matching, extract_manga_bundle_and_volumes, normalize_text
+from app.parser import (
+    clean_series_for_matching,
+    extract_manga_bundle_and_volumes,
+    normalize_text,
+    series_name_candidates,
+)
 from app import auth as auth_module
 from app import schemas
 from app import security
@@ -1838,6 +1843,14 @@ def _match_awaiting_series(
         raise HTTPException(status_code=400, detail="provide calibre_series_id or new_series_title")
 
     override = db.add_series_alias_override(source, target_name, calibre_id, actor=actor)
+    # Register every parse-shape candidate from this sample so future files with a
+    # different imperfect primary still auto-match (task-43).
+    try:
+        for candidate in series_name_candidates(source):
+            if normalize_text(candidate) and normalize_text(candidate) != normalize_text(source):
+                db.add_series_alias_override(candidate, target_name, calibre_id, actor=actor)
+    except Exception as exc:
+        logger.debug("Could not register candidate alias overrides for '%s': %s", source, exc)
     release_ids: List[int] = []
     source_norms = {normalize_text(source), normalize_text(clean_series_for_matching(source))}
     source_norms.discard("")

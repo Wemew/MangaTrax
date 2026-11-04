@@ -1336,7 +1336,7 @@ def clean_manga_title(raw_title: str) -> str:
     # the series key -- Calibre stores "Solo Leveling".  "Novel" is preserved.
     return strip_trailing_format_word(cleaned)
 
-def extract_manga_bundle_and_volumes(raw_title: str, known_groups: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+def _extract_manga_bundle_and_volumes_impl(raw_title: str, known_groups: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """
     Parses manga titles for series name, bundle ranges (e.g. Vol 01-05), or single volumes.
     Always generates ALL individual volumes in bundle ranges (e.g., 1 to 7 for v1-v7).
@@ -1951,3 +1951,122 @@ def parse_calibre_volumes_and_series(
             detected_series = clean_name
 
     return detected_series, vols
+
+
+_RECOVERY_BRACKET_RE = re.compile(r"\[([^\]]+)\]")
+_RECOVERY_BRACE_RE = re.compile(r"\{([^}]*)\}")
+_TRAILING_VOLUME_TOKEN_RE = re.compile(
+    r"\s+v(?:ol(?:ume)?s?)?\.?\s*\d+(?:\.\d+)?(?:\s*[-–]\s*\d+(?:\.\d+)?)?\s*$",
+    re.IGNORECASE,
+)
+_VOLUME_ONLY_RE = re.compile(r"^v?(?:ol(?:ume)?s?)?\.?\s*\d+(?:\.\d+)?(?:\s*[-–]\s*\d+(?:\.\d+)?)?$", re.IGNORECASE)
+
+
+def _clean_series_display(value: str) -> str:
+    text = _RECOVERY_BRACE_RE.sub(" ", str(value or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.strip("_").strip()
+    previous = None
+    while previous != text:
+        previous = text
+        text = _TRAILING_VOLUME_TOKEN_RE.sub("", text).strip(" -–—:,|./")
+    return text.strip("_").strip()
+
+
+def _fallback_volume_from_raw(raw_title: str) -> List[float]:
+    match = re.search(
+        r"\bv(?:ol(?:ume)?s?)?\.?\s*(\d+(?:\.\d+)?)(?:\s*[-–]\s*(\d+(?:\.\d+)?))?",
+        str(raw_title or ""), re.IGNORECASE,
+    )
+    if not match:
+        return []
+    try:
+        start = float(match.group(1))
+        end = float(match.group(2)) if match.group(2) else start
+    except (TypeError, ValueError):
+        return []
+    if end < start or end - start > 200:
+        end = start
+    values = []
+    cursor = start
+    while cursor <= end + 1e-9:
+        values.append(round(cursor, 4))
+        cursor += 1.0
+    return values
+
+
+def _recover_series_from_result(raw_title: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Post-process imperfect parses (leading bracket names, brace tags, underscores).
+
+    Fallback rule: when the remaining series text is empty or only a volume token
+    (``v12``), use the first ``[...]`` block's content as the series (preserving the
+    bracket form for display).  Standard ``[Group] Series v01`` is unchanged because
+    a real series name remains after the leading bracket block.
+    """
+    recovered = dict(result or {})
+    raw = str(raw_title or "")
+    series = _clean_series_display(recovered.get("series_name") or "")
+    brackets = [match.strip() for match in _RECOVERY_BRACKET_RE.findall(raw) if match.strip()]
+    bracket_series = f"[{brackets[0]}]" if brackets else ""
+    used_bracket_fallback = False
+    if not series or _VOLUME_ONLY_RE.fullmatch(series) or not re.search(r"[A-Za-z]{2,}", series):
+        if bracket_series:
+            series = bracket_series
+            used_bracket_fallback = True
+    recovered["series_name"] = series
+    # Only recover a volume when we also had to recover the series from a bracket
+    # block (e.g. "[X] v12").  Otherwise leave empty volumes alone (complete-series
+    # releases deliberately keep volumes=[]).
+    if used_bracket_fallback and not recovered.get("volumes") and not recovered.get("is_bundle"):
+        fallback_volumes = _fallback_volume_from_raw(raw)
+        if fallback_volumes:
+            recovered["volumes"] = fallback_volumes
+            recovered["volume_start"] = fallback_volumes[0]
+            recovered["volume_end"] = fallback_volumes[-1]
+            if len(fallback_volumes) > 1:
+                recovered["is_bundle"] = True
+    return recovered
+
+
+def extract_manga_bundle_and_volumes(
+    raw_title: str, known_groups: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]:
+    """Parse a release title; recovers bracket-name/tag/underscore parse shapes."""
+    result = _extract_manga_bundle_and_volumes_impl(raw_title, known_groups=known_groups)
+    return _recover_series_from_result(raw_title, result)
+
+
+def series_name_candidates(raw_title_or_filename: str) -> List[str]:
+    """Plausible series spellings for matching (bracket/underscore/cleaned variants)."""
+    raw = str(raw_title_or_filename or "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = extract_manga_bundle_and_volumes(raw)
+        primary = str(parsed.get("series_name") or "").strip()
+    except Exception:
+        primary = ""
+    brackets = [match.strip() for match in _RECOVERY_BRACKET_RE.findall(raw) if match.strip()]
+    values: List[str] = []
+    if primary:
+        values.append(primary)
+    if brackets:
+        values.append(f"[{brackets[0]}]")
+        values.append(brackets[0])
+    if primary:
+        values.append(_clean_series_display(primary))
+        values.append(primary.strip("_").strip())
+    try:
+        values.append(clean_series_for_matching(primary or raw))
+    except Exception:
+        pass
+    seen = set()
+    candidates: List[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        norm = normalize_text(text)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        candidates.append(text)
+    return candidates
