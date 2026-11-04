@@ -553,6 +553,45 @@ def extract_publisher(raw_title: str) -> Optional[str]:
     return None
 
 
+_BRACE_TAG_RE = re.compile(r"\{[^{}]*\}")
+_TRAILING_AS_RANGE_RE = re.compile(
+    r"\s+(?:\d+(?:\.\d+)?\s*[-–]\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?)\s+as\s*$",
+    re.IGNORECASE,
+)
+_TRAILING_AS_VOLUME_RE = re.compile(
+    r"\s+as\s+(?:v(?:ol(?:ume)?s?)?\.?\s*)?\d+(?:\.\d+)?"
+    r"(?:\s*[-–]\s*\d+(?:\.\d+)?)?\s*$",
+    re.IGNORECASE,
+)
+_TRAILING_BARE_RANGE_RE = re.compile(
+    r"\s+\d{1,4}(?:\.\d+)?\s*[-–]\s*\d{1,4}(?:\.\d+)?\s*$"
+)
+
+
+def clean_series_for_matching(series_name: str) -> str:
+    """Conservative cleanup for matching: brace release tags + trailing range clauses.
+
+    ``"[OSHI NO KO] {Plus}"`` -> ``"[OSHI NO KO]"``;
+    ``"[OSHI NO KO] 001-130 as v01-13"`` -> ``"[OSHI NO KO]"``.
+    Bracketed/parenthesised parts of real titles are preserved here (template
+    resolution may additionally try a tag-stripped key).
+    """
+    text = str(series_name or "").strip()
+    if not text:
+        return ""
+    cleaned = _BRACE_TAG_RE.sub(" ", text)
+    for _ in range(3):
+        previous = cleaned
+        cleaned = _TRAILING_AS_RANGE_RE.sub("", cleaned)
+        cleaned = _TRAILING_AS_VOLUME_RE.sub("", cleaned)
+        cleaned = _TRAILING_BARE_RANGE_RE.sub("", cleaned)
+        if cleaned == previous:
+            break
+    cleaned = cleaned.replace("{", " ").replace("}", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip(" -–—:,|./")
+
+
 def _volume_result(
     base: Dict[str, Any],
     series_name: str,

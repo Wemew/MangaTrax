@@ -150,8 +150,8 @@ def _state_for(summary: Dict[str, Any], parsed: Dict[str, Any], series_templates
     series = str(parsed.get("series_name") or "").strip()
     if not series:
         return "unmatched"
-    key = normalize_text(series)
-    if key and key in (series_templates or {}):
+    from app.tagger.pipeline import resolve_series_template
+    if resolve_series_template(series, series_templates or {}):
         return "ready"
     return "awaiting_calibre"
 

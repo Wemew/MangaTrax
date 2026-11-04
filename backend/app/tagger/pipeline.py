@@ -19,6 +19,7 @@ legacy nested staging tree.
 import json
 import logging
 import os
+import difflib
 import re
 import shutil
 import time
@@ -62,12 +63,28 @@ def _template_map(series_templates: Any) -> Dict[str, Dict[str, Any]]:
     return mapping
 
 
-def resolve_series_template(series_name: str, series_templates: Any) -> Optional[Dict[str, Any]]:
-    """Resolve a parsed series name against the Calibre templates.
+_TAG_GROUP_RE = re.compile(r"[\[{][^\]}]*[\]}]")
+_FUZZY_MIN_RATIO = 0.86
+_FUZZY_AMBIGUITY_MARGIN = 0.05
 
-    Mirrors the tagger's ``normalize_text`` lookup and additionally tries the
-    dual-title candidate parts (``"A | B"``, ``"A (B)"``) so a release parsed under
-    an alias still finds its Calibre series.
+
+def _clean_template_key(series_name: str) -> str:
+    """Matching-only key: brace tags, paren/bracket tag groups, trailing ranges."""
+    from app.parser import clean_series_for_matching
+
+    cleaned = clean_series_for_matching(series_name)
+    cleaned = _TAG_GROUP_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–—:,|./")
+    return normalize_text(cleaned)
+
+
+def resolve_series_template(series_name: str, series_templates: Any) -> Optional[Dict[str, Any]]:
+    """Resolve a parsed series name against templates + user alias overrides.
+
+    Precedence: exact normalized key (includes task-42 override keys merged by
+    ``get_series_templates_map``) -> cleaned key (brace/paren/bracket tags and
+    trailing range clauses stripped) -> unique fuzzy match (difflib ratio >= 0.86,
+    rejected when two candidates are within 0.05 of each other).
     """
     templates = _template_map(series_templates)
     if not templates:
@@ -83,7 +100,55 @@ def resolve_series_template(series_name: str, series_templates: Any) -> Optional
         key = normalize_text(str(candidate))
         if key and key in templates:
             return templates[key]
-    return None
+    try:
+        from app.parser import clean_series_for_matching
+        preserved_cleaned = normalize_text(clean_series_for_matching(series_name or ""))
+    except Exception:
+        preserved_cleaned = ""
+    if preserved_cleaned and preserved_cleaned in templates:
+        logger.info(
+            "Series template resolved '%s' to tracked series '%s' (cleaned).",
+            series_name, templates[preserved_cleaned]["series_name"],
+        )
+        return templates[preserved_cleaned]
+    cleaned_key = _clean_template_key(series_name or "")
+    if cleaned_key and cleaned_key in templates:
+        logger.info(
+            "Series template resolved '%s' to tracked series '%s' (cleaned).",
+            series_name, templates[cleaned_key]["series_name"],
+        )
+        return templates[cleaned_key]
+    if not cleaned_key:
+        return None
+    def _first_token(value: str) -> str:
+        tokens = re.split(r"[^a-z0-9]+", (value or "").lower())
+        return next((token for token in tokens if token), "")
+
+    source_first = _first_token(cleaned_key)
+    scored = sorted(
+        (
+            (difflib.SequenceMatcher(None, cleaned_key, key).ratio(), key)
+            for key in templates
+            if not source_first or _first_token(key) == source_first
+        ),
+        reverse=True,
+    )
+    if not scored:
+        return None
+    best_ratio, best_key = scored[0]
+    if best_ratio < _FUZZY_MIN_RATIO:
+        return None
+    if len(scored) > 1 and best_ratio - scored[1][0] < _FUZZY_AMBIGUITY_MARGIN:
+        logger.info(
+            "Series template fuzzy match for '%s' is ambiguous (%s vs %s); leaving it awaiting.",
+            series_name, templates[best_key]["series_name"], templates[scored[1][1]]["series_name"],
+        )
+        return None
+    logger.info(
+        "Series template resolved '%s' to tracked series '%s' (fuzzy %.2f).",
+        series_name, templates[best_key]["series_name"], best_ratio,
+    )
+    return templates[best_key]
 
 
 def _volume_display(parsed: Dict[str, Any]) -> str:

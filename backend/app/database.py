@@ -852,6 +852,22 @@ class MangaDatabase:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_series_tracking_name ON series_tracking(name);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_series_tracking_monitored ON series_tracking(is_monitored);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_meta_cache_term ON manga_metadata_cache(search_term);")
+            # task-42: persistent user alias overrides (parsed source -> tracked target).
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS series_alias_overrides (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_norm TEXT NOT NULL UNIQUE,
+                    source_series TEXT NOT NULL,
+                    target_name TEXT NOT NULL,
+                    target_calibre_series_id INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    actor TEXT DEFAULT 'user'
+                );
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_series_alias_overrides_target "
+                "ON series_alias_overrides(target_name);"
+            )
 
             conn.commit()
         finally:
@@ -1163,6 +1179,57 @@ class MangaDatabase:
         except Exception as exc:
             logger.debug("Could not read activity log stats: %s", exc)
         return stats
+
+    # --- Series alias overrides (manual Awaiting-Calibre match, task-42) ---
+    def get_series_alias_overrides(self) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM series_alias_overrides ORDER BY created_at DESC, id DESC;"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_series_alias_override(self, source_norm: str) -> Optional[Dict[str, Any]]:
+        if not source_norm:
+            return None
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM series_alias_overrides WHERE source_norm = ?;", (source_norm,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def add_series_alias_override(
+        self, source_series: str, target_name: str,
+        target_calibre_series_id: Optional[int] = None, actor: str = "user",
+    ) -> Dict[str, Any]:
+        from app.parser import normalize_text
+
+        source = str(source_series or "").strip()
+        target = str(target_name or "").strip()
+        source_norm = normalize_text(source)
+        if not source_norm or not target:
+            raise ValueError("source_series and target_name are required")
+        with self.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO series_alias_overrides "
+                "(source_norm, source_series, target_name, target_calibre_series_id, actor) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(source_norm) DO UPDATE SET "
+                "source_series = excluded.source_series, target_name = excluded.target_name, "
+                "target_calibre_series_id = excluded.target_calibre_series_id, "
+                "created_at = CURRENT_TIMESTAMP, actor = excluded.actor;",
+                (source_norm, source, target, target_calibre_series_id, actor),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM series_alias_overrides WHERE source_norm = ?;", (source_norm,)
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def delete_series_alias_override(self, override_id: int) -> bool:
+        with self.get_connection() as conn:
+            cur = conn.execute("DELETE FROM series_alias_overrides WHERE id = ?;", (int(override_id),))
+            conn.commit()
+            return bool(cur.rowcount)
 
     # --- Settings ---
     def get_setting(self, key: str, default: str = "") -> str:
@@ -1476,6 +1543,19 @@ class MangaDatabase:
                 "publisher": s.get("publisher", ""),
                 "tags": s.get("tags", "")
             }
+        # task-42: user alias overrides join the template map, so routing, awaiting
+        # scans and inventory all resolve the same source name to the chosen target.
+        try:
+            for override in self.get_series_alias_overrides():
+                target = res.get(normalize_text(override.get("target_name")))
+                if not target:
+                    continue
+                for source in (override.get("source_norm"), override.get("source_series")):
+                    norm = normalize_text(source)
+                    if norm:
+                        res.setdefault(norm, target)
+        except Exception as exc:  # pragma: no cover - overrides must never break templates
+            logger.debug("Could not merge series alias overrides into templates: %s", exc)
         return res
 
     # --- Blacklist ---

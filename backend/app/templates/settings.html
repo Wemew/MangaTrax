@@ -639,6 +639,27 @@
                 </button>
             </div>
 
+            <!-- Manual series alias overrides (task-42) -->
+            <div id="series-alias-card" class="mt-4 bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-2">
+                <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                    <i data-lucide="link" class="w-4 h-4 text-amber-400"></i>
+                    Manual series matches (alias overrides)
+                </h4>
+                <p class="text-[11px] text-slate-400">Persistent mappings created from “Manual match” on the Downloads page. Remove one to restore the previous Awaiting-Calibre behaviour.</p>
+                <div id="series-alias-list" class="divide-y divide-slate-800/60 text-[11px]">
+                    {% if series_alias_overrides %}
+                    {% for alias in series_alias_overrides %}
+                    <div class="py-1.5 flex items-center justify-between gap-2" data-alias-id="{{ alias.id }}">
+                        <span class="font-mono text-slate-300 break-all">{{ alias.source_series }} <span class="text-slate-500">→</span> {{ alias.target_name }}</span>
+                        <button type="button" onclick="removeSeriesAlias({{ alias.id }})" aria-label="Remove alias override {{ alias.source_series|e }}" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-rose-900/40 border border-slate-700 text-rose-300 text-[10px] font-bold">Remove</button>
+                    </div>
+                    {% endfor %}
+                    {% else %}
+                    <p id="series-alias-empty" class="py-2 text-slate-500">No manual matches yet.</p>
+                    {% endif %}
+                </div>
+            </div>
+
             <!-- Series attribution audit & repair (task-40) -->
             <div id="series-attribution-card" class="mt-4 bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
                 <div class="flex flex-wrap items-center justify-between gap-2">
@@ -1101,6 +1122,22 @@ async function clearReleaseCache() {
         if (!res.ok) { showToast(data.detail || 'Clear failed', 'error'); return; }
         showToast(`Cleared ${data.deleted || 0} cached release(s); ${data.skipped_active || 0} active skipped.`, 'success');
         await updateReleaseCacheCount();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
+}
+
+async function removeSeriesAlias(id) {
+    if (!confirm('Remove this manual series match? Future releases will need matching again.')) return;
+    try {
+        const res = await fetch('/api/maintenance/series-aliases/' + id, { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Remove failed', 'error'); return; }
+        const row = document.querySelector(`[data-alias-id="${id}"]`);
+        if (row) row.remove();
+        const list = document.getElementById('series-alias-list');
+        if (list && !list.querySelector('[data-alias-id]')) {
+            list.innerHTML = '<p id="series-alias-empty" class="py-2 text-slate-500">No manual matches yet.</p>';
+        }
+        showToast('Manual series match removed', 'success');
     } catch (err) { showToast('Error: ' + err, 'error'); }
 }
 

@@ -1,6 +1,7 @@
 import os
 import json
 import math
+import difflib
 import time
 import threading
 import asyncio
@@ -29,7 +30,7 @@ from app.tagger import cbz_tagger, series_audit
 from app.tagger import pipeline as downloads_pipeline
 from app.tagger.cbz_tagger import has_comicinfo
 from app.metadata.mangaupdates import MangaUpdatesService
-from app.parser import extract_manga_bundle_and_volumes
+from app.parser import clean_series_for_matching, extract_manga_bundle_and_volumes, normalize_text
 from app import auth as auth_module
 from app import schemas
 from app import security
@@ -1427,6 +1428,7 @@ async def settings_view(request: Request):
             "file_logging": _file_logging_info(),
             "activity_logs_health": _activity_logs_health(),
             "release_cache": db.count_cached_releases(),
+            "series_alias_overrides": db.get_series_alias_overrides(),
             "release_series": [
                 {"name": row.get("name")}
                 for row in (db.get_all_series() or [])
@@ -1726,6 +1728,194 @@ async def api_network_speedtest(payload: Optional[Dict[str, Any]] = None):
     ):
         return JSONResponse(result, status_code=400)
     return JSONResponse(result)
+
+
+def _calibre_series_match_items(search: Optional[str] = None, source: Optional[str] = None) -> list:
+    """Calibre series list for the manual-match picker, ranked by similarity."""
+    snapshot = _calibre_series_snapshot()
+    rows = snapshot
+    if not rows:
+        rows = []
+        for item in db.get_all_series() or []:
+            if item.get("calibre_series_id") is None:
+                continue
+            rows.append({
+                "id": item.get("calibre_series_id"),
+                "series_id": item.get("calibre_series_id"),
+                "series_name": item.get("name"),
+                "name": item.get("name"),
+                "authors": item.get("authors") or "",
+                "book_count": item.get("book_count") or 0,
+            })
+    needle = normalize_text(search or "")
+    source_norm = normalize_text(source or "")
+    items = []
+    for row in rows or []:
+        name = str(row.get("series_name") or row.get("name") or "").strip()
+        if not name:
+            continue
+        if needle and needle not in normalize_text(name):
+            continue
+        score = 0.0
+        if source_norm:
+            score = max(
+                difflib.SequenceMatcher(None, source_norm, normalize_text(name)).ratio(),
+                difflib.SequenceMatcher(None, normalize_text(clean_series_for_matching(source or "")), normalize_text(name)).ratio(),
+            )
+        items.append({
+            "id": row.get("id") or row.get("series_id"),
+            "name": name,
+            "authors": row.get("authors") or "",
+            "book_count": row.get("book_count") or 0,
+            "score": round(score, 3),
+        })
+    if source_norm:
+        items.sort(key=lambda item: item["score"], reverse=True)
+    return items
+
+
+@app.get("/api/calibre/series")
+async def api_calibre_series_list(search: Optional[str] = None, source: Optional[str] = None):
+    items = await asyncio.to_thread(_calibre_series_match_items, search, source)
+    return JSONResponse({"status": "success", "series": items, "count": len(items)})
+
+
+def _match_awaiting_series(
+    source_series: str,
+    calibre_series_id: Optional[int],
+    new_series_title: Optional[str],
+    actor: str,
+) -> Dict[str, Any]:
+    from app.parser import clean_series_for_matching, normalize_text
+
+    source = str(source_series or "").strip()
+    if not source:
+        raise HTTPException(status_code=400, detail="source_series is required")
+    calibre_id = None
+    target_name = ""
+    target_meta: Dict[str, Any] = {}
+    if calibre_series_id is not None:
+        try:
+            calibre_id = int(calibre_series_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="calibre_series_id must be an integer")
+        candidates = _calibre_series_snapshot() or []
+        if not candidates:
+            candidates = [
+                {
+                    "id": row.get("calibre_series_id"), "series_name": row.get("name"),
+                    "name": row.get("name"), "authors": row.get("authors") or "",
+                    "book_count": row.get("book_count") or 0,
+                }
+                for row in (db.get_all_series() or []) if row.get("calibre_series_id") is not None
+            ]
+        for candidate in candidates:
+            candidate_id = candidate.get("id") or candidate.get("series_id")
+            if candidate_id is not None and int(candidate_id) == calibre_id:
+                target_name = str(candidate.get("series_name") or candidate.get("name") or "").strip()
+                target_meta = candidate
+                break
+        if not target_name:
+            raise HTTPException(status_code=404, detail="Calibre series id not found")
+        try:
+            db.sync_calibre_series([{
+                "series_name": target_name,
+                "series_id": calibre_id,
+                "book_count": target_meta.get("book_count") or 0,
+                "latest_index": target_meta.get("latest_index") or target_meta.get("book_count") or 0,
+                "authors": target_meta.get("authors") or "",
+                "publisher": target_meta.get("publisher") or "",
+                "tags": target_meta.get("tags") or "",
+            }])
+        except Exception as exc:
+            logger.warning("Could not ensure tracking for Calibre series '%s': %s", target_name, exc)
+    elif new_series_title:
+        target_name = str(new_series_title).strip()
+        if not target_name:
+            raise HTTPException(status_code=400, detail="new_series_title must not be empty")
+        db.track_discovered_series(target_name)
+    else:
+        raise HTTPException(status_code=400, detail="provide calibre_series_id or new_series_title")
+
+    override = db.add_series_alias_override(source, target_name, calibre_id, actor=actor)
+    release_ids: List[int] = []
+    source_norms = {normalize_text(source), normalize_text(clean_series_for_matching(source))}
+    source_norms.discard("")
+    try:
+        with db.get_connection() as conn:
+            rows = conn.execute("SELECT id, series_name FROM releases;").fetchall()
+            for row in rows:
+                if normalize_text(row["series_name"] or "") in source_norms:
+                    release_ids.append(int(row["id"]))
+            if release_ids:
+                placeholders = ",".join("?" for _ in release_ids)
+                conn.execute(
+                    f"UPDATE releases SET series_name = ?, updated_at = CURRENT_TIMESTAMP "
+                    f"WHERE id IN ({placeholders});",
+                    [target_name, *release_ids],
+                )
+                conn.commit()
+    except Exception as exc:
+        logger.warning("Could not re-key releases for manual series match '%s': %s", source, exc)
+    db._invalidate_grouped_cache()
+    moved = 0
+    try:
+        route_result = downloads_pipeline.process_downloads_to_staging(
+            scheduler.get_downloads_dir(create=False),
+            _staging_dir_setting(),
+            db.get_series_templates_map(),
+            db,
+            actor=actor,
+        )
+        moved = int(route_result.get("tagged_and_moved") or 0)
+    except Exception as exc:
+        logger.warning("Routing after manual series match failed for '%s': %s", source, exc)
+    db.log_activity(
+        "SERIES_MANUALLY_MATCHED",
+        f"Matched awaiting series '{source}' to '{target_name}'",
+        json.dumps({
+            "source": source, "target": target_name,
+            "calibre_series_id": calibre_id, "release_ids": release_ids,
+            "moved_files": moved,
+        }),
+        actor=actor,
+    )
+    return {
+        "status": "success",
+        "target": {"name": target_name, "calibre_series_id": calibre_id},
+        "source_series": source,
+        "override": override,
+        "retagged_files": moved,
+        "moved_files": moved,
+        "release_ids": release_ids,
+    }
+
+
+@app.post("/api/downloads/awaiting-series/match")
+async def api_match_awaiting_series(payload: Optional[Dict[str, Any]] = None):
+    body = payload or {}
+    result = await asyncio.to_thread(
+        _match_awaiting_series,
+        str(body.get("source_series") or ""),
+        body.get("calibre_series_id"),
+        str(body.get("new_series_title") or "").strip() or None,
+        auth_module.get_current_actor(),
+    )
+    return JSONResponse(result)
+
+
+@app.get("/api/maintenance/series-aliases")
+async def api_series_aliases():
+    return JSONResponse({"status": "success", "aliases": db.get_series_alias_overrides()})
+
+
+@app.delete("/api/maintenance/series-aliases/{override_id}")
+async def api_delete_series_alias(override_id: int):
+    deleted = db.delete_series_alias_override(override_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Series alias override not found")
+    db._invalidate_grouped_cache()
+    return JSONResponse({"status": "success", "deleted": 1})
 
 
 @app.get("/api/maintenance/releases-cache")

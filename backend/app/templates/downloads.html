@@ -329,6 +329,8 @@
                         <td class="py-3 px-4 text-right">
                             {% if e.state == 'ready' %}
                             <button type="button" onclick="tagMoveNow()" class="px-2 py-1 rounded bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-[10px] font-bold" title="Tag and move this entry to staging">Tag & move now</button>
+                            {% elif e.state == 'awaiting_calibre' and e.series_name %}
+                            <button type="button" data-series="{{ e.series_name|e }}" onclick="openManualMatch(this.dataset.series)" aria-label="Manual match {{ e.series_name|e }}" class="px-2 py-1 rounded bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Manual match</button>
                             {% else %}<span class="text-[10px] text-slate-600">-</span>{% endif %}
                         </td>
                     </tr>
@@ -778,7 +780,7 @@ function renderInventory(inventory, lastScannedAt) {
                 `<td class="py-3 px-4 text-slate-300">${series}</td>` +
                 `<td class="py-3 px-4">${_inventoryStateHtml(e)}</td>` +
                 `<td class="py-3 px-4 text-slate-400 max-w-xs truncate">${release}</td>` +
-                `<td class="py-3 px-4 text-right">${e.state === 'ready' ? '<button onclick="tagMoveNow()" class="px-2 py-1 rounded bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-[10px] font-bold">Tag & move now</button>' : '<span class="text-[10px] text-slate-600">-</span>'}</td>`;
+                `<td class="py-3 px-4 text-right">${e.state === 'ready' ? '<button onclick="tagMoveNow()" class="px-2 py-1 rounded bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-[10px] font-bold">Tag & move now</button>' : (e.state === 'awaiting_calibre' && e.series_name ? `<button data-series="${escapeHtml(e.series_name)}" onclick="openManualMatch(this.dataset.series)" class="px-2 py-1 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Manual match</button>` : '<span class="text-[10px] text-slate-600">-</span>')}</td>`;
         }
         const seen = new Set(entries.map(e => e.relative || e.name || ''));
         for (const row of Array.from(tbody.querySelectorAll('tr[data-relative]'))) {
@@ -791,6 +793,107 @@ function renderInventory(inventory, lastScannedAt) {
     if (label && lastScannedAt) {
         const seconds = Math.max(0, Math.round((Date.now() - Date.parse(lastScannedAt)) / 1000));
         label.textContent = `Last scanned ${seconds}s ago`;
+    }
+}
+
+let _manualMatchSource = null;
+let _manualMatchItems = [];
+let _manualMatchSelected = null;
+
+function openManualMatch(source) {
+    _manualMatchSource = source;
+    _manualMatchItems = [];
+    _manualMatchSelected = null;
+    const modal = document.getElementById('manual-match-modal');
+    if (!modal) return;
+    document.getElementById('manual-match-title').textContent = `Match '${source}' to a series`;
+    document.getElementById('manual-match-search').value = '';
+    document.getElementById('manual-match-new-title').value = '';
+    document.getElementById('manual-match-error').classList.add('hidden');
+    document.getElementById('manual-match-list').innerHTML = '<p class="p-4 text-center text-slate-500 text-[11px]">Loading Calibre series...</p>';
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    loadManualMatchSuggestions('');
+}
+
+function closeManualMatch() {
+    const modal = document.getElementById('manual-match-modal');
+    if (!modal) return;
+    modal.classList.add('hidden');
+    modal.classList.remove('flex');
+}
+
+async function loadManualMatchSuggestions(search) {
+    const list = document.getElementById('manual-match-list');
+    try {
+        const params = new URLSearchParams();
+        if (search) params.set('search', search);
+        if (_manualMatchSource) params.set('source', _manualMatchSource);
+        const res = await fetch('/api/calibre/series?' + params.toString());
+        const data = await res.json();
+        if (!res.ok) { list.innerHTML = `<p class="p-4 text-center text-rose-300 text-[11px]">${escapeHtml(data.detail || 'Could not load Calibre series')}</p>`; return; }
+        _manualMatchItems = data.series || [];
+        _manualMatchSelected = _manualMatchItems.length ? _manualMatchItems[0].id : null;
+        renderManualMatchList();
+    } catch (err) {
+        list.innerHTML = `<p class="p-4 text-center text-rose-300 text-[11px]">Error: ${escapeHtml(String(err))}</p>`;
+    }
+}
+
+function searchManualMatch() {
+    const search = document.getElementById('manual-match-search').value.trim();
+    loadManualMatchSuggestions(search);
+}
+
+function renderManualMatchList() {
+    const list = document.getElementById('manual-match-list');
+    if (!_manualMatchItems.length) {
+        list.innerHTML = '<p class="p-4 text-center text-slate-500 text-[11px]">No Calibre series found. Create a new title below.</p>';
+        return;
+    }
+    list.innerHTML = _manualMatchItems.map(function (item) {
+        const selected = item.id === _manualMatchSelected;
+        return `<button type="button" onclick="selectManualMatch(${JSON.stringify(item.id)})" class="w-full text-left px-3 py-2 ${selected ? 'bg-amber-500/15 border-l-2 border-amber-400' : 'hover:bg-slate-800/60'}">
+            <span class="block text-xs font-semibold text-white">${escapeHtml(item.name)}</span>
+            <span class="block text-[10px] text-slate-400">${escapeHtml(item.authors || 'unknown author')} · ${item.book_count || 0} book(s)${item.score ? ` · ${(item.score * 100).toFixed(0)}% match` : ''}</span>
+        </button>`;
+    }).join('');
+}
+
+function selectManualMatch(id) {
+    _manualMatchSelected = id;
+    renderManualMatchList();
+}
+
+async function submitManualMatch() {
+    const newTitle = document.getElementById('manual-match-new-title').value.trim();
+    const errorEl = document.getElementById('manual-match-error');
+    const submit = document.getElementById('manual-match-submit');
+    const body = { source_series: _manualMatchSource };
+    if (newTitle) body.new_series_title = newTitle;
+    else if (_manualMatchSelected !== null) body.calibre_series_id = _manualMatchSelected;
+    else { errorEl.textContent = 'Pick a series or enter a new title.'; errorEl.classList.remove('hidden'); return; }
+    submit.disabled = true;
+    try {
+        const res = await fetch('/api/downloads/awaiting-series/match', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if (!res.ok) { errorEl.textContent = data.detail || 'Match failed'; errorEl.classList.remove('hidden'); return; }
+        closeManualMatch();
+        showToast(`Matched to '${data.target.name}'; ${data.moved_files || 0} file(s) moved, ${(data.release_ids || []).length} release(s) re-keyed.`, 'success');
+        document.querySelectorAll('[data-series]').forEach(function (button) {
+            if (button.dataset.series === _manualMatchSource) {
+                const li = button.closest('li');
+                if (li) li.remove(); else button.remove();
+            }
+        });
+        await refreshDownloadsNow();
+    } catch (err) {
+        errorEl.textContent = 'Error: ' + err;
+        errorEl.classList.remove('hidden');
+    } finally {
+        submit.disabled = false;
     }
 }
 
@@ -1070,5 +1173,27 @@ async function saveManualTag() {
         showToast('Error: ' + err, 'error');
     }
 }
+
+<!-- Manual series match modal (task-42) -->
+<div id="manual-match-modal" class="hidden fixed inset-0 z-50 bg-black/70 items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="manual-match-title">
+    <div class="bg-darkcard border border-slate-700 rounded-2xl shadow-2xl w-full max-w-xl p-5 space-y-3">
+        <div class="flex items-start justify-between gap-3">
+            <h3 id="manual-match-title" class="text-sm font-bold text-white">Match to a series</h3>
+            <button type="button" onclick="closeManualMatch()" aria-label="Close manual match" class="text-slate-400 hover:text-white text-lg leading-none">&times;</button>
+        </div>
+        <p class="text-[11px] text-slate-400">Pick a Calibre series or create a new tracked series. The mapping is remembered so future releases match automatically.</p>
+        <input type="text" id="manual-match-search" oninput="searchManualMatch()" placeholder="Search Calibre series..." aria-label="Search Calibre series" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+        <div id="manual-match-list" class="max-h-64 overflow-y-auto divide-y divide-slate-800/60 rounded-xl border border-slate-800" aria-live="polite"></div>
+        <div>
+            <label for="manual-match-new-title" class="block text-[11px] font-semibold text-slate-300 mb-1">or create a new series title (not in Calibre)</label>
+            <input type="text" id="manual-match-new-title" placeholder="e.g. [Oshi No Ko]" aria-label="New series title" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+        </div>
+        <div id="manual-match-error" class="hidden text-[11px] text-rose-300"></div>
+        <div class="flex items-center justify-end gap-2 pt-1">
+            <button type="button" onclick="closeManualMatch()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Cancel</button>
+            <button type="button" onclick="submitManualMatch()" id="manual-match-submit" class="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold">Apply match</button>
+        </div>
+    </div>
+</div>
 </script>
 {% endblock %}

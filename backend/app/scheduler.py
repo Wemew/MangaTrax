@@ -647,6 +647,13 @@ class MangaScheduler:
         canonical = (meta.get("canonical_title") or "").strip() if authoritative else ""
         romaji = (meta.get("romaji_title") or "").strip()
         aliases = aliases or [raw]
+        try:
+            from app.parser import clean_series_for_matching
+            cleaned_alias = clean_series_for_matching(raw)
+            if cleaned_alias and normalize_text(cleaned_alias) not in {normalize_text(v) for v in aliases}:
+                aliases.append(cleaned_alias)
+        except Exception:
+            pass
 
         tracked_rows = self.db.get_all_series()
         calibre_tracked: Dict[str, str] = {}  # normalized -> tracked name (Calibre-origin)
@@ -689,6 +696,21 @@ class MangaScheduler:
                 "anilist_id": anilist_id,
                 "calibre_match": None,
             }
+
+        # (0) Explicit user alias override from a manual Awaiting-Calibre match
+        #     (task-42).  This wins over AniList/Calibre identity resolution.
+        try:
+            from app.parser import clean_series_for_matching
+            override = self.db.get_series_alias_override(normalize_text(raw))
+            if not override:
+                cleaned_source = clean_series_for_matching(raw)
+                if cleaned_source and normalize_text(cleaned_source) != normalize_text(raw):
+                    override = self.db.get_series_alias_override(normalize_text(cleaned_source))
+        except Exception as exc:  # pragma: no cover - override lookup must not break identity
+            logger.debug("Series alias override lookup failed for '%s': %s", raw, exc)
+            override = None
+        if override and override.get("target_name"):
+            return _make(override["target_name"], "user_alias")
 
         # (1) Calibre-tracked name: only the release entry's OWN aliases may match.
         for candidate in aliases:
