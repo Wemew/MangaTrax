@@ -22,7 +22,7 @@ from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
-from app import background_tasks, downloads_inventory, network_diagnostics, storage_health
+from app import background_tasks, downloads_inventory, network_diagnostics, staging_duplicates, storage_health
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
 from app.downloader.base import DownloaderError, parse_queued_handle_id
 from app.downloader.torbox import TorboxDownloader
@@ -2724,6 +2724,52 @@ def _run_staging_cbz_audit() -> Dict[str, Any]:
     return series_audit.audit_staging_cbz_files(
         db, _staging_dir_setting(), calibre_series=_calibre_series_snapshot()
     )
+
+
+def _staging_calibre_snapshot():
+    snapshot = _calibre_series_snapshot()
+    if snapshot is None:
+        try:
+            snapshot = db.get_all_series()
+        except Exception:
+            snapshot = []
+    return snapshot or []
+
+
+@app.get("/api/downloads/staging-duplicates")
+async def api_staging_duplicates():
+    """Read-only audit: staging copies whose series+volumes are already in Calibre."""
+    result = await asyncio.to_thread(
+        staging_duplicates.audit_staging_duplicates,
+        db, _staging_dir_setting(), _staging_calibre_snapshot(),
+    )
+    return JSONResponse({**result, "staging_dir": _staging_dir_setting()})
+
+
+@app.post("/api/downloads/staging-duplicates/purge")
+async def api_staging_duplicates_purge(payload: Optional[Dict[str, Any]] = None):
+    body = payload or {}
+    if body.get("confirm") is not True:
+        raise HTTPException(status_code=400, detail="confirm must be true to purge staging duplicates")
+    filenames = body.get("filenames")
+    all_files = body.get("all") is True
+    if not all_files:
+        if not isinstance(filenames, list) or not filenames:
+            raise HTTPException(status_code=400, detail="filenames must be a non-empty list (or all=true)")
+    actor = auth_module.get_current_actor()
+    calibre = _staging_calibre_snapshot()
+
+    def _worker(reporter):
+        return staging_duplicates.purge_staging_duplicates(
+            db, _staging_dir_setting(), filenames=filenames, all_files=all_files,
+            confirm=True, report=reporter.report, calibre_series=calibre,
+        )
+
+    info = background_tasks.run_in_background(
+        db, "downloads:staging-purge", "Purge staging duplicates", _worker,
+        actor=actor, scope="staging",
+    )
+    return JSONResponse({"status": "started", **info})
 
 
 @app.get("/api/tagger/audit")

@@ -427,6 +427,36 @@
         </div>
     </div>
 
+    <!-- Staging cleanup: files already present in Calibre (task-55). Audit before purge. -->
+    <div class="space-y-3 bg-darkcard border border-slate-800 rounded-2xl p-4">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+                <h2 class="text-lg font-bold text-white tracking-tight flex items-center gap-2">
+                    <i data-lucide="copy-slash" class="w-5 h-5 text-rose-400"></i>
+                    Staging cleanup / duplicates
+                </h2>
+                <p class="text-xs text-slate-400 mt-1">Staging copies whose series and every volume are already in Calibre. Audit is read-only; purge deletes only verified staging copies and keeps the release as In Calibre.</p>
+            </div>
+            <div class="flex items-center gap-2">
+                <button type="button" onclick="auditStagingDuplicates()" data-task-kind="downloads:staging-purge" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Audit staging duplicates</button>
+                <button type="button" onclick="purgeSelectedDuplicates()" id="btn-purge-selected-duplicates" class="hidden px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold">Purge selected (0)</button>
+                <button type="button" onclick="purgeAllDuplicates()" id="btn-purge-all-duplicates" class="hidden px-3 py-1.5 rounded-lg bg-rose-900/60 border border-rose-500/40 text-rose-200 text-xs font-semibold">Purge all found</button>
+            </div>
+        </div>
+        <div id="staging-duplicates-confirm" class="hidden bg-rose-500/10 border border-rose-500/40 rounded-xl p-3 text-xs text-rose-200"></div>
+        <div id="staging-duplicates-state" class="text-xs text-slate-400">Not audited yet — click “Audit staging duplicates”.</div>
+        <div id="staging-duplicates-wrap" class="hidden overflow-x-auto">
+            <table class="w-full text-xs">
+                <thead><tr class="text-slate-400 text-left">
+                    <th class="py-2 pr-2"><input type="checkbox" id="staging-dup-select-all" onchange="toggleAllDuplicates(this)" aria-label="Select all duplicates"></th>
+                    <th class="py-2 pr-2">File</th><th class="py-2 pr-2">Series / volume(s)</th>
+                    <th class="py-2 pr-2">Size</th><th class="py-2 pr-2">Calibre match</th><th class="py-2">Linked release</th>
+                </tr></thead>
+                <tbody id="staging-duplicates-body"></tbody>
+            </table>
+        </div>
+    </div>
+
     <!-- CBZ Series Tag Audit: the old rename bug wrote AniList display titles into
          ComicInfo.xml <Series>, which breaks Calibre matching.  The audit is
          read-only; only explicitly selected files are rewritten. -->
@@ -1287,6 +1317,130 @@ async function saveManualTag() {
     } catch (err) {
         showToast('Error: ' + err, 'error');
     }
+}
+
+// --- Staging duplicates audit/purge (task-55) ---
+let _stagingDuplicates = [];
+let _stagingDupPending = null;
+let _stagingDupLastAudit = null;
+function stagingDupEsc(value) {
+    const div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+}
+async function auditStagingDuplicates() {
+    const state = document.getElementById('staging-duplicates-state');
+    if (state) state.textContent = 'Auditing staging (read-only)...';
+    try {
+        const res = await fetch('/api/downloads/staging-duplicates');
+        const data = await res.json();
+        if (!res.ok) { if (state) state.textContent = data.detail || 'Audit failed'; return; }
+        _stagingDuplicates = data.files || [];
+        _stagingDupLastAudit = new Date();
+        renderStagingDuplicates();
+    } catch (err) { if (state) state.textContent = 'Audit failed: ' + err; }
+}
+function renderStagingDuplicates() {
+    const state = document.getElementById('staging-duplicates-state');
+    const wrap = document.getElementById('staging-duplicates-wrap');
+    const body = document.getElementById('staging-duplicates-body');
+    const all = _stagingDuplicates.length;
+    if (state) {
+        state.textContent = all
+            ? `${all} duplicate file(s) · ${formatBytes(_stagingDuplicates.reduce((sum, item) => sum + (item.size || 0), 0))} can be purged (last audit ${_stagingDupLastAudit ? _stagingDupLastAudit.toLocaleTimeString() : 'now'}).`
+            : 'No staging files duplicated in Calibre.';
+    }
+    if (wrap) wrap.classList.toggle('hidden', all === 0);
+    if (body) {
+        body.innerHTML = _stagingDuplicates.map(function (item) {
+            return `<tr class="border-t border-slate-800/60">
+                <td class="py-2 pr-2"><input type="checkbox" class="staging-dup-check" data-relative="${stagingDupEsc(item.relative)}" checked onchange="updateDuplicatePurgeButtons()" aria-label="Select ${stagingDupEsc(item.filename)}"></td>
+                <td class="py-2 pr-2 text-slate-200 break-all">${stagingDupEsc(item.filename)}</td>
+                <td class="py-2 pr-2 text-slate-300">${stagingDupEsc(item.series)} · v${(item.volumes || []).join(', ')}</td>
+                <td class="py-2 pr-2 text-slate-400">${formatBytes(item.size || 0)}</td>
+                <td class="py-2 pr-2 text-emerald-300">${stagingDupEsc(item.calibre_series)}</td>
+                <td class="py-2 text-slate-400">${item.release_id ? '#' + item.release_id + ' · ' + stagingDupEsc(item.release_title) : '-'}</td>
+            </tr>`;
+        }).join('');
+    }
+    updateDuplicatePurgeButtons();
+}
+function formatBytes(bytes) {
+    const value = Number(bytes) || 0;
+    if (value < 1024) return value + ' B';
+    if (value < 1048576) return (value / 1024).toFixed(1) + ' KB';
+    if (value < 1073741824) return (value / 1048576).toFixed(1) + ' MB';
+    return (value / 1073741824).toFixed(2) + ' GB';
+}
+function selectedDuplicateFiles() {
+    return Array.from(document.querySelectorAll('.staging-dup-check:checked')).map(function (input) { return input.dataset.relative; });
+}
+function updateDuplicatePurgeButtons() {
+    const selected = selectedDuplicateFiles();
+    const selectedBtn = document.getElementById('btn-purge-selected-duplicates');
+    const allBtn = document.getElementById('btn-purge-all-duplicates');
+    if (selectedBtn) {
+        selectedBtn.classList.toggle('hidden', selected.length === 0);
+        selectedBtn.textContent = `Purge selected (${selected.length})`;
+    }
+    if (allBtn) allBtn.classList.toggle('hidden', _stagingDuplicates.length === 0);
+}
+function toggleAllDuplicates(box) {
+    document.querySelectorAll('.staging-dup-check').forEach(function (input) { input.checked = box.checked; });
+    updateDuplicatePurgeButtons();
+}
+function duplicateSizeFor(selected) {
+    return _stagingDuplicates.filter(function (item) { return selected.includes(item.relative); })
+        .reduce(function (sum, item) { return sum + (item.size || 0); }, 0);
+}
+function showDuplicateConfirm(kind, selected) {
+    _stagingDupPending = { kind: kind, selected: selected };
+    const box = document.getElementById('staging-duplicates-confirm');
+    if (!box) return;
+    box.classList.remove('hidden');
+    const count = kind === 'all' ? _stagingDuplicates.length : selected.length;
+    const size = kind === 'all'
+        ? _stagingDuplicates.reduce(function (sum, item) { return sum + (item.size || 0); }, 0)
+        : duplicateSizeFor(selected);
+    box.innerHTML = `<strong>Confirm purge:</strong> delete ${count} staging file(s) (${formatBytes(size)}) that are already verified in Calibre. The Calibre library and raw downloads are not touched. ` +
+        `<button type="button" onclick="executeDuplicatePurge()" class="ml-2 px-2 py-0.5 rounded bg-rose-600 text-white font-semibold">Yes, purge</button>` +
+        `<button type="button" onclick="cancelDuplicatePurge()" class="ml-1 px-2 py-0.5 rounded bg-slate-800 border border-slate-700">Cancel</button>`;
+}
+function purgeSelectedDuplicates() {
+    const selected = selectedDuplicateFiles();
+    if (selected.length) showDuplicateConfirm('selected', selected);
+}
+function purgeAllDuplicates() {
+    if (_stagingDuplicates.length) showDuplicateConfirm('all', []);
+}
+function cancelDuplicatePurge() {
+    _stagingDupPending = null;
+    const box = document.getElementById('staging-duplicates-confirm');
+    if (box) box.classList.add('hidden');
+}
+async function executeDuplicatePurge() {
+    const pending = _stagingDupPending;
+    if (!pending) return;
+    cancelDuplicatePurge();
+    const body = pending.kind === 'all' ? { all: true, confirm: true } : { filenames: pending.selected, confirm: true };
+    try {
+        const res = await fetch('/api/downloads/staging-duplicates/purge', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok) { showToast(data.detail || 'Purge failed', 'error'); return; }
+        showToast('Staging duplicate purge started', 'success');
+        if (window.MangaTasks && data.task_id) MangaTasks.watch(data.task_id, function (task) {
+            if (task.status === 'success') {
+                const result = task.result || {};
+                showToast(`Purged ${result.purged || 0} staging duplicate(s) · ${formatBytes(result.bytes_freed || 0)} freed`, 'success');
+            } else {
+                showToast(task.error || 'Staging purge failed', 'error');
+            }
+            auditStagingDuplicates();
+            MangaTasks.poll();
+        });
+    } catch (err) { showToast('Error: ' + err, 'error'); }
 }
 </script>
 
