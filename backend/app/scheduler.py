@@ -517,6 +517,95 @@ class MangaScheduler:
         )
         return count
 
+    @staticmethod
+    def _metadata_alias_values(meta: Dict[str, Any], raw: str) -> List[str]:
+        """Aliases belonging to ONE AniList entry (raw + canonical/romaji/synonyms)."""
+        from app.parser import normalize_text
+
+        values: List[str] = [str(raw or "").strip()]
+        for key in ("canonical_title", "english_title", "romaji_title"):
+            value = str(meta.get(key) or "").strip()
+            if value:
+                values.append(value)
+        for synonym in meta.get("synonyms") or []:
+            value = str(synonym or "").strip()
+            if value:
+                values.append(value)
+        seen = set()
+        aliases: List[str] = []
+        for value in values:
+            norm = normalize_text(value)
+            if norm and norm not in seen:
+                seen.add(norm)
+                aliases.append(value)
+        return aliases
+
+    def _identity_entry_aliases(
+        self, raw: str, variants: List[str], meta: Dict[str, Any],
+    ) -> tuple:
+        """Resolve the release's OWN AniList entry and its genuine aliases only.
+
+        Returns ``(entry_meta, alias_values, anilist_id)``.  A metadata entry that
+        was resolved via a delimiter/parent fallback (matched_term differs from raw
+        and raw is not an alias of that entry) is rejected: a ``Parent: Spinoff``
+        title must never inherit the parent's identity.  Delimiter parts are used
+        only when they resolve to the SAME AniList id (e.g. ``English | Romaji``).
+        """
+        from app.parser import normalize_text
+
+        raw = str(raw or "").strip()
+        authoritative = bool(meta) and is_authoritative_metadata(meta)
+        if authoritative:
+            aliases = self._metadata_alias_values(meta, raw)
+            alias_norms = {normalize_text(value) for value in aliases}
+            raw_norm = normalize_text(raw)
+            matched_norm = normalize_text(meta.get("matched_term") or "")
+            entry_id = meta.get("anilist_id")
+            direct_entry = (
+                not matched_norm
+                or matched_norm == raw_norm
+                or raw_norm in alias_norms
+            )
+            if direct_entry:
+                for variant in variants:
+                    norm = normalize_text(variant)
+                    if norm and norm in alias_norms and variant not in aliases:
+                        aliases.append(variant)
+                return meta, aliases, entry_id
+
+        # The resolver fell back to a delimiter part (or returned no authoritative
+        # entry for the combined spelling).  Only accept a part when the parts that DO
+        # resolve authoritatively agree on ONE AniList entry.
+        raw_norm = normalize_text(raw)
+        resolved: Dict[Any, Dict[str, Any]] = {}
+        for part in variants:
+            norm = normalize_text(part)
+            if not norm or norm == raw_norm:
+                continue
+            try:
+                part_meta = self.anilist.resolve_manga_series(part)
+            except Exception:
+                continue
+            if not part_meta or not is_authoritative_metadata(part_meta):
+                continue
+            part_aliases = self._metadata_alias_values(part_meta, part)
+            part_alias_norms = {normalize_text(value) for value in part_aliases}
+            part_matched = normalize_text(part_meta.get("matched_term") or "")
+            if part_matched and part_matched != norm and norm not in part_alias_norms:
+                continue  # this part's lookup also fell back elsewhere
+            key = part_meta.get("anilist_id") or f"term:{normalize_text(part_meta.get('matched_term') or part)}"
+            resolved.setdefault(key, part_meta)
+        if len(resolved) != 1:
+            return {}, [raw] if raw else [], None
+        entry = next(iter(resolved.values()))
+        aliases = self._metadata_alias_values(entry, raw)
+        alias_norms = {normalize_text(value) for value in aliases}
+        for part in variants:
+            norm = normalize_text(part)
+            if norm and norm in alias_norms and part not in aliases:
+                aliases.append(part)
+        return entry, aliases, entry.get("anilist_id")
+
     def resolve_series_identity(
         self,
         raw_series_name: str,
@@ -542,7 +631,6 @@ class MangaScheduler:
         if matcher is None:
             _, matcher = self._build_calibre_context()
         calibre_series = list(getattr(matcher, "calibre_series", []) or [])
-        variants = self._name_variants(raw)
 
         # Metadata is resolved up-front (and cached) exactly as before: it still
         # drives covers / volume counts / display, it just never drives the key.
@@ -553,9 +641,12 @@ class MangaScheduler:
                 logger.debug("Metadata lookup failed for '%s': %s", raw, exc)
                 meta = {}
         meta = meta or {}
+        variants = self._name_variants(raw)
+        meta, aliases, anilist_id = self._identity_entry_aliases(raw, variants, meta)
         authoritative = is_authoritative_metadata(meta)
         canonical = (meta.get("canonical_title") or "").strip() if authoritative else ""
         romaji = (meta.get("romaji_title") or "").strip()
+        aliases = aliases or [raw]
 
         tracked_rows = self.db.get_all_series()
         calibre_tracked: Dict[str, str] = {}  # normalized -> tracked name (Calibre-origin)
@@ -583,7 +674,7 @@ class MangaScheduler:
             display = display_title_from_meta(stable, meta if authoritative else None) or stable
             alt_names: List[str] = []
             seen = {normalize_text(stable)}
-            for value in list(variants) + ([canonical] if canonical else []) + ([romaji] if romaji else []):
+            for value in list(aliases) + ([canonical] if canonical else []) + ([romaji] if romaji else []):
                 norm = normalize_text(value)
                 if norm and norm not in seen:
                     seen.add(norm)
@@ -595,30 +686,31 @@ class MangaScheduler:
                 "source": source,
                 "meta": meta,
                 "alt_names": alt_names,
+                "anilist_id": anilist_id,
                 "calibre_match": None,
             }
 
-        # (1) Calibre-tracked name: the parsed name directly names a Calibre series.
-        for candidate in variants:
+        # (1) Calibre-tracked name: only the release entry's OWN aliases may match.
+        for candidate in aliases:
             hit = _match_calibre(candidate)
             if hit:
                 return _make(hit, "calibre")
 
         # (1b) Calibre-origin tracked rows: covers deployments where the scanner is
         #      temporarily unavailable but the library was already synced to the DB.
-        for candidate in variants:
+        for candidate in aliases:
             hit = calibre_tracked.get(normalize_text(candidate))
             if hit:
                 return _make(hit, "calibre_db")
 
         # (2) user-typed tracked name.
-        for candidate in variants:
+        for candidate in aliases:
             hit = typed_tracked.get(normalize_text(candidate))
             if hit:
                 return _make(hit, "typed")
 
         # (3) AniList canonical English, then (4) AniList romaji, as lookup bridges.
-        variant_norms = {normalize_text(v) for v in variants}
+        variant_norms = {normalize_text(v) for v in aliases}
         for bridge_source, bridge in (("anilist_canonical", canonical), ("anilist_romaji", romaji)):
             if not bridge or normalize_text(bridge) in variant_norms:
                 continue  # same spelling as the raw name: already tried above
@@ -635,7 +727,7 @@ class MangaScheduler:
         # (5) Reverse alias resolution: the raw name may itself be an AniList alias
         #     of an already tracked series (romaji feed title, English tracker).
         alias_claims = self.db.get_authoritative_alias_index()
-        for candidate in variants:
+        for candidate in aliases:
             claims = alias_claims.get(normalize_text(candidate)) or set()
             if not claims:
                 continue
@@ -652,6 +744,125 @@ class MangaScheduler:
 
         # (6) Unknown series: the parsed name IS the stable key (never the AniList title).
         return _make(raw, "raw")
+
+    def audit_series_attribution(self) -> Dict[str, Any]:
+        """Read-only audit: tracked releases whose own title parses to another series.
+
+        Used by Settings -> Maintenance to repair rows that a previous spinoff/
+        alternate-title bug stamped under the parent.  Suggestions are only offered
+        when the release's own identity is unambiguous; ambiguous multi-part names are
+        reported and never repaired automatically.
+        """
+        matcher = self._series_refresh_matcher()
+        alias_index = self.db.get_authoritative_alias_index()
+        tracked: Dict[str, str] = {}
+        for row in self.db.get_all_series() or []:
+            name = str(row.get("name") or "").strip()
+            norm = normalize_text(name)
+            if norm:
+                tracked.setdefault(norm, name)
+        records: List[Dict[str, Any]] = []
+        with self.db.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, title, series_name, status FROM releases "
+                "WHERE series_name IS NOT NULL AND trim(series_name) != '' "
+                "ORDER BY id ASC;"
+            ).fetchall()
+        for row in rows:
+            current = str(row["series_name"] or "").strip()
+            current_norm = normalize_text(current)
+            if not current_norm or current_norm not in tracked:
+                continue
+            title = str(row["title"] or "").strip()
+            try:
+                parsed = extract_manga_bundle_and_volumes(title)
+                parsed_series = str(parsed.get("series_name") or "").strip()
+            except Exception:
+                parsed_series = ""
+            parsed_norm = normalize_text(parsed_series)
+            if not parsed_norm or parsed_norm == current_norm:
+                continue
+            # A genuine alias of the current tracked series is not a mis-attribution.
+            claims = alias_index.get(parsed_norm) or set()
+            if current_norm in {normalize_text(claim) for claim in claims}:
+                continue
+            try:
+                identity = self.resolve_series_identity(parsed_series, matcher=matcher)
+            except Exception as exc:  # pragma: no cover - audit must never crash
+                logger.debug("Attribution audit identity lookup failed for %r: %s", parsed_series, exc)
+                continue
+            suggested = str(identity.get("stable_name") or "").strip() or parsed_series
+            suggested_norm = normalize_text(suggested)
+            if not suggested_norm or suggested_norm == current_norm:
+                continue
+            if suggested_norm == parsed_norm and suggested_norm in tracked:
+                pass
+            parts = [part for part in split_series_candidate_parts(parsed_series) if normalize_text(part)]
+            ambiguous = len(parts) > 1 and (identity.get("source") == "raw")
+            records.append({
+                "id": int(row["id"]),
+                "title": title,
+                "current_series": current,
+                "suggested_series": suggested,
+                "identity_source": identity.get("source"),
+                "anilist_id": identity.get("anilist_id"),
+                "safe_to_repair": not ambiguous,
+                "status": "ambiguous" if ambiguous else "repairable",
+                "reason": (
+                    "title parses to multiple possible series; not guessed"
+                    if ambiguous else
+                    f"release title parses to '{suggested}', not tracked '{current}'"
+                ),
+            })
+        return {
+            "status": "success",
+            "summary": {
+                "scanned": len(rows),
+                "repairable": sum(1 for item in records if item["safe_to_repair"]),
+                "ambiguous": sum(1 for item in records if not item["safe_to_repair"]),
+            },
+            "files": records,
+        }
+
+    def repair_series_attribution(self, release_ids: List[int], actor: str = "user") -> Dict[str, Any]:
+        """Re-key explicitly selected, provably mis-attributed releases (idempotent)."""
+        audit = self.audit_series_attribution()
+        by_id = {item["id"]: item for item in audit.get("files") or []}
+        repaired = 0
+        skipped = 0
+        results: List[Dict[str, Any]] = []
+        with self.db.get_connection() as conn:
+            for release_id in release_ids:
+                item = by_id.get(int(release_id))
+                if not item or not item.get("safe_to_repair"):
+                    skipped += 1
+                    results.append({"id": release_id, "outcome": "skipped"})
+                    continue
+                conn.execute(
+                    "UPDATE releases SET series_name = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ?;",
+                    (item["suggested_series"], int(release_id)),
+                )
+                repaired += 1
+                results.append({
+                    "id": release_id, "outcome": "repaired",
+                    "current_series": item["current_series"],
+                    "suggested_series": item["suggested_series"],
+                })
+            conn.commit()
+        if repaired:
+            self.db._invalidate_grouped_cache()
+            message = f"Re-keyed {repaired} mis-attributed release(s) to their own series"
+            logger.info(message)
+            self._log_activity(
+                "SERIES_ATTRIBUTION_REPAIRED", message,
+                json.dumps({"repaired": repaired, "skipped": skipped}),
+                actor=actor,
+            )
+        return {
+            "status": "success", "repaired": repaired, "skipped": skipped,
+            "results": results,
+        }
 
     def repair_series_matching_keys(self, actor: Optional[str] = "scheduler") -> int:
         """Run the guarded, idempotent legacy re-key repair (safe on every startup)."""
@@ -2827,6 +3038,7 @@ class MangaScheduler:
         feed_name: str,
         matcher: MangaCalibreMatcher,
         known_series_keys: Optional[Set[str]] = None,
+        target_identity: Optional[Dict[str, Any]] = None,
     ) -> tuple:
         """
         Resolves the STABLE matching key (Calibre name / typed name) while keeping
@@ -2874,6 +3086,39 @@ class MangaScheduler:
         meta = identity.get("meta") or {}
         cover_url = rel.cover_url or meta.get("cover_url") or ""
         alt_names = identity["alt_names"]
+
+        # task-40 spinoff guard: during a targeted parent backfill, never ingest a
+        # release whose own parsed/AniList identity is a different series.  Such rows
+        # are reported as SPINOFF_SKIPPED and never auto-downloaded.
+        if target_identity:
+            parsed_release_series = str(getattr(rel, "series_name", "") or "").strip()
+            parsed_norm = normalize_text(parsed_release_series)
+            stable_norm = normalize_text(series_key)
+            release_anilist_id = identity.get("anilist_id")
+            target_anilist_id = target_identity.get("anilist_id")
+            target_alias_norms = set(target_identity.get("alias_norms") or ())
+            different_entry = bool(
+                release_anilist_id and target_anilist_id and release_anilist_id != target_anilist_id
+            )
+            different_name = bool(
+                parsed_norm and parsed_norm not in target_alias_norms
+                and stable_norm not in target_alias_norms
+            )
+            if different_entry or different_name:
+                self._log_activity(
+                    "SPINOFF_SKIPPED",
+                    f"Skipped spinoff release '{rel.title}' during backfill of "
+                    f"'{target_identity.get('primary_name') or ''}'",
+                    json.dumps({
+                        "title": rel.title,
+                        "parsed_series": parsed_release_series,
+                        "resolved_series": series_key,
+                        "target_series": target_identity.get("primary_name"),
+                        "release_anilist_id": release_anilist_id,
+                        "target_anilist_id": target_anilist_id,
+                    }),
+                )
+                return (False, "SPINOFF_SKIPPED", [], None, series_key)
 
         # Collected batch (year-range title, no volume markers): infer the full set
         # from authoritative metadata only.  Explicit volume markers and complete
@@ -2994,29 +3239,11 @@ class MangaScheduler:
                 candidates.append(base)
             candidates.extend(m_paren)
 
-        # 3. Inspect existing releases in database under this series
-        try:
-            with self.db.get_connection() as conn:
-                cur = conn.cursor()
-                prefix = clean_name[:25].strip()
-                from app.security import like_contains
-                prefix_pattern = like_contains(prefix)
-                cur.execute("""
-                    SELECT title, series_name FROM releases 
-                    WHERE lower(series_name) = lower(?)
-                       OR lower(series_name) LIKE ? ESCAPE '\\'
-                       OR lower(title) LIKE ? ESCAPE '\\'
-                    LIMIT 20;
-                """, (clean_name, prefix_pattern, prefix_pattern))
-                for row in cur.fetchall():
-                    for field in [row["series_name"], row["title"]]:
-                        if not field:
-                            continue
-                        sub_parts = split_series_candidate_parts(field)
-                        if len(sub_parts) > 1:
-                            candidates.extend(sub_parts)
-        except Exception as e:
-            logger.debug(f"Failed to inspect DB releases for dual titles: {e}")
+        # 3. Deliberately DO NOT harvest titles from existing releases: a
+        #    mis-attributed spinoff row stored under this series would otherwise
+        #    become an "alternate title" and feed a self-amplifying backfill loop
+        #    (task-40).  Only the requested name, its delimiter/parenthesis parts
+        #    and the AniList entry's own aliases are searched.
 
         # 4. Check AniList metadata cache or query AniList
         initial_check = list(candidates) if candidates else [clean_name]
@@ -3030,6 +3257,10 @@ class MangaScheduler:
                         candidates.append(canon)
                     if romaji:
                         candidates.append(romaji)
+                    for synonym in meta.get("synonyms") or []:
+                        synonym = str(synonym or "").strip()
+                        if synonym:
+                            candidates.append(synonym)
             except Exception:
                 pass
 
@@ -3409,6 +3640,27 @@ class MangaScheduler:
         # numbered-series key protection both need the known-series set.
         known_series_keys = self._known_series_keys(matcher)
 
+        # task-40: identity context for this refresh target.  Crawled releases are
+        # only accepted when their own parsed name (or AniList entry) belongs to it.
+        try:
+            target_matches = self.resolve_series_identity(clean_name, matcher=matcher)
+        except Exception:
+            target_matches = {"stable_name": clean_name, "alt_names": [], "anilist_id": None}
+        target_alias_norms = set()
+        for value in [clean_name, target_matches.get("stable_name")] + list(detected_titles):
+            norm = normalize_text(value or "")
+            if norm:
+                target_alias_norms.add(norm)
+        for value in target_matches.get("alt_names") or []:
+            norm = normalize_text(value or "")
+            if norm:
+                target_alias_norms.add(norm)
+        target_identity = {
+            "primary_name": clean_name,
+            "alias_norms": target_alias_norms,
+            "anilist_id": target_matches.get("anilist_id"),
+        }
+
         global_auto_download = self.db.get_setting("auto_download", "true").lower() == "true"
         downloads_dir = self.get_downloads_dir()
         qbit = self.get_qbit_client()
@@ -3445,8 +3697,11 @@ class MangaScheduler:
             if self.stop_backfill_requested:
                 break
             is_new, status, missing_vols, rel_id, stable_series = self._process_release(
-                rel, f"Nyaa: {primary_title}", matcher, known_series_keys=known_series_keys
+                rel, f"Nyaa: {primary_title}", matcher, known_series_keys=known_series_keys,
+                target_identity=target_identity,
             )
+            if status == "SPINOFF_SKIPPED":
+                continue
             if status in ("CHAPTER_ONLY", "LIGHT_NOVEL", "JPEGXL"):
                 continue
 

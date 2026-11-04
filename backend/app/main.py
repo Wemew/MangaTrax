@@ -1722,6 +1722,31 @@ async def api_network_speedtest(payload: Optional[Dict[str, Any]] = None):
     return JSONResponse(result)
 
 
+@app.get("/api/maintenance/series-attribution")
+async def api_series_attribution_audit():
+    """Read-only audit of releases stamped under the wrong (spinoff/parent) series."""
+    result = await asyncio.to_thread(scheduler.audit_series_attribution)
+    return JSONResponse(result)
+
+
+@app.post("/api/maintenance/series-attribution-repair")
+async def api_series_attribution_repair(payload: Optional[Dict[str, Any]] = None):
+    body = payload or {}
+    release_ids = body.get("release_ids") or []
+    if not isinstance(release_ids, list):
+        raise HTTPException(status_code=400, detail="release_ids must be a list")
+    cleaned = []
+    for value in release_ids[:200]:
+        try:
+            cleaned.append(int(value))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="release_ids must be integers")
+    result = await asyncio.to_thread(
+        scheduler.repair_series_attribution, cleaned, auth_module.get_current_actor(),
+    )
+    return JSONResponse(result)
+
+
 @app.post("/api/logs/prune")
 async def api_logs_prune():
     """Manually prune activity_logs (retention + max rows) and checkpoint the WAL."""

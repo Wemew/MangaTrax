@@ -159,7 +159,10 @@ class AniListMetadataService:
                 "total_volumes": None,
                 "status": "UNKNOWN",
                 "synopsis": "",
-                "source": "fallback"
+                "source": "fallback",
+                "anilist_id": None,
+                "synonyms": [],
+                "matched_term": str(raw_series_name or ""),
             }
 
         cache_key = cleaned_term.lower()
@@ -228,7 +231,10 @@ class AniListMetadataService:
                 "total_volumes": None,
                 "status": "UNKNOWN",
                 "synopsis": "",
-                "source": "fallback"
+                "source": "fallback",
+                "anilist_id": None,
+                "synonyms": [],
+                "matched_term": str(raw_series_name or ""),
             }
 
         # 4. Save to DB cache if authoritative metadata
@@ -321,6 +327,13 @@ class AniListMetadataService:
                         "canonical_title": canonical,
                         "english_title": canonical,
                         "romaji_title": romaji,
+                        # Identity evidence (task-40): the exact AniList media id and its
+                        # own aliases, plus which search term produced this entry.  A
+                        # parent-prefix match must never lend its aliases/identity to a
+                        # spinoff release.
+                        "anilist_id": media.get("id"),
+                        "synonyms": [str(item).strip() for item in synonyms if str(item or "").strip()],
+                        "matched_term": str(search_term or ""),
                         "cover_url": cover,
                         "total_volumes": volumes,
                         "status": status,

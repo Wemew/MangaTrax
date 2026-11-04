@@ -600,6 +600,40 @@
                 <div id="network-speedtest-result" class="hidden text-[11px] text-slate-300 space-y-1"></div>
                 <p class="text-[10px] text-slate-500">Cloudflare caps a single speed-test request at 90 MB; larger runs are split into sequential rounds per connection. Speed units are MB/s (decimal).</p>
             </div>
+
+            <!-- Series attribution audit & repair (task-40) -->
+            <div id="series-attribution-card" class="mt-4 bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                    <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i data-lucide="git-branch" class="w-4 h-4 text-violet-400"></i>
+                        Spinoff / series attribution
+                    </h4>
+                    <div class="flex items-center gap-2">
+                        <button type="button" onclick="auditSeriesAttribution()" id="btn-audit-attribution" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                            <i data-lucide="scan-search" class="w-3.5 h-3.5"></i> Audit attribution
+                        </button>
+                        <button type="button" onclick="repairSeriesAttribution()" id="btn-repair-attribution" disabled class="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold flex items-center gap-1.5">
+                            <i data-lucide="wrench" class="w-3.5 h-3.5"></i> Repair selected (<span id="attribution-selected-count">0</span>)
+                        </button>
+                    </div>
+                </div>
+                <p class="text-[11px] text-slate-400">
+                    Finds releases stored under a tracked series whose own title parses to a different
+                    series (e.g. a spinoff stamped on its parent). Only unambiguous rows can be repaired;
+                    ambiguous rows are reported and never guessed.
+                </p>
+                <div id="attribution-summary" class="text-[11px] text-slate-400"></div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-[11px]">
+                        <thead class="text-slate-500 uppercase tracking-wider text-[10px]">
+                            <tr><th class="py-2 pr-2"></th><th class="py-2 pr-2">Release</th><th class="py-2 pr-2">Current → suggested</th><th class="py-2">Status</th></tr>
+                        </thead>
+                        <tbody id="attribution-rows" class="divide-y divide-slate-800/60">
+                            <tr><td colspan="4" class="py-4 text-center text-slate-500">Run the audit to check for mis-attributed releases.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
         <!-- Advanced / Dangerous (opt-in: MANGATRAX_DEBUG_ACTIONS=1) -->
@@ -954,6 +988,73 @@ async function pruneActivityNow() {
         const total = (data.deleted_old || 0) + (data.deleted_excess || 0);
         showToast(total ? `Pruned ${total} activity row(s); ${data.remaining} remain` : 'Nothing to prune', total ? 'success' : 'info');
         setTimeout(() => location.reload(), 900);
+    } catch (err) { showToast('Error: ' + err, 'error'); }
+}
+
+let _attributionData = [];
+let _attributionSelected = new Set();
+
+function _attributionCheckbox(row, index) {
+    if (!row.safe_to_repair) return '<span class="text-slate-600">—</span>';
+    return `<input type="checkbox" data-attribution-index="${index}" onchange="toggleAttributionSelection(this)" class="rounded border-slate-700 bg-slate-900 text-violet-500 focus:ring-0">`;
+}
+
+function _updateAttributionButton() {
+    const btn = document.getElementById('btn-repair-attribution');
+    const count = document.getElementById('attribution-selected-count');
+    if (count) count.textContent = String(_attributionSelected.size);
+    if (btn) btn.disabled = _attributionSelected.size === 0;
+}
+
+function toggleAttributionSelection(checkbox) {
+    const index = parseInt(checkbox.getAttribute('data-attribution-index'), 10);
+    const row = _attributionData[index];
+    if (!row) return;
+    if (checkbox.checked) _attributionSelected.add(row.id);
+    else _attributionSelected.delete(row.id);
+    _updateAttributionButton();
+}
+
+async function auditSeriesAttribution() {
+    const tbody = document.getElementById('attribution-rows');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="4" class="py-4 text-center text-slate-500">Auditing releases (read-only)...</td></tr>';
+    try {
+        const res = await fetch('/api/maintenance/series-attribution');
+        const data = await res.json();
+        if (!res.ok) { tbody.innerHTML = `<tr><td colspan="4" class="py-4 text-center text-rose-400">${escapeHtml(data.detail || 'Audit failed')}</td></tr>`; return; }
+        _attributionData = data.files || [];
+        _attributionSelected = new Set();
+        _updateAttributionButton();
+        const summary = data.summary || {};
+        document.getElementById('attribution-summary').textContent =
+            `Scanned ${summary.scanned || 0}: ${summary.repairable || 0} repairable, ${summary.ambiguous || 0} ambiguous.`;
+        tbody.innerHTML = _attributionData.length
+            ? _attributionData.map(function (row, index) {
+                return `<tr>
+                    <td class="py-2 pr-2">${_attributionCheckbox(row, index)}</td>
+                    <td class="py-2 pr-2 text-slate-300 font-mono break-all">${escapeHtml(row.title || '')}</td>
+                    <td class="py-2 pr-2 font-mono">${escapeHtml(row.current_series || '')} <span class="text-slate-500">→</span> ${escapeHtml(row.suggested_series || '')}</td>
+                    <td class="py-2">${row.safe_to_repair ? '<span class="text-amber-300">repairable</span>' : '<span class="text-rose-300">ambiguous</span>'} <span class="text-slate-500">${escapeHtml(row.reason || '')}</span></td>
+                </tr>`;
+            }).join('')
+            : '<tr><td colspan="4" class="py-4 text-center text-emerald-400">No mis-attributed releases found.</td></tr>';
+    } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="4" class="py-4 text-center text-rose-400">Audit failed: ${escapeHtml(String(err))}</td></tr>`;
+    }
+}
+
+async function repairSeriesAttribution() {
+    if (!_attributionSelected.size) return;
+    try {
+        const res = await fetch('/api/maintenance/series-attribution-repair', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ release_ids: Array.from(_attributionSelected) })
+        });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Repair failed', 'error'); return; }
+        showToast(`Re-keyed ${data.repaired || 0} release(s); ${data.skipped || 0} skipped.`, 'success');
+        await auditSeriesAttribution();
     } catch (err) { showToast('Error: ' + err, 'error'); }
 }
 
