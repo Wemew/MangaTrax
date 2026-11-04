@@ -691,6 +691,10 @@ class SettingsUpdateRequest(BaseModel):
     # Strict exact-missing-volume selection (default true; false restores the old
     # whole-torrent fallback when file names cannot be mapped).
     torbox_strict_volume_selection: Optional[str] = Field(default=None, max_length=20)
+    # task-52: hold torrents with unmappable volumes for manual pickup.
+    torbox_manual_pickup_enabled: Optional[str] = Field(default=None, max_length=20)
+    torbox_manual_pickup_max_items: Optional[str] = Field(default=None, max_length=20)
+    torbox_manual_pickup_expiry_days: Optional[str] = Field(default=None, max_length=20)
     # Per-file / whole-torrent download size cap in GiB (default 64, min 1).  A file
     # above the cap is rejected before streaming with an actionable message.
     torbox_max_download_gb: Optional[str] = Field(default=None, max_length=20)

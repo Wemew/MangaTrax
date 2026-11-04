@@ -359,6 +359,30 @@ Selections live in the URL and are reload-safe/shareable.
 
 ---
 
+## Torbox manual pickup (unmappable volumes)
+
+When strict volume selection cannot map a torrent's files (or Torbox returns no file
+list), the torrent is **kept on Torbox** and a record is written to
+`torbox_manual_pickups`; the release moves to `download_status='MANUAL_PICKUP'` and leaves
+the normal retry queue. Open **Downloads → Manual Pickup** to review the file snapshot
+(name/size/suggested volume), correct volumes, edit the series, fetch selected files or the
+whole torrent, retry strict mapping, or discard. Fetching goes through the normal
+requestdl → staging → ComicInfo → routing pipeline using the task framework, so progress
+survives reloads.
+
+Settings → Torbox:
+
+| Setting | Default | Semantics |
+|---|---|---|
+| `torbox_manual_pickup_enabled` | on | Hold instead of delete+FAILED on mapping failures |
+| `torbox_manual_pickup_max_items` | 10 | **0 = unlimited**; finite cap reached falls back to FAILED |
+| `torbox_manual_pickup_expiry_days` | 7 | **0 = never expires**; past-due holds get a best-effort remote delete and are marked expired |
+
+The scheduler sweeps expiry every 5 minutes. `torbox_max_download_gb` still applies per
+selected file and to the selected total.
+
+---
+
 ## Long-running actions (progress convention)
 
 Every button that can take more than ~2 seconds must start a **persisted background

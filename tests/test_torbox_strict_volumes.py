@@ -171,6 +171,8 @@ def test_strict_unmappable_hard_fail():
         os.makedirs(dest, exist_ok=True)
         with open(os.path.join(dest, "leftover.cbz.part"), "wb") as handle:
             handle.write(b"partial")
+        # task-52: this suite covers the legacy FAILED fallback; pickup is covered separately.
+        ctx.db.set_setting("torbox_manual_pickup_enabled", "false")
         with patch("app.scheduler.build_downloader", return_value=service):
             result = ctx.scheduler.poll_torbox_downloads()
         assert result["failed"] == 1, result

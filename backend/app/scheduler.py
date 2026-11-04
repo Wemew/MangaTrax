@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import re
 import json
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Set
 
 from app.database import (
@@ -1304,6 +1304,282 @@ class MangaScheduler:
             }
         return {}
 
+    def _manual_pickup_settings(self) -> Dict[str, Any]:
+        enabled = as_bool(self.db.get_setting("torbox_manual_pickup_enabled", "true"), default=True)
+        try:
+            max_items = max(0, int(self.db.get_setting("torbox_manual_pickup_max_items", "10") or 10))
+        except (TypeError, ValueError):
+            max_items = 10
+        try:
+            expiry_days = max(0, int(self.db.get_setting("torbox_manual_pickup_expiry_days", "7") or 7))
+        except (TypeError, ValueError):
+            expiry_days = 7
+        return {"enabled": enabled, "max_items": max_items, "expiry_days": expiry_days}
+
+    def _manual_pickup_file_snapshot(self, files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        snapshot = []
+        for item in files or []:
+            name = str(item.get("name") or item.get("path") or "")
+            volumes = self._parse_torbox_file_volumes(name)
+            snapshot.append({
+                "id": item.get("id"),
+                "name": name,
+                "size": int(item.get("size") or 0),
+                "suggested_volume": volumes[0] if len(volumes) == 1 else None,
+                "volumes": volumes,
+                "mapping_source": "parsed" if volumes else "none",
+                "fetched": False,
+            })
+        return snapshot
+
+    def _hold_torbox_for_manual_pickup(self, release_id: int, title: str, reason: str,
+                                       downloader=None, handle: Optional[Dict[str, Any]] = None,
+                                       info: Optional[Dict[str, Any]] = None) -> bool:
+        """Keep a Torbox torrent whose volume mapping failed for manual pickup.
+
+        Returns False when pickup is disabled/capped, in which case the caller falls
+        back to the legacy FAILED + remote-delete behaviour.
+        """
+        settings = self._manual_pickup_settings()
+        if not settings["enabled"]:
+            return False
+        if settings["max_items"] > 0 and self.db.count_active_manual_pickups() >= settings["max_items"]:
+            self._log_activity(
+                "TORBOX_MANUAL_PICKUP_CAP",
+                f"Manual pickup cap reached for '{title}'",
+                f"cap={settings['max_items']}; remote torrent will be removed",
+            )
+            return False
+        info = info or {}
+        files = self._manual_pickup_file_snapshot(info.get("files") or [])
+        release = self.db.get_release_by_id(release_id) or {}
+        wanted = self.resolve_release_missing_volumes(release)
+        expires_at = None
+        if settings["expiry_days"] > 0:
+            expires_at = (datetime.utcnow() + timedelta(days=settings["expiry_days"])).strftime("%Y-%m-%d %H:%M:%S")
+        torrent_id = str(handle.get("torrent_id") if handle else (info.get("torrent_id") or release.get("downloader_id") or "") or "")
+        pickup_id = self.db.create_torbox_manual_pickup(
+            release_id, torrent_id, title, str(release.get("series_name") or ""),
+            files, wanted, reason, expires_at=expires_at,
+        )
+        hint = (
+            f"{reason} Held for manual pickup #{pickup_id}: choose volumes/files on "
+            "Downloads → Manual Pickup (torrent kept on Torbox)."
+        )
+        self.db.set_download_error(release_id, hint)
+        self.db.update_downloader_state(release_id, "MANUAL_PICKUP", "torbox")
+        self._log_activity(
+            "TORBOX_MANUAL_PICKUP",
+            f"Held Torbox torrent for manual pickup: '{title}'",
+            f"pickup={pickup_id}; files={len(files)}; wanted={wanted}; expires={expires_at or 'never'}",
+        )
+        logger.warning("Torbox manual pickup #%s for '%s': %s", pickup_id, title, reason)
+        return True
+
+    def sweep_torbox_manual_pickups(self, downloader=None) -> int:
+        """Expire past-due holds (best-effort remote delete); never-expire stays."""
+        expired = self.db.expired_torbox_manual_pickups()
+        count = 0
+        for pickup in expired:
+            pickup_id = int(pickup["id"])
+            handle = {
+                "engine": "torbox",
+                "torrent_id": int(pickup.get("torrent_id") or 0) or None,
+                "hash": "",
+            }
+            remote = ""
+            try:
+                engine = downloader or build_downloader(self.db, engine="torbox")
+                if handle["torrent_id"] and engine.cancel(handle):
+                    remote = " Removed from Torbox."
+            except Exception as exc:
+                logger.debug("Could not remove expired pickup #%s remote: %s", pickup_id, exc)
+            self.db.update_torbox_manual_pickup(
+                pickup_id, status="expired", error=f"Expired{remote}".strip(),
+            )
+            release_id = int(pickup.get("release_id") or 0)
+            if release_id:
+                self.db.set_download_error(
+                    release_id,
+                    f"Manual pickup #{pickup_id} expired; torrent removed from Torbox.",
+                )
+                self.db.update_downloader_state(release_id, "FAILED", "torbox")
+            self._log_activity(
+                "TORBOX_MANUAL_PICKUP_EXPIRED",
+                f"Manual pickup #{pickup_id} expired",
+                f"release={release_id}{remote}",
+            )
+            count += 1
+        return count
+
+    def _pickup_handle(self, pickup: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "engine": "torbox",
+            "torrent_id": int(pickup.get("torrent_id") or 0) or None,
+            "hash": "",
+        }
+
+    def update_manual_pickup_mapping(self, pickup_id: int, mapping: List[Dict[str, Any]]) -> Dict[str, Any]:
+        pickup = self.db.get_torbox_manual_pickup(pickup_id)
+        if not pickup:
+            raise ValueError("Manual pickup not found")
+        files = json.loads(pickup.get("files_json") or "[]")
+        by_index = {int(item.get("index", index)): item for index, item in enumerate(files)}
+        for change in mapping or []:
+            try:
+                index = int(change.get("index"))
+            except (TypeError, ValueError):
+                continue
+            item = by_index.get(index)
+            if item is None:
+                continue
+            volume = change.get("volume")
+            if volume in (None, ""):
+                item["suggested_volume"] = None
+                item["volumes"] = []
+                item["mapping_source"] = "manual"
+            else:
+                try:
+                    value = float(volume)
+                except (TypeError, ValueError):
+                    continue
+                item["suggested_volume"] = value
+                item["volumes"] = [value]
+                item["mapping_source"] = "manual"
+        self.db.update_torbox_manual_pickup(pickup_id, files=files)
+        return {"status": "success", "pickup_id": pickup_id, "files": files}
+
+    def update_manual_pickup_release_volumes(self, pickup_id: int,
+                                             volumes: List[float]) -> Dict[str, Any]:
+        pickup = self.db.get_torbox_manual_pickup(pickup_id)
+        if not pickup:
+            raise ValueError("Manual pickup not found")
+        clean = []
+        for value in volumes or []:
+            try:
+                clean.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        if not clean:
+            raise ValueError("At least one volume is required")
+        release_id = int(pickup.get("release_id") or 0)
+        self.db.update_release_volumes_and_status(release_id, clean, clean)
+        self.db.update_torbox_manual_pickup(pickup_id, wanted_volumes=clean)
+        return {"status": "success", "pickup_id": pickup_id, "wanted_volumes": clean}
+
+    def _fetch_manual_pickup_files(self, pickup_id: int, selected_indexes: Optional[List[int]],
+                                   actor: str = "user", progress=None) -> Dict[str, Any]:
+        pickup = self.db.get_torbox_manual_pickup(pickup_id)
+        if not pickup:
+            raise ValueError("Manual pickup not found")
+        if str(pickup.get("status")) in ("discarded", "expired", "completed"):
+            raise ValueError(f"Manual pickup is {pickup.get('status')}")
+        files = json.loads(pickup.get("files_json") or "[]")
+        if selected_indexes:
+            chosen = [item for index, item in enumerate(files) if index in set(selected_indexes)]
+        else:
+            chosen = [item for index, item in enumerate(files) if not item.get("fetched")]
+        if not chosen and selected_indexes:
+            raise ValueError("No files selected")
+        max_gb = float(self.db.get_setting("torbox_max_download_gb", "64") or 64)
+        total_size = 0
+        descriptors = []
+        for item in chosen:
+            size = int(item.get("size") or 0)
+            if size and size > max_gb * 1024 ** 3:
+                raise DownloaderFileError(
+                    f"File '{item.get('name')}' is above the {max_gb:g} GiB cap."
+                )
+            total_size += size
+            descriptors.append({"id": item.get("id"), "name": item.get("name"), "size": size})
+        whole_torrent = not descriptors and not selected_indexes and not files
+        if not descriptors and not whole_torrent:
+            raise ValueError("No files selected")
+        if total_size and total_size > max_gb * 1024 ** 3:
+            raise DownloaderFileError(
+                f"Selected files total {total_size / 1024 ** 3:.1f} GiB, above the "
+                f"{max_gb:g} GiB cap (torbox_max_download_gb)."
+            )
+        downloader = build_downloader(self.db, engine="torbox")
+        release = self.db.get_release_by_id(int(pickup.get("release_id") or 0)) or {}
+        title = str(pickup.get("title") or release.get("title") or "manual-pickup")
+        dest_dir = os.path.join(self.get_downloads_dir(), self._safe_torrent_dirname(title))
+        self.db.update_torbox_manual_pickup(pickup_id, status="fetching")
+        handle = self._pickup_handle(pickup)
+        handle["size"] = total_size
+        saved = downloader.fetch_files(
+            handle, descriptors if not whole_torrent else None, dest_dir,
+            progress_cb=(self._torbox_progress_callback(int(pickup.get("release_id") or 0), total_size) if progress is None else None),
+        )
+        fetched_names = {str(item.get("name") or "") for item in (descriptors or [])}
+        for index, item in enumerate(files):
+            if str(item.get("name") or "") in fetched_names:
+                item["fetched"] = True
+        remaining = [item for index, item in enumerate(files) if not item.get("fetched")]
+        status = "completed" if not remaining else "partial"
+        self.db.update_torbox_manual_pickup(pickup_id, files=files, status=status)
+        release_id = int(pickup.get("release_id") or 0)
+        if release_id:
+            paths = [str((item or {}).get("path") or "") for item in (saved or [])]
+            self.db.set_download_files(release_id, paths)
+            self.db.clear_download_error(release_id)
+            self.db.update_downloader_state(release_id, "COMPLETED", "torbox")
+            if status == "completed":
+                try:
+                    self.process_downloads_to_staging(actor=actor)
+                except Exception as exc:
+                    logger.debug("Routing after manual pickup failed: %s", exc)
+            self._log_activity(
+                "TORBOX_MANUAL_PICKUP_FETCHED",
+                f"Fetched {len(descriptors)} file(s) from manual pickup #{pickup_id}",
+                f"release={release_id}; status={status}",
+            )
+        return {
+            "status": "success", "pickup_id": pickup_id, "fetched": len(saved or descriptors or []),
+            "remaining": len(remaining), "pickup_status": status,
+        }
+
+    def retry_manual_pickup_strict(self, pickup_id: int, actor: str = "user",
+                                   progress=None) -> Dict[str, Any]:
+        pickup = self.db.get_torbox_manual_pickup(pickup_id)
+        if not pickup:
+            raise ValueError("Manual pickup not found")
+        release = self.db.get_release_by_id(int(pickup.get("release_id") or 0)) or {}
+        files = json.loads(pickup.get("files_json") or "[]")
+        wanted = self.resolve_release_missing_volumes(release)
+        if not wanted:
+            wanted = json.loads(pickup.get("wanted_json") or "[]")
+        plan = self._plan_torbox_selection(release, files, wanted, total_size=0)
+        if plan.get("action") == "skip":
+            raise ValueError(plan.get("reason") or "Nothing to fetch")
+        selection = plan.get("files") if plan.get("action") == "files" else None
+        indexes = []
+        if selection:
+            selected_names = {str(item.get("name") or "") for item in selection}
+            indexes = [index for index, item in enumerate(files) if str(item.get("name") or "") in selected_names]
+        else:
+            indexes = [index for index, item in enumerate(files) if not item.get("fetched")]
+        return self._fetch_manual_pickup_files(pickup_id, indexes, actor=actor, progress=progress)
+
+    def discard_manual_pickup(self, pickup_id: int, actor: str = "user") -> Dict[str, Any]:
+        pickup = self.db.get_torbox_manual_pickup(pickup_id)
+        if not pickup:
+            raise ValueError("Manual pickup not found")
+        remote = ""
+        try:
+            downloader = build_downloader(self.db, engine="torbox")
+            handle = self._pickup_handle(pickup)
+            if handle.get("torrent_id") and downloader.cancel(handle):
+                remote = " Removed from Torbox."
+        except Exception as exc:
+            logger.debug("Could not delete discarded pickup remote: %s", exc)
+        self.db.update_torbox_manual_pickup(pickup_id, status="discarded", error=f"Discarded by user.{remote}")
+        release_id = int(pickup.get("release_id") or 0)
+        if release_id:
+            self.db.set_download_error(release_id, f"Manual pickup discarded.{remote}")
+            self.db.update_downloader_state(release_id, "FAILED", "torbox")
+        return {"status": "success", "pickup_id": pickup_id, "discarded": True}
+
     def _torbox_fail_release(
         self,
         release_id: int,
@@ -1953,6 +2229,16 @@ class MangaScheduler:
                     release, files, wanted, total_size=total_bytes,
                 )
             except DownloaderFileError as exc:
+                held = False
+                try:
+                    held = self._hold_torbox_for_manual_pickup(
+                        release_id, title, str(exc), downloader=downloader, handle=handle, info=info,
+                    )
+                except Exception as hold_exc:
+                    logger.warning("Could not hold Torbox release %s for manual pickup: %s", release_id, hold_exc)
+                if held:
+                    self.db.update_torbox_progress(release_id, phase="manual_pickup")
+                    return {"status": "manual_pickup", "error": str(exc)}
                 self._torbox_fail_contained(release_id, title, str(exc), downloader, handle)
                 self.db.update_torbox_progress(release_id, phase="failed")
                 return {"status": "failed", "error": str(exc)}
@@ -4465,6 +4751,7 @@ class MangaScheduler:
         last_dedupe_sweep = 0
         last_dedupe_inventory = 0
         last_activity_prune = 0
+        last_pickup_sweep = 0
         last_complete_check = time.time()
 
         while self.running:
@@ -4502,6 +4789,16 @@ class MangaScheduler:
                     except Exception as exc:
                         logger.debug("Periodic downloads routing failed: %s", exc)
                     last_tag_check = time.time()
+
+                # task-52: expire past-due Torbox manual pickups (never-expire stays).
+                if now - last_pickup_sweep >= 300:
+                    try:
+                        expired_count = self.sweep_torbox_manual_pickups()
+                        if expired_count:
+                            logger.info("Expired %s Torbox manual pickup(s).", expired_count)
+                    except Exception as exc:
+                        logger.debug("Torbox manual pickup sweep failed: %s", exc)
+                    last_pickup_sweep = time.time()
 
                 # Activity-log retention: once at startup, then at most every 6 hours.
                 if now - last_activity_prune >= 21600:

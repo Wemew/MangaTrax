@@ -892,6 +892,27 @@ class MangaDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_background_tasks_status_started "
                 "ON background_tasks(status, started_at);"
             )
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS torbox_manual_pickups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    release_id INTEGER,
+                    torrent_id TEXT DEFAULT '',
+                    title TEXT DEFAULT '',
+                    series_name TEXT DEFAULT '',
+                    files_json TEXT DEFAULT '[]',
+                    wanted_json TEXT DEFAULT '[]',
+                    reason TEXT DEFAULT '',
+                    status TEXT DEFAULT 'pending',
+                    error TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_torbox_pickups_status_created "
+                "ON torbox_manual_pickups(status, created_at);"
+            )
             # task-49: provider tags (AniList) for display + filtering.
             for table, column, ddl in (
                 ("manga_metadata_cache", "genres_json", "TEXT DEFAULT '[]'"),
@@ -1320,6 +1341,98 @@ class MangaDatabase:
             return (match, -item["count"], -item["rank"], norm)
         items.sort(key=sort_key)
         return items[:max(1, min(int(limit), 50))]
+
+    # --- Torbox manual pickups (task-52) ---
+    def create_torbox_manual_pickup(self, release_id: int, torrent_id: str, title: str,
+                                    series_name: str, files: List[Dict[str, Any]],
+                                    wanted_volumes: List[float], reason: str,
+                                    expires_at: Optional[str] = None) -> int:
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO torbox_manual_pickups (release_id, torrent_id, title, series_name, "
+                "files_json, wanted_json, reason, status, expires_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);",
+                (int(release_id), str(torrent_id or ""), str(title or ""), str(series_name or ""),
+                 json.dumps(files or []), json.dumps(wanted_volumes or []), str(reason or ""),
+                 expires_at),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def get_torbox_manual_pickup(self, pickup_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM torbox_manual_pickups WHERE id = ?;", (int(pickup_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_manual_pickup_for_release(self, release_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM torbox_manual_pickups WHERE release_id = ? "
+                "AND status IN ('pending', 'fetching', 'partial') ORDER BY id DESC LIMIT 1;",
+                (int(release_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_torbox_manual_pickups(self, include_finished: bool = False) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            if include_finished:
+                rows = conn.execute(
+                    "SELECT * FROM torbox_manual_pickups ORDER BY id DESC;",
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM torbox_manual_pickups WHERE status IN "
+                    "('pending', 'fetching', 'partial') ORDER BY id ASC;",
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_active_manual_pickups(self) -> int:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT count(*) FROM torbox_manual_pickups WHERE status IN "
+                "('pending', 'fetching', 'partial');",
+            ).fetchone()
+        return int(row[0] if row else 0)
+
+    def update_torbox_manual_pickup(self, pickup_id: int, files: Optional[List[Dict[str, Any]]] = None,
+                                    wanted_volumes: Optional[List[float]] = None,
+                                    status: Optional[str] = None, error: Optional[str] = None,
+                                    expires_at: Optional[str] = None) -> None:
+        fields = ["updated_at = CURRENT_TIMESTAMP"]
+        params: List[Any] = []
+        if files is not None:
+            fields.append("files_json = ?")
+            params.append(json.dumps(files))
+        if wanted_volumes is not None:
+            fields.append("wanted_json = ?")
+            params.append(json.dumps(wanted_volumes))
+        if status is not None:
+            fields.append("status = ?")
+            params.append(str(status))
+        if error is not None:
+            fields.append("error = ?")
+            params.append(str(error)[:2000])
+        if expires_at is not None:
+            fields.append("expires_at = ?")
+            params.append(expires_at)
+        params.append(int(pickup_id))
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE torbox_manual_pickups SET " + ", ".join(fields) + " WHERE id = ?;",
+                params,
+            )
+            conn.commit()
+
+    def expired_torbox_manual_pickups(self) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM torbox_manual_pickups WHERE expires_at IS NOT NULL "
+                "AND expires_at < CURRENT_TIMESTAMP AND status IN "
+                "('pending', 'fetching', 'partial') ORDER BY id ASC;",
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     # --- Background tasks (task-47) ---
     def create_background_task(self, kind: str, title: str, scope: Optional[str] = None,

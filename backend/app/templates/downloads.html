@@ -3,6 +3,13 @@
 {% block title %}Downloader & Staging{% endblock %}
 
 {% block content %}
+{% if manual_pickup_count and manual_pickup_count > 0 %}
+<div class="mb-5 flex items-center justify-between gap-3 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
+    <p class="text-sm text-amber-200"><i data-lucide="hand" class="w-4 h-4 inline-block mr-1"></i><strong>{{ manual_pickup_count }}</strong> torrent(s) need manual volume mapping.</p>
+    <a href="/downloads/manual-pickup" class="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 text-xs font-semibold">Open Manual Pickup →</a>
+</div>
+{% endif %}
+
 <div class="space-y-8">
 
     <!-- Header -->

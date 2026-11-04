@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}Manual Pickup{% endblock %}
+{% block content %}
+<div class="max-w-7xl mx-auto">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
+        <div>
+            <h1 class="text-2xl font-bold text-white flex items-center gap-2">
+                <i data-lucide="hand" class="w-6 h-6 text-amber-400"></i> Torbox Manual Pickup
+            </h1>
+            <p class="text-xs text-slate-400 mt-1">Torrents whose volumes could not be mapped automatically are kept on Torbox. Pick the files or correct the mapping, then fetch through the normal staging pipeline.</p>
+        </div>
+        <div class="text-xs text-slate-400 text-right">
+            <div><strong class="text-white">{{ active_pickup_count }}</strong> held{% if pickup_cap > 0 %} of <strong class="text-white">{{ pickup_cap }}</strong>{% else %} (unlimited){% endif %}</div>
+            <div>Expiry: {% if pickup_expiry_days > 0 %}{{ pickup_expiry_days }} day(s){% else %}never{% endif %}</div>
+        </div>
+    </div>
+
+    {% if not pickups %}
+    <div class="bg-darkcard border border-slate-800 rounded-2xl p-10 text-center text-slate-400">
+        <i data-lucide="check-circle" class="w-10 h-10 mx-auto mb-3 text-emerald-400"></i>
+        <p class="font-semibold text-white">No torrents need manual mapping.</p>
+        <p class="text-xs mt-1">Failed strict selections appear here instead of being deleted automatically.</p>
+    </div>
+    {% endif %}
+
+    <div class="space-y-4" id="manual-pickup-list">
+    {% for pickup in pickups %}
+    <section class="manual-pickup-card bg-darkcard border border-slate-800 rounded-2xl p-4" data-pickup-id="{{ pickup.id }}" data-task-scope="{{ pickup.id }}">
+        <div class="flex flex-col lg:flex-row lg:items-start justify-between gap-3">
+            <div class="min-w-0">
+                <h2 class="font-bold text-white break-words">{{ pickup.title }}</h2>
+                <p class="text-xs text-slate-400 mt-1">
+                    Release #{{ pickup.release_id }} · {{ pickup.series_name or 'Unknown series' }} · {{ '%.1f'|format((pickup.total_bytes or 0) / 1073741824) }} GiB · Wanted volumes: {{ pickup.wanted_volumes|join(', ') if pickup.wanted_volumes else 'unknown' }}
+                </p>
+                <p class="text-xs text-amber-300 mt-2 break-words" title="{{ pickup.reason }}">{{ pickup.reason }}</p>
+                <p class="text-[11px] text-slate-500 mt-1">Status: <span class="pickup-status font-semibold">{{ pickup.status }}</span> · Expires: {{ pickup.expires_at or 'never' }}</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2 shrink-0">
+                <button type="button" onclick="pickupFetchAll({{ pickup.id }})" data-task-kind="torbox:pickup:fetch" data-task-scope="{{ pickup.id }}" class="px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold">Fetch whole torrent</button>
+                <button type="button" onclick="pickupRetry({{ pickup.id }})" data-task-kind="torbox:pickup:retry" data-task-scope="{{ pickup.id }}" class="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold">Retry strict mapping</button>
+                <button type="button" onclick="pickupEditSeries({{ pickup.id }})" class="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold">Edit series</button>
+                <button type="button" onclick="pickupDiscard({{ pickup.id }})" class="px-3 py-1.5 rounded-lg bg-rose-900/40 border border-rose-700/50 text-rose-300 text-xs font-semibold">Discard</button>
+            </div>
+        </div>
+
+        <div class="mt-4 border-t border-slate-800 pt-3">
+            <div class="flex items-center justify-between gap-2 mb-2">
+                <label class="flex items-center gap-2 text-xs text-slate-300 font-semibold">
+                    <input type="checkbox" onchange="pickupToggleAll(this, {{ pickup.id }})" class="rounded border-slate-700 bg-slate-900">
+                    Select all files
+                </label>
+                <div class="flex items-center gap-2">
+                    <input type="text" id="pickup-volumes-{{ pickup.id }}" value="{{ pickup.wanted_volumes|join(',') }}" placeholder="e.g. 1,2,3" class="w-40 bg-slate-950/70 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200" aria-label="Wanted volumes">
+                    <button type="button" onclick="pickupSaveVolumes({{ pickup.id }})" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-xs">Save volumes</button>
+                    <button type="button" onclick="pickupFetchSelected({{ pickup.id }})" data-task-kind="torbox:pickup:fetch" data-task-scope="{{ pickup.id }}" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold">Fetch selected</button>
+                </div>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-xs">
+                    <thead><tr class="text-slate-400 text-left"><th class="py-1 pr-2">Use</th><th class="py-1 pr-2">File</th><th class="py-1 pr-2">Size</th><th class="py-1 pr-2">Suggested volume</th><th class="py-1">Fetched</th></tr></thead>
+                    <tbody>
+                    {% for file in pickup.files %}
+                    <tr class="border-t border-slate-800/60 pickup-file-row" data-file-index="{{ loop.index0 }}">
+                        <td class="py-1.5 pr-2"><input type="checkbox" class="pickup-file-check" data-pickup="{{ pickup.id }}" data-index="{{ loop.index0 }}" {% if file.fetched %}disabled{% endif %} onchange="pickupRefreshButton({{ pickup.id }})" {% if not file.fetched %}checked{% endif %}></td>
+                        <td class="py-1.5 pr-2 text-slate-200 break-all">{{ file.name }}</td>
+                        <td class="py-1.5 pr-2 text-slate-400">{{ '%.2f'|format((file.size or 0) / 1073741824) }} GiB</td>
+                        <td class="py-1.5 pr-2">
+                            <input type="number" step="0.1" min="0" class="pickup-file-volume w-20 bg-slate-950/70 border border-slate-700 rounded px-2 py-0.5 text-xs text-slate-200" data-pickup="{{ pickup.id }}" data-index="{{ loop.index0 }}" value="{{ file.suggested_volume if file.suggested_volume is not none else '' }}" onchange="pickupSaveMapping({{ pickup.id }})">
+                        </td>
+                        <td class="py-1.5 text-slate-400">{% if file.fetched %}<span class="text-emerald-400">yes</span>{% else %}no{% endif %}</td>
+                    </tr>
+                    {% endfor %}
+                    {% if not pickup.files %}
+                    <tr><td colspan="5" class="py-3 text-slate-500">No file list was returned by Torbox; use “Fetch whole torrent”.</td></tr>
+                    {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+    {% endfor %}
+    </div>
+</div>
+
+<script>
+function pickupPayload(id) {
+    const rows = Array.from(document.querySelectorAll(`.pickup-file-volume[data-pickup="${id}"]`));
+    return rows.map(function (input) {
+        return { index: parseInt(input.dataset.index, 10), volume: input.value === '' ? null : parseFloat(input.value) };
+    });
+}
+async function pickupSaveMapping(id) {
+    const res = await fetch(`/api/torbox/manual-pickups/${id}/map`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mapping: pickupPayload(id) }),
+    });
+    if (!res.ok) { if (window.showToast) showToast((await res.json().catch(() => ({}))).detail || 'Could not save mapping', 'error'); }
+}
+async function pickupSaveVolumes(id) {
+    const raw = (document.getElementById(`pickup-volumes-${id}`) || {}).value || '';
+    const volumes = raw.split(',').map(function (value) { return parseFloat(value.trim()); }).filter(function (value) { return !isNaN(value); });
+    if (!volumes.length) { if (window.showToast) showToast('Enter at least one volume', 'error'); return; }
+    const res = await fetch(`/api/torbox/manual-pickups/${id}/volumes`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ volumes: volumes }),
+    });
+    if (res.ok) { if (window.showToast) showToast('Volumes saved', 'success'); }
+    else if (window.showToast) { showToast((await res.json().catch(() => ({}))).detail || 'Could not save volumes', 'error'); }
+}
+function pickupSelectedIndexes(id) {
+    return Array.from(document.querySelectorAll(`.pickup-file-check[data-pickup="${id}"]:checked`))
+        .map(function (input) { return parseInt(input.dataset.index, 10); });
+}
+function pickupToggleAll(box, id) {
+    document.querySelectorAll(`.pickup-file-check[data-pickup="${id}"]:not(:disabled)`).forEach(function (input) { input.checked = box.checked; });
+    pickupRefreshButton(id);
+}
+function pickupRefreshButton(id) {
+    const count = pickupSelectedIndexes(id).length;
+    document.querySelectorAll(`[data-task-kind="torbox:pickup:fetch"][data-task-scope="${id}"]`).forEach(function (button) {
+        if (!button.dataset.busy) button.textContent = count ? `Fetch selected (${count})` : 'Fetch selected';
+    });
+}
+async function pickupFetchSelected(id) {
+    const indexes = pickupSelectedIndexes(id);
+    if (!indexes.length) { if (window.showToast) showToast('Select at least one file', 'error'); return; }
+    await pickupPostFetch(id, { file_indexes: indexes });
+}
+async function pickupFetchAll(id) {
+    const card = document.querySelector(`.manual-pickup-card[data-pickup-id="${id}"]`);
+    const size = card ? card.querySelectorAll('.pickup-file-row').length : 0;
+    if (!confirm(`Fetch the whole torrent${size ? ` (${size} files)` : ''}? The configured size cap still applies.`)) return;
+    await pickupPostFetch(id, { all: true });
+}
+async function pickupPostFetch(id, payload) {
+    const res = await fetch(`/api/torbox/manual-pickups/${id}/fetch`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(function () { return {}; });
+    if (!res.ok) { if (window.showToast) showToast(data.detail || 'Fetch failed to start', 'error'); return; }
+    if (window.showToast) showToast('Manual pickup fetch started', 'success');
+    if (window.MangaTasks && data.task_id) MangaTasks.watch(data.task_id, function (task) {
+        if (window.showToast) showToast(task.status === 'success' ? 'Manual pickup fetch complete' : 'Manual pickup fetch failed', task.status === 'success' ? 'success' : 'error');
+        document.querySelectorAll(`[data-task-kind="torbox:pickup:fetch"][data-task-scope="${id}"]`).forEach(function (button) { button.dataset.busy = ''; button.disabled = false; });
+        const status = document.querySelector(`.manual-pickup-card[data-pickup-id="${id}"] .pickup-status`);
+        if (status && task.result) status.textContent = task.result.pickup_status || status.textContent;
+        MangaTasks.poll();
+    });
+}
+async function pickupRetry(id) {
+    const res = await fetch(`/api/torbox/manual-pickups/${id}/retry`, { method: 'POST' });
+    const data = await res.json().catch(function () { return {}; });
+    if (!res.ok) { if (window.showToast) showToast(data.detail || 'Retry failed', 'error'); return; }
+    if (window.showToast) showToast('Strict retry started', 'success');
+    if (window.MangaTasks && data.task_id) MangaTasks.watch(data.task_id, function (task) {
+        if (window.showToast) showToast(task.status === 'success' ? 'Strict retry fetched files' : 'Strict retry failed', task.status === 'success' ? 'success' : 'error');
+        MangaTasks.poll();
+    });
+}
+async function pickupDiscard(id) {
+    if (!confirm('Discard this manual pickup and delete the remote Torbox torrent?')) return;
+    const res = await fetch(`/api/torbox/manual-pickups/${id}/discard`, { method: 'POST' });
+    if (!res.ok) { if (window.showToast) showToast('Discard failed', 'error'); return; }
+    const card = document.querySelector(`.manual-pickup-card[data-pickup-id="${id}"]`);
+    if (card) card.remove();
+    if (window.showToast) showToast('Manual pickup discarded', 'success');
+}
+function pickupEditSeries(id) {
+    const card = document.querySelector(`.manual-pickup-card[data-pickup-id="${id}"]`);
+    const title = card ? (card.querySelector('h2') || {}).textContent : '';
+    const source = prompt('Correct series name (manual match)', title || '');
+    if (!source) return;
+    fetch('/api/downloads/awaiting-series/match', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_series: source, new_series_title: source }),
+    }).then(function (res) {
+        if (window.showToast) showToast(res.ok ? 'Series match updated' : 'Series match failed', res.ok ? 'success' : 'error');
+    }).catch(function () { if (window.showToast) showToast('Series match failed', 'error'); });
+}
+</script>
+{% endblock %}

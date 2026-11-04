@@ -1148,6 +1148,10 @@ async def dashboard_view(request: Request):
     # hung/unreachable qBittorrent can never stall the dashboard render.
     download_status = await asyncio.to_thread(_build_downloader_status, 1.0)
     torrents = download_status.get("torrents") or []
+    try:
+        manual_pickup_count = await asyncio.to_thread(db.count_active_manual_pickups)
+    except Exception:
+        manual_pickup_count = 0
 
     return templates.TemplateResponse(
         request=request,
@@ -1606,6 +1610,144 @@ async def discovery_view(
         }
     )
 
+@app.get("/downloads/manual-pickup", response_class=HTMLResponse)
+async def manual_pickup_view(request: Request):
+    pickups = await asyncio.to_thread(db.list_torbox_manual_pickups, False)
+    enriched = []
+    for pickup in pickups:
+        item = dict(pickup)
+        try:
+            item["files"] = json.loads(item.get("files_json") or "[]")
+        except (TypeError, ValueError):
+            item["files"] = []
+        try:
+            item["wanted_volumes"] = json.loads(item.get("wanted_json") or "[]")
+        except (TypeError, ValueError):
+            item["wanted_volumes"] = []
+        try:
+            item["release"] = db.get_release_by_id(int(item.get("release_id") or 0)) or {}
+        except Exception:
+            item["release"] = {}
+        item["total_bytes"] = sum(int(file.get("size") or 0) for file in item["files"])
+        enriched.append(item)
+    settings = db.get_all_settings()
+    cap = 0
+    try:
+        cap = max(0, int(settings.get("torbox_manual_pickup_max_items", "10") or 10))
+    except (TypeError, ValueError):
+        cap = 10
+    try:
+        expiry_days = max(0, int(settings.get("torbox_manual_pickup_expiry_days", "7") or 7))
+    except (TypeError, ValueError):
+        expiry_days = 7
+    return templates.TemplateResponse(
+        request=request, name="manual_pickup.html",
+        context={
+            "active_page": "downloads", "pickups": enriched,
+            "active_pickup_count": len(enriched), "pickup_cap": cap,
+            "pickup_expiry_days": expiry_days,
+            "pickup_enabled": str(settings.get("torbox_manual_pickup_enabled", "true")).lower() != "false",
+        },
+    )
+
+
+@app.get("/api/torbox/manual-pickups")
+async def api_manual_pickups(include_finished: int = Query(0, ge=0, le=1)):
+    pickups = await asyncio.to_thread(db.list_torbox_manual_pickups, bool(include_finished))
+    result = []
+    for pickup in pickups:
+        item = dict(pickup)
+        try:
+            item["files"] = json.loads(item.get("files_json") or "[]")
+        except (TypeError, ValueError):
+            item["files"] = []
+        result.append(item)
+    return JSONResponse({"status": "success", "pickups": result,
+                         "count": len(result), "active_count": db.count_active_manual_pickups()})
+
+
+@app.post("/api/torbox/manual-pickups/{pickup_id}/map")
+async def api_manual_pickup_map(pickup_id: int, payload: Dict[str, Any]):
+    mapping = payload.get("mapping") or payload.get("files") or []
+    if not isinstance(mapping, list):
+        raise HTTPException(status_code=400, detail="mapping must be a list")
+    try:
+        result = await asyncio.to_thread(scheduler.update_manual_pickup_mapping, pickup_id, mapping)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+@app.post("/api/torbox/manual-pickups/{pickup_id}/volumes")
+async def api_manual_pickup_volumes(pickup_id: int, payload: Dict[str, Any]):
+    volumes = payload.get("volumes") or payload.get("wanted_volumes") or []
+    if not isinstance(volumes, list):
+        raise HTTPException(status_code=400, detail="volumes must be a list")
+    try:
+        result = await asyncio.to_thread(
+            scheduler.update_manual_pickup_release_volumes, pickup_id, volumes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+@app.post("/api/torbox/manual-pickups/{pickup_id}/fetch")
+async def api_manual_pickup_fetch(pickup_id: int, payload: Optional[Dict[str, Any]] = None):
+    body = payload or {}
+    raw_indexes = body.get("file_indexes") or body.get("indexes") or []
+    indexes = None
+    if not body.get("all"):
+        try:
+            indexes = [int(value) for value in raw_indexes]
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="file_indexes must be integers")
+        if not indexes:
+            raise HTTPException(status_code=400, detail="Select at least one file or use all=true")
+    actor = auth_module.get_current_actor()
+
+    def _worker(reporter):
+        reporter.report(0, len(indexes or []), "Fetching manual pickup files…", force=True)
+        result = scheduler._fetch_manual_pickup_files(pickup_id, indexes, actor=actor)
+        reporter.report(result.get("fetched", 0), result.get("fetched", 0),
+                        f"Fetched {result.get('fetched', 0)} file(s)", progress_pct=100.0, force=True)
+        return result
+
+    info = background_tasks.run_in_background(
+        db, "torbox:pickup:fetch", f"Fetch manual pickup #{pickup_id}", _worker,
+        actor=actor, scope=str(pickup_id),
+    )
+    return JSONResponse({"status": "started", **info})
+
+
+@app.post("/api/torbox/manual-pickups/{pickup_id}/retry")
+async def api_manual_pickup_retry(pickup_id: int, payload: Optional[Dict[str, Any]] = None):
+    actor = auth_module.get_current_actor()
+
+    def _worker(reporter):
+        reporter.report(0, 1, "Retrying strict volume mapping…", force=True)
+        result = scheduler.retry_manual_pickup_strict(pickup_id, actor=actor)
+        reporter.report(1, 1, "Strict retry complete", progress_pct=100.0, force=True)
+        return result
+
+    info = background_tasks.run_in_background(
+        db, "torbox:pickup:retry", f"Retry manual pickup #{pickup_id}", _worker,
+        actor=actor, scope=str(pickup_id),
+    )
+    return JSONResponse({"status": "started", **info})
+
+
+@app.post("/api/torbox/manual-pickups/{pickup_id}/discard")
+async def api_manual_pickup_discard(pickup_id: int):
+    try:
+        result = await asyncio.to_thread(
+            scheduler.discard_manual_pickup, pickup_id, auth_module.get_current_actor(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
 @app.get("/downloads", response_class=HTMLResponse)
 async def downloads_view(request: Request):
     # Short, explicit timeout + graceful degradation: an unreachable downloader
@@ -1628,6 +1770,10 @@ async def downloads_view(request: Request):
         "degraded": download_status.get("degraded", False),
     }
     torrents = download_status.get("torrents") or []
+    try:
+        manual_pickup_count = await asyncio.to_thread(db.count_active_manual_pickups)
+    except Exception:
+        manual_pickup_count = 0
 
     # Check files in staging directory
     staging_dir = _staging_dir_setting()
@@ -1668,7 +1814,8 @@ async def downloads_view(request: Request):
             "staging_files": staging_files,
             "awaiting_series": awaiting_series,
             "awaiting_total": awaiting_total,
-            "settings": db.get_all_settings()
+            "settings": db.get_all_settings(),
+            "manual_pickup_count": manual_pickup_count,
         }
     )
 
@@ -1708,6 +1855,7 @@ async def settings_view(request: Request):
         context={
             "active_page": "settings",
             "settings": settings,
+            "manual_pickup_count": db.count_active_manual_pickups(),
             "prioritized_groups": prioritized_groups,
             "torbox_api_key_set": torbox_key_set,
             "storage_health": _storage_health_payload(),
