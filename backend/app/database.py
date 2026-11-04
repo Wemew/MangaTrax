@@ -2239,6 +2239,24 @@ class MangaDatabase:
             conn.commit()
         self._invalidate_grouped_cache()
 
+    def set_release_download_wanted(self, release_id: int, volumes: List[float]) -> None:
+        """Persist the effective wanted-volume list used by strict selection.
+
+        ``resolve_release_missing_volumes`` prefers ``download_wanted_json`` over the
+        stored missing list, so a manual correction that only rewrites the volume
+        columns is silently ignored by retry-strict. Keep this column in sync whenever
+        the user edits a release's volumes from the Manual Pickup page.
+        """
+        clean = sorted({round(float(value), 2) for value in (volumes or [])})
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET download_wanted_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (json.dumps(clean), release_id),
+            )
+            conn.commit()
+        self._invalidate_grouped_cache()
+
     def update_download_status(self, release_id: int, download_status: str, torrent_hash: Optional[str] = None):
         clean_hash = str(torrent_hash).strip() if (isinstance(torrent_hash, str) and torrent_hash.strip()) else None
         with self.get_connection() as conn:

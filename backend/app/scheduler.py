@@ -1464,6 +1464,9 @@ class MangaScheduler:
             raise ValueError("At least one volume is required")
         release_id = int(pickup.get("release_id") or 0)
         self.db.update_release_volumes_and_status(release_id, clean, clean)
+        # resolve_release_missing_volumes() prefers download_wanted_json; without this
+        # a corrected volume list would be ignored by Retry-with-corrections.
+        self.db.set_release_download_wanted(release_id, clean)
         self.db.update_torbox_manual_pickup(pickup_id, wanted_volumes=clean)
         return {"status": "success", "pickup_id": pickup_id, "wanted_volumes": clean}
 
@@ -1546,9 +1549,14 @@ class MangaScheduler:
             raise ValueError("Manual pickup not found")
         release = self.db.get_release_by_id(int(pickup.get("release_id") or 0)) or {}
         files = json.loads(pickup.get("files_json") or "[]")
-        wanted = self.resolve_release_missing_volumes(release)
+        # The pickup's wanted list is the user's latest correction; only fall back to
+        # the release/matcher when it is empty.
+        try:
+            wanted = [float(value) for value in json.loads(pickup.get("wanted_json") or "[]")]
+        except (TypeError, ValueError):
+            wanted = []
         if not wanted:
-            wanted = json.loads(pickup.get("wanted_json") or "[]")
+            wanted = self.resolve_release_missing_volumes(release)
         plan = self._plan_torbox_selection(release, files, wanted, total_size=0)
         if plan.get("action") == "skip":
             raise ValueError(plan.get("reason") or "Nothing to fetch")
