@@ -2302,6 +2302,30 @@ class MangaDatabase:
             conn.commit()
             self._invalidate_grouped_cache()
 
+    def clear_downloader_submission(self, release_id: int, engine: Optional[str] = None) -> None:
+        """Fully detach a release from a downloader queue (user "Remove" action).
+
+        Clearing only ``download_status`` leaves the engine handle, torrent hash,
+        fetch progress and error behind; the row then still looks like engine work to
+        retries/status and can be re-rendered as a ghost queue item.  Reset every
+        submission field so the release is cleanly back to "not queued" while keeping
+        the release itself (and any files already fetched on disk).
+        """
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET "
+                "download_status = 'IDLE', download_error = '', download_attempts = 0, "
+                "downloader_id = NULL, torrent_hash = NULL, downloader_started_at = NULL, "
+                "download_wanted_json = '[]', torbox_progress_json = '{}', "
+                "download_files_json = '[]', downloaded_at = NULL, routed_at = NULL, "
+                + ("downloader = ?, " if engine else "")
+                + "updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                ((str(engine).strip().lower(), release_id) if engine else (release_id,)),
+            )
+            conn.commit()
+            self._invalidate_grouped_cache()
+
     def set_downloader_id(self, release_id: int, downloader_id: str):
         """Replace the engine handle without resetting the submission timestamp.
 

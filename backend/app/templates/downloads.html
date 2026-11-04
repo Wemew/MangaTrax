@@ -137,6 +137,10 @@
                 </span>
                 <span id="torbox-updated" class="text-[11px] text-slate-600">Updated just now</span>
                 <span id="torbox-reconnecting" class="hidden px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Reconnecting…</span>
+                <button type="button" onclick="clearFailedTorbox()" id="btn-clear-failed-torbox" title="Remove all failed items from the Torbox queue (active downloads are kept)" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/30 border border-slate-700 text-xs font-semibold text-rose-300 flex items-center gap-1.5 transition-colors">
+                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                    Clear failed
+                </button>
                 <button type="button" onclick="checkTorboxNow()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition-colors">
                     <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-cyan-400"></i>
                     Check now
@@ -211,6 +215,7 @@
                                 <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/40 text-rose-300 text-[10px] font-bold">Failed</span>
                                 {% if t.error %}
                                 <div class="text-[10px] text-rose-300/80 max-w-[280px] truncate mt-0.5" title="{{ t.error }}">{{ t.error }}</div>
+                                {% if t.strict_hint %}<div class="text-[10px] text-amber-300/80 max-w-[280px] mt-0.5" title="{{ t.strict_hint }}">{{ t.strict_hint }}</div>{% endif %}
                                 {% endif %}
                                 {% else %}
                                 <span class="torbox-state {% if t.phase == 'fetching' %}text-cyan-300{% elif t.phase == 'ready' %}text-amber-300{% elif t.phase == 'routing' %}text-teal-300{% endif %}">
@@ -605,6 +610,15 @@ async function deleteTorrent(hash) {
 
 let _downloadsPollTimer = null;
 let _lastTorboxRows = new Map();
+let _removedTorboxIds = new Set();
+
+function _dropTorboxRow(releaseId) {
+    const key = String(releaseId);
+    _removedTorboxIds.add(key);
+    _lastTorboxRows.delete(key);
+    const row = document.getElementById(`torbox-row-${key}`);
+    if (row) row.remove();
+}
 
 async function retryTorbox(releaseId) {
     if (!confirm('Retry this Torbox download? Strict volume selection applies.')) return;
@@ -618,12 +632,29 @@ async function retryTorbox(releaseId) {
 }
 
 async function removeTorbox(releaseId) {
-    if (!confirm('Remove this torrent from Torbox?')) return;
+    if (!confirm('Remove this torrent from the Torbox queue?')) return;
     try {
         const res = await fetch(`/api/downloads/torbox/${releaseId}/remove`, { method: 'POST' });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) { showToast(data.detail || 'Remove failed', 'error'); return; }
-        showToast(data.removed ? 'Removed from Torbox' : 'Local state cleared', 'success');
+        // A 404 means the row is already gone locally (e.g. a stale cached row):
+        // drop it from the DOM instead of leaving a ghost item behind.
+        if (!res.ok && res.status !== 404) { showToast(data.detail || 'Remove failed', 'error'); return; }
+        _dropTorboxRow(releaseId);
+        showToast(data.message || (data.remote_deleted ? 'Removed from Torbox' : 'Removed from the queue'), 'success');
+        await refreshDownloadsNow();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
+}
+
+async function clearFailedTorbox() {
+    if (!confirm('Remove all FAILED items from the Torbox queue? Active downloads are kept.')) return;
+    try {
+        const res = await fetch('/api/downloads/torbox/clear-failed', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'Clear failed items failed', 'error'); return; }
+        showToast(
+            `Removed ${data.removed || 0} failed item(s)` + (data.remote_deleted ? ` · ${data.remote_deleted} remote deleted` : ''),
+            'success'
+        );
         await refreshDownloadsNow();
     } catch (err) { showToast('Error: ' + err, 'error'); }
 }
@@ -666,7 +697,8 @@ function _torboxProgressHtml(t) {
 function _torboxStateHtml(t) {
     if (t.failed) {
         return `<span class="inline-flex items-center px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/40 text-rose-300 text-[10px] font-bold">Failed</span>` +
-            (t.error ? `<div class="text-[10px] text-rose-300/80 max-w-[260px] truncate mt-0.5" title="${escapeHtml(t.error)}">${escapeHtml(t.error)}</div>` : '');
+            (t.error ? `<div class="text-[10px] text-rose-300/80 max-w-[260px] truncate mt-0.5" title="${escapeHtml(t.error)}">${escapeHtml(t.error)}</div>` : '') +
+            (t.strict_hint ? `<div class="text-[10px] text-amber-300/80 max-w-[260px] mt-0.5" title="${escapeHtml(t.strict_hint)}">${escapeHtml(t.strict_hint)}</div>` : '');
     }
     const label = _stateLabel(t);
     const cls = t.phase === 'fetching' ? 'text-cyan-300' : (t.phase === 'ready' ? 'text-amber-300' : (t.phase === 'routing' ? 'text-teal-300' : ''));
@@ -705,7 +737,8 @@ function renderTorboxQueue(torrents, meta) {
     const tbody = document.getElementById('torbox-queue-body');
     if (!tbody) return;
     meta = meta || {};
-    const rows = Array.isArray(torrents) ? torrents : [];
+    const rows = (Array.isArray(torrents) ? torrents : [])
+        .filter(t => t && !_removedTorboxIds.has(String(t.release_id)));
     const stale = Boolean(meta.stale) || meta.live_state_available === false;
     const chip = document.getElementById('torbox-reconnecting');
     if (chip) chip.classList.toggle('hidden', !stale);

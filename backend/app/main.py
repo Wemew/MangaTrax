@@ -57,6 +57,18 @@ _TORBOX_SPEED_AVG_SAMPLES = 10
 _TORBOX_STATUS_CACHE: Dict[str, Any] = {"payload": None, "at": 0.0, "building": False}
 _TORBOX_STATUS_LOCK = threading.Lock()
 _TORBOX_SPEED_HISTORY: Dict[str, list] = {}
+
+
+def _invalidate_torbox_status_cache() -> None:
+    """Drop the last-good status payload so a queue change is visible immediately.
+
+    Without this, the 1s status cache can keep serving a payload that still contains a
+    row the user just removed, which re-renders the removed item for a moment (and
+    indefinitely if live rebuilds keep failing while the stale payload is reused).
+    """
+    with _TORBOX_STATUS_LOCK:
+        _TORBOX_STATUS_CACHE.update({"payload": None, "at": 0.0, "building": False})
+
 _NETWORK_SPEEDTEST_LAST: Dict[str, float] = {}
 _NETWORK_SPEEDTEST_MIN_INTERVAL_SECONDS = 60.0
 
@@ -712,12 +724,36 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
     if failed and not error:
         error = f"Torbox reported state '{info.get('raw_state') or 'failed'}'."
     can_retry = bool(failed and str(release.get("status") or "") in ("REQUESTED", "DISCOVERY", "NEW"))
+    strict_hint = ""
+    error_lower = error.lower()
+    if failed and "strict volume selection" in error_lower:
+        if wanted_volumes and all(float(v) >= 100 for v in wanted_volumes):
+            strict_hint = (
+                "These look like chapter numbers stored as volumes (e.g. 205-215). Run Settings → "
+                "Maintenance → Suspicious volume ranges (Audit, then Repair selected), then Retry."
+            )
+        elif "absent from the torrent" in error_lower:
+            strict_hint = (
+                "This torrent does not contain the volume(s) MangaTrax still needs. Pick another release, "
+                "or disable Settings → Torbox → strict volume selection to allow whole-torrent downloads."
+            )
+        elif "cannot be mapped" in error_lower:
+            strict_hint = (
+                "The torrent's file names could not be matched to volumes. Disable Settings → Torbox → "
+                "strict volume selection to allow a whole-torrent download, or pick another release."
+            )
+        elif "no file list" in error_lower:
+            strict_hint = (
+                "Torbox returned no file list, so strict selection cannot verify the volumes. Remove this "
+                "item and pick another release."
+            )
     return {
         "hash": str(release.get("torrent_hash") or saved),
         "name": str(release.get("title") or ""),
         "state": state,
         "failed": failed,
         "error": error,
+        "strict_hint": strict_hint,
         "can_retry": can_retry,
         "attempts": int(release.get("download_attempts") or 0),
         "download_status": db_status,
@@ -2804,20 +2840,71 @@ async def api_torbox_retry(release_id: int):
 
 @app.post("/api/downloads/torbox/{release_id}/remove")
 async def api_torbox_remove(release_id: int):
-    """Remove a Torbox release's remote job and clear its local failed state."""
+    """Remove a Torbox release from the queue (best-effort remote delete, always local).
+
+    Local cleanup must succeed even when the remote torrent is already gone (or Torbox
+    is unreachable): a stale handle used to leave the row in the queue forever because
+    the request errored before clearing the row.
+    """
     target = db.get_release_by_id(release_id)
     if not target:
         raise HTTPException(status_code=404, detail="Release not found")
     handle = scheduler._torbox_handle_for_release(release_id)
     deleted = False
+    remote_error = ""
     if handle:
         try:
             deleted = bool(await asyncio.to_thread(build_downloader(db, engine="torbox").cancel, handle))
         except Exception as exc:
+            remote_error = str(exc)
             logger.debug("Could not remove Torbox job for release %s: %s", release_id, exc)
-    db.update_downloader_state(release_id, "IDLE", "torbox")
-    db.clear_download_error(release_id)
-    return JSONResponse({"status": "success" if deleted else "error", "removed": deleted})
+    db.clear_downloader_submission(release_id, "torbox")
+    _invalidate_torbox_status_cache()
+    return JSONResponse({
+        "status": "success",
+        "removed": True,
+        "remote_deleted": deleted,
+        "remote_error": remote_error,
+        "message": "Removed from Torbox queue" if deleted else "Removed from the queue (no active remote job)",
+    })
+
+
+@app.post("/api/downloads/torbox/clear-failed")
+async def api_torbox_clear_failed():
+    """Remove every FAILED Torbox queue item (best-effort remote delete), with progress."""
+
+    def _clear_worker(reporter):
+        rows = db.get_downloader_releases("torbox", limit=500)
+        failed_rows = [row for row in rows if str(row.get("download_status") or "").upper() == "FAILED"]
+        total = len(failed_rows)
+        reporter.report(0, total, f"Removing {total} failed Torbox item(s)…", force=True)
+        deleted = 0
+        remote_errors = []
+        for index, row in enumerate(failed_rows, 1):
+            release_id = row.get("id")
+            handle = scheduler._torbox_handle_for_release(release_id)
+            if handle:
+                try:
+                    if build_downloader(db, engine="torbox").cancel(handle):
+                        deleted += 1
+                except Exception as exc:
+                    if len(remote_errors) < 5:
+                        remote_errors.append(str(exc))
+            db.clear_downloader_submission(release_id, "torbox")
+            reporter.report(index, total, f"Removed '{str(row.get('title') or '')[:60]}'")
+        _invalidate_torbox_status_cache()
+        return {
+            "failed_entries": total,
+            "removed": total,
+            "remote_deleted": deleted,
+            "remote_errors": remote_errors,
+        }
+
+    result, task = await asyncio.to_thread(
+        _recorded_task, "downloads:torbox-clear-failed", "Clear failed Torbox queue items",
+        _clear_worker, auth_module.get_current_actor(), None,
+    )
+    return JSONResponse({"status": "success", **result, "task_id": task["id"], "task": task})
 
 @app.get("/api/releases/{release_id}/state")
 async def api_release_download_state(release_id: int):
