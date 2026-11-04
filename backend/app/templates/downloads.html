@@ -611,6 +611,7 @@ async function deleteTorrent(hash) {
 let _downloadsPollTimer = null;
 let _lastTorboxRows = new Map();
 let _removedTorboxIds = new Set();
+let _pendingQueueConfirm = new Map();
 
 function _dropTorboxRow(releaseId) {
     const key = String(releaseId);
@@ -620,8 +621,37 @@ function _dropTorboxRow(releaseId) {
     if (row) row.remove();
 }
 
+// Two-step confirmation instead of window.confirm(): browsers can suppress blocking
+// dialogs (and then confirm() silently returns false), which made queue buttons look
+// dead. First click arms for 4s and shows a toast; the second click performs the action.
+function _queueConfirm(key, message) {
+    const now = Date.now();
+    const armedUntil = Number(_pendingQueueConfirm.get(key) || 0);
+    if (armedUntil > now) {
+        _pendingQueueConfirm.delete(key);
+        return true;
+    }
+    _pendingQueueConfirm.set(key, now + 4000);
+    showToast(message + ' Click again within 4s to confirm.', 'info');
+    return false;
+}
+
+function _setButtonBusy(button, busy, busyText) {
+    if (!button) return;
+    if (busy) {
+        button.dataset.originalHtml = button.innerHTML;
+        button.disabled = true;
+        button.innerHTML = `<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> ${busyText || 'Working…'}`;
+        if (window.lucide) lucide.createIcons();
+    } else {
+        button.disabled = false;
+        if (button.dataset.originalHtml) button.innerHTML = button.dataset.originalHtml;
+        if (window.lucide) lucide.createIcons();
+    }
+}
+
 async function retryTorbox(releaseId) {
-    if (!confirm('Retry this Torbox download? Strict volume selection applies.')) return;
+    if (!_queueConfirm('retry:' + releaseId, 'Retry this Torbox download? Strict volume selection applies.')) return;
     try {
         const res = await fetch(`/api/downloads/torbox/${releaseId}/retry`, { method: 'POST' });
         const data = await res.json().catch(() => ({}));
@@ -632,7 +662,7 @@ async function retryTorbox(releaseId) {
 }
 
 async function removeTorbox(releaseId) {
-    if (!confirm('Remove this torrent from the Torbox queue?')) return;
+    if (!_queueConfirm('remove:' + releaseId, 'Remove this torrent from the Torbox queue?')) return;
     try {
         const res = await fetch(`/api/downloads/torbox/${releaseId}/remove`, { method: 'POST' });
         const data = await res.json().catch(() => ({}));
@@ -645,18 +675,57 @@ async function removeTorbox(releaseId) {
     } catch (err) { showToast('Error: ' + err, 'error'); }
 }
 
+function _visibleFailedTorboxIds() {
+    const ids = new Set();
+    for (const [key, t] of _lastTorboxRows.entries()) {
+        if (t && t.failed) ids.add(String(key));
+    }
+    // Also catch server-rendered/stale DOM rows that never entered _lastTorboxRows
+    // (e.g. polling failed since page load): those are exactly the "ghost" failures.
+    document.querySelectorAll('#torbox-queue-body tr[data-release-id]').forEach(function (row) {
+        if ((row.textContent || '').toLowerCase().includes('failed')) ids.add(String(row.dataset.releaseId));
+    });
+    return Array.from(ids);
+}
+
+function _ensureTorboxEmptyState() {
+    const tbody = document.getElementById('torbox-queue-body');
+    if (!tbody) return;
+    if (tbody.querySelectorAll('tr[data-release-id]').length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="py-10 text-center text-slate-500">No active downloads in the Torbox queue.</td></tr>';
+    }
+}
+
 async function clearFailedTorbox() {
-    if (!confirm('Remove all FAILED items from the Torbox queue? Active downloads are kept.')) return;
+    if (!_queueConfirm('clear-failed', 'Remove all FAILED items from the Torbox queue? Active downloads are kept.')) return;
+    const button = document.getElementById('btn-clear-failed-torbox');
+    const visibleFailed = _visibleFailedTorboxIds();
+    _setButtonBusy(button, true, 'Clearing…');
     try {
         const res = await fetch('/api/downloads/torbox/clear-failed', { method: 'POST' });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) { showToast(data.detail || 'Clear failed items failed', 'error'); return; }
-        showToast(
-            `Removed ${data.removed || 0} failed item(s)` + (data.remote_deleted ? ` · ${data.remote_deleted} remote deleted` : ''),
-            'success'
-        );
+        if (!res.ok && res.status !== 404 && res.status !== 405) {
+            showToast(data.detail || 'Clear failed items failed', 'error');
+            return;
+        }
+        if (res.status === 404 || res.status === 405) {
+            // Backend without the bulk endpoint (older build): remove visible failed rows.
+            for (const id of visibleFailed) {
+                await fetch(`/api/downloads/torbox/${id}/remove`, { method: 'POST' }).catch(() => {});
+            }
+        }
+        // Drop every failed row the user can currently see, even if the server had
+        // already cleared some of them (otherwise stale DOM rows look "undeletable").
+        for (const id of visibleFailed) _dropTorboxRow(id);
+        const removedCount = Math.max(Number(data.removed || 0), visibleFailed.length);
+        showToast(`Removed ${removedCount} failed item(s)`, 'success');
         await refreshDownloadsNow();
-    } catch (err) { showToast('Error: ' + err, 'error'); }
+        _ensureTorboxEmptyState();
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    } finally {
+        _setButtonBusy(button, false);
+    }
 }
 
 async function checkTorboxNow() {

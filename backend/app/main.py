@@ -2849,7 +2849,11 @@ async def api_torbox_remove(release_id: int):
     target = db.get_release_by_id(release_id)
     if not target:
         raise HTTPException(status_code=404, detail="Release not found")
-    handle = scheduler._torbox_handle_for_release(release_id)
+    # FAILED rows already had their remote cleanup attempted when they failed
+    # (torbox_delete_on_failure). Re-cancelling them can block on Torbox timeouts and
+    # makes the Remove button appear dead, so failed rows are cleared locally only.
+    is_failed = str(target.get("download_status") or "").upper() == "FAILED"
+    handle = {} if is_failed else scheduler._torbox_handle_for_release(release_id)
     deleted = False
     remote_error = ""
     if handle:
@@ -2865,39 +2869,31 @@ async def api_torbox_remove(release_id: int):
         "removed": True,
         "remote_deleted": deleted,
         "remote_error": remote_error,
-        "message": "Removed from Torbox queue" if deleted else "Removed from the queue (no active remote job)",
+        "message": (
+            "Removed failed item from the queue" if is_failed
+            else ("Removed from Torbox queue" if deleted else "Removed from the queue (no active remote job)")
+        ),
     })
 
 
 @app.post("/api/downloads/torbox/clear-failed")
 async def api_torbox_clear_failed():
-    """Remove every FAILED Torbox queue item (best-effort remote delete), with progress."""
+    """Remove every FAILED Torbox queue item locally (fast, no remote waits), with progress."""
 
     def _clear_worker(reporter):
         rows = db.get_downloader_releases("torbox", limit=500)
         failed_rows = [row for row in rows if str(row.get("download_status") or "").upper() == "FAILED"]
         total = len(failed_rows)
         reporter.report(0, total, f"Removing {total} failed Torbox item(s)…", force=True)
-        deleted = 0
-        remote_errors = []
         for index, row in enumerate(failed_rows, 1):
             release_id = row.get("id")
-            handle = scheduler._torbox_handle_for_release(release_id)
-            if handle:
-                try:
-                    if build_downloader(db, engine="torbox").cancel(handle):
-                        deleted += 1
-                except Exception as exc:
-                    if len(remote_errors) < 5:
-                        remote_errors.append(str(exc))
             db.clear_downloader_submission(release_id, "torbox")
             reporter.report(index, total, f"Removed '{str(row.get('title') or '')[:60]}'")
         _invalidate_torbox_status_cache()
         return {
             "failed_entries": total,
             "removed": total,
-            "remote_deleted": deleted,
-            "remote_errors": remote_errors,
+            "remote_deleted": 0,
         }
 
     result, task = await asyncio.to_thread(

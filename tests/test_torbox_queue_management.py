@@ -130,17 +130,32 @@ def test_cache_invalidation_and_wiring():
 
     main_src = open(os.path.join(BASE_DIR, "backend", "app", "main.py"), encoding="utf-8").read()
     remove_start = main_src.find("async def api_torbox_remove")
-    remove_block = main_src[remove_start:remove_start + 2400]
+    remove_block = main_src[remove_start:remove_start + 2600]
     assert "clear_downloader_submission" in remove_block, "remove must clear the full submission"
     assert "_invalidate_torbox_status_cache()" in remove_block, "remove must invalidate the status cache"
+    assert "is_failed" in remove_block and "handle = {} if is_failed" in remove_block, (
+        "failed rows must not re-cancel the remote job (can block and look dead)"
+    )
     assert "/api/downloads/torbox/clear-failed" in main_src, "bulk clear endpoint missing"
     assert "downloads:torbox-clear-failed" in main_src, "bulk clear task kind missing"
+    clear_start = main_src.find("async def api_torbox_clear_failed")
+    clear_block = main_src[clear_start:clear_start + 2200]
+    assert "build_downloader" not in clear_block and ".cancel(" not in clear_block, (
+        "clear-failed must be local-only so it cannot hang on Torbox timeouts"
+    )
 
     downloads = open(os.path.join(BASE_DIR, "backend", "app", "templates", "downloads.html"), encoding="utf-8").read()
-    for marker in ("_removedTorboxIds", "_dropTorboxRow", "clearFailedTorbox", "btn-clear-failed-torbox", "strict_hint"):
+    for marker in ("_removedTorboxIds", "_dropTorboxRow", "clearFailedTorbox", "btn-clear-failed-torbox", "strict_hint",
+                   "_queueConfirm", "_setButtonBusy", "_visibleFailedTorboxIds", "_ensureTorboxEmptyState"):
         assert marker in downloads, f"{marker} missing from downloads.html"
     assert "res.status !== 404" in downloads, "remove must tolerate a stale/404 row"
-    print("    [PASSED] cache invalidation + UI wiring (instant row drop, 404 tolerance, Clear failed button).")
+    # No blocking window.confirm() in queue handlers: suppressed dialogs silently abort.
+    for fn in ("async function retryTorbox", "async function removeTorbox", "async function clearFailedTorbox"):
+        start = downloads.find(fn)
+        block = downloads[start:start + 2200]
+        assert "confirm(" not in block, f"{fn} must not rely on window.confirm()"
+        assert "_queueConfirm(" in block, f"{fn} must use the inline two-step confirmation"
+    print("    [PASSED] cache invalidation + UI wiring (instant row drop, dialog-free confirm, Clear failed button).")
 
 
 def run():
