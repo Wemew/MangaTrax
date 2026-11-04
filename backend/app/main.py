@@ -1496,6 +1496,22 @@ async def api_torbox_poll_now():
     })
 
 
+@app.post("/api/downloads/prune-empty")
+async def api_downloads_prune_empty(payload: Optional[Dict[str, Any]] = None):
+    """Manually prune EMPTY leftover folders (never rmtree; busy dirs skipped)."""
+    body = payload or {}
+    include_staging = bool(body.get("include_staging"))
+    result = await asyncio.to_thread(
+        downloads_pipeline.prune_empty_folders,
+        scheduler.get_downloads_dir(create=False),
+        _staging_dir_setting(),
+        db,
+        include_staging,
+        "user",
+    )
+    return JSONResponse({"status": "success", **result})
+
+
 @app.post("/api/downloads/scan")
 async def api_downloads_scan():
     """Rescan the raw downloads folder and return the fresh inventory."""

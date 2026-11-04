@@ -203,6 +203,10 @@ def scan_downloads(
                 except OSError:
                     continue
                 summary.pop("cbz_names", None)
+                # Empty or junk-only directories are leftovers (task-34 prunes them);
+                # never surface them as "unmatched" inventory rows.
+                if is_dir and int(summary.get("cbz_count") or 0) <= 0 and not summary.get("has_partials"):
+                    continue
                 state = _state_for(summary, parsed, series_templates)
                 entries.append({
                     "name": item.name,

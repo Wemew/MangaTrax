@@ -17,7 +17,9 @@ only fall back to copy+delete when ``st_dev`` differs (with a warning).
 import json
 import logging
 import os
+import re
 import shutil
+import time
 from typing import Any, Dict, List, Optional
 
 from app.parser import (
@@ -172,6 +174,126 @@ def _move_with_preference(source_path: str, dest_path: str) -> str:
         except OSError:
             pass
     return "copy"
+
+
+def _safe_target_dirname(title: str) -> str:
+    """Mirror the scheduler's safe torrent folder name for busy-dir detection."""
+    cleaned = re.sub(r"[^\w\s.()\[\]-]+", "_", str(title or "")).strip().strip(".")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return (cleaned[:120] or "torbox-download")
+
+
+def _busy_download_dirnames(db: Any) -> Optional[set]:
+    """Target folder names of releases currently DOWNLOADING (None = lookup unusable)."""
+    if db is None:
+        return None
+    try:
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT title FROM releases WHERE download_status = 'DOWNLOADING';")
+            rows = cur.fetchall()
+    except Exception:
+        return None
+    return {_safe_target_dirname(row["title"]) for row in rows if row["title"]}
+
+
+def prune_empty_dirs(
+    root: str,
+    db: Any = None,
+    busy_names: Any = None,
+    min_age_seconds: float = 60.0,
+    label: str = "downloads",
+    actor: str = "scheduler",
+) -> Dict[str, Any]:
+    """Bottom-up rmdir of EMPTY directories under *root*.  Never rmtree/symlink-follow.
+
+    Keeps any directory that still has entries (hidden files, .part remnants, junk),
+    skips directories belonging to an in-flight download or touched in the last
+    ``min_age_seconds``, and refuses to leave the configured root.  Emits one
+    ``DOWNLOADS_PRUNED`` audit/log line per pass when anything was removed.
+    """
+    result: Dict[str, Any] = {"removed": 0, "dirs": [], "skipped_busy": 0}
+    if not root:
+        return result
+    try:
+        root_real = os.path.realpath(root)
+    except OSError:
+        return result
+    if not os.path.isdir(root_real):
+        return result
+    use_age_fallback = False
+    if busy_names is not None:
+        busy = set(busy_names)
+    else:
+        looked_up = _busy_download_dirnames(db)
+        if looked_up is None:
+            # Ambiguous/no DB: fall back to a ~60 s mtime guard so an in-flight
+            # download's target directory is never pruned just because it is empty
+            # for a moment.
+            busy = set()
+            use_age_fallback = True
+        else:
+            busy = looked_up
+    removed: List[str] = []
+    skipped_busy = 0
+    now = time.time()
+    try:
+        for dirpath, dirnames, _filenames in os.walk(root_real, topdown=False, followlinks=False):
+            current = os.path.realpath(dirpath)
+            if current == root_real:
+                continue
+            if not current.startswith(root_real + os.sep):
+                continue  # containment guard
+            if os.path.islink(dirpath):
+                continue  # never traverse/delete symlinked dirs
+            name = os.path.basename(dirpath)
+            if name in busy:
+                skipped_busy += 1
+                logger.debug("Prune: keeping busy download dir '%s'", dirpath)
+                continue
+            try:
+                with os.scandir(dirpath) as iterator:
+                    has_entries = any(True for _ in iterator)
+            except OSError:
+                continue
+            if has_entries:
+                logger.debug("Prune: keeping non-empty dir '%s'", dirpath)
+                continue
+            try:
+                mtime = os.stat(dirpath).st_mtime
+            except OSError:
+                continue
+            if use_age_fallback and min_age_seconds and (now - mtime) < min_age_seconds:
+                skipped_busy += 1
+                logger.debug("Prune: keeping recently modified dir '%s'", dirpath)
+                continue
+            try:
+                os.rmdir(dirpath)
+            except OSError as exc:
+                logger.debug("Prune: could not remove '%s': %s", dirpath, exc)
+                continue
+            removed.append(os.path.relpath(dirpath, root_real))
+    except OSError as exc:
+        logger.debug("Prune walk failed for '%s': %s", root_real, exc)
+    result.update({"removed": len(removed), "dirs": sorted(removed), "skipped_busy": skipped_busy})
+    if removed:
+        capped = sorted(removed)[:20]
+        logger.info(
+            "Downloads prune (%s): removed %s empty folder(s): %s%s",
+            label, len(removed), ", ".join(capped),
+            " …" if len(removed) > len(capped) else "",
+        )
+        try:
+            if db is not None:
+                db.log_activity(
+                    "DOWNLOADS_PRUNED",
+                    f"Pruned {len(removed)} empty folder(s) from {label}",
+                    json.dumps({"dirs": capped, "removed": len(removed), "skipped_busy": skipped_busy}),
+                    actor=actor,
+                )
+        except Exception as exc:  # pragma: no cover - audit must not break routing
+            logger.debug("Could not audit downloads prune: %s", exc)
+    return result
 
 
 def process_downloads_to_staging(
@@ -347,6 +469,13 @@ def process_downloads_to_staging(
                 db.set_setting("downloads_routing_failed_signature", signature)
             except Exception as exc:  # pragma: no cover
                 logger.debug("Could not audit routing failures: %s", exc)
+    prune = prune_empty_dirs(downloads_dir, db=db, actor=actor, label="downloads")
+    result.update({
+        "removed": prune["removed"],
+        "pruned_count": prune["removed"],
+        "pruned_dirs": prune["dirs"],
+        "skipped_busy": prune["skipped_busy"],
+    })
     if result["scanned"]:
         logger.info(
             "Downloads routing: scanned %s, moved %s, awaiting %s, failed %s, skipped %s.",
@@ -354,3 +483,24 @@ def process_downloads_to_staging(
             result["failed"], result["skipped_existing"],
         )
     return result
+
+
+def prune_empty_folders(
+    downloads_dir: str,
+    staging_dir: Optional[str] = None,
+    db: Any = None,
+    include_staging: bool = False,
+    actor: str = "scheduler",
+) -> Dict[str, Any]:
+    """Manual prune action: empty download dirs (+ optional staging dirs) only."""
+    downloads = prune_empty_dirs(downloads_dir, db=db, actor=actor, label="downloads")
+    staging: Dict[str, Any] = {"removed": 0, "dirs": [], "skipped_busy": 0}
+    if include_staging and staging_dir:
+        staging = prune_empty_dirs(staging_dir, db=None, busy_names=set(), actor=actor, label="staging")
+    return {
+        "removed": int(downloads["removed"]) + int(staging["removed"]),
+        "dirs": list(downloads["dirs"]) + list(staging["dirs"]),
+        "skipped_busy": int(downloads["skipped_busy"]),
+        "downloads": downloads,
+        "staging": staging,
+    }

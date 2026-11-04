@@ -122,6 +122,7 @@ def test_series_known_tags_and_moves():
         assert result == {
             "scanned": 1, "tagged_and_moved": 1, "awaiting_calibre": 0,
             "failed": 0, "skipped_existing": 0, "series_awaiting": [],
+            "removed": 1, "pruned_count": 1, "pruned_dirs": ["nested"], "skipped_busy": 0,
         }, result
         destination = os.path.join(ctx.staging, "nested", "Known Series Vol. 02.cbz")
         assert os.path.isfile(destination), destination
@@ -388,6 +389,7 @@ def test_idempotent_and_staging_untouched():
         assert second == {
             "scanned": 0, "tagged_and_moved": 0, "awaiting_calibre": 0,
             "failed": 0, "skipped_existing": 0, "series_awaiting": [],
+            "removed": 0, "pruned_count": 0, "pruned_dirs": [], "skipped_busy": 0,
         }, second
         assert os.path.isfile(legacy), "files already in staging must be untouched by the routing pass"
         print("    [PASSED] second pass is a no-op; pre-existing staging files untouched.")
