@@ -1024,6 +1024,81 @@ class MangaDatabase:
             logger.info("Media filter: typed %s stored JPEG XL row(s); nothing deleted.", typed)
         return typed
 
+    @staticmethod
+    def _release_filter_clause(series_name=None, statuses=None, exclude_statuses=None):
+        clauses = []
+        params = []
+        if series_name:
+            clauses.append("lower(trim(series_name)) = lower(trim(?))")
+            params.append(str(series_name))
+        if statuses:
+            cleaned = [str(item).strip().upper() for item in statuses if str(item or "").strip()]
+            if cleaned:
+                placeholders = ", ".join("?" for _ in cleaned)
+                clauses.append(f"upper(status) IN ({placeholders})")
+                params.extend(cleaned)
+        if exclude_statuses:
+            cleaned = [str(item).strip().upper() for item in exclude_statuses if str(item or "").strip()]
+            if cleaned:
+                placeholders = ", ".join("?" for _ in cleaned)
+                clauses.append(f"upper(status) NOT IN ({placeholders})")
+                params.extend(cleaned)
+        return clauses, params
+
+    def count_cached_releases(self, series_name=None, statuses=None, exclude_statuses=None) -> Dict[str, Any]:
+        """Cheap preview: cached release rows matching the filters (excludes active)."""
+        clauses, params = self._release_filter_clause(series_name, statuses, exclude_statuses)
+        clauses.append("upper(status) NOT IN ('DOWNLOADING', 'QUEUED')")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self.get_connection() as conn:
+            row = conn.execute(f"SELECT COUNT(*) AS count FROM releases{where};", params).fetchone()
+        return {"count": int(row["count"] or 0) if row else 0}
+
+    def clear_cached_releases(
+        self, series_name=None, statuses=None, actor: str = "scheduler",
+        exclude_statuses=None,
+    ) -> Dict[str, Any]:
+        """Delete cached release rows (all/series/status filtered), never active rows."""
+        clauses, params = self._release_filter_clause(series_name, statuses, exclude_statuses)
+        active_clauses = list(clauses) + ["upper(status) IN ('DOWNLOADING', 'QUEUED')"]
+        active_where = " WHERE " + " AND ".join(active_clauses)
+        delete_clauses = list(clauses) + ["upper(status) NOT IN ('DOWNLOADING', 'QUEUED')"]
+        delete_where = " WHERE " + " AND ".join(delete_clauses)
+        deleted = 0
+        skipped_active = 0
+        try:
+            with self.get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(f"SELECT COUNT(*) AS count FROM releases{active_where};", params)
+                skipped_active = int((cur.fetchone() or {"count": 0})["count"] or 0)
+                cur.execute(f"DELETE FROM releases{delete_where};", params)
+                deleted = max(0, int(cur.rowcount or 0))
+                conn.commit()
+        except Exception as exc:
+            logger.warning("Could not clear cached releases: %s", exc)
+        self._invalidate_grouped_cache()
+        if deleted:
+            try:
+                self.log_activity(
+                    "RELEASES_CLEARED",
+                    f"Cleared {deleted} cached release(s)"
+                    + (f" for series '{series_name}'" if series_name else "")
+                    + (f" with statuses {statuses}" if statuses else ""),
+                    json.dumps({
+                        "deleted": deleted, "skipped_active": skipped_active,
+                        "series_name": series_name, "statuses": statuses,
+                    }),
+                    actor=actor,
+                )
+            except Exception as exc:  # pragma: no cover - audit must not fail the purge
+                logger.debug("Could not audit release cache clear: %s", exc)
+        return {
+            "deleted": deleted,
+            "skipped_active": skipped_active,
+            "series_name": series_name,
+            "statuses": statuses,
+        }
+
     def prune_activity_logs(
         self, retention_days: int = 90, max_rows: int = 50000, checkpoint: bool = True,
     ) -> Dict[str, Any]:

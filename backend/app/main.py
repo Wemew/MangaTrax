@@ -1426,6 +1426,12 @@ async def settings_view(request: Request):
             ),
             "file_logging": _file_logging_info(),
             "activity_logs_health": _activity_logs_health(),
+            "release_cache": db.count_cached_releases(),
+            "release_series": [
+                {"name": row.get("name")}
+                for row in (db.get_all_series() or [])
+                if row.get("name")
+            ],
             "debug_actions_enabled": AUTH_CONFIG.debug_actions
         }
     )
@@ -1720,6 +1726,46 @@ async def api_network_speedtest(payload: Optional[Dict[str, Any]] = None):
     ):
         return JSONResponse(result, status_code=400)
     return JSONResponse(result)
+
+
+@app.get("/api/maintenance/releases-cache")
+async def api_releases_cache(
+    series: Optional[str] = None, statuses: Optional[str] = None,
+    exclude_statuses: Optional[str] = None,
+):
+    """Cheap preview count of clearable cached releases."""
+    status_list = [item.strip() for item in (statuses or "").split(",") if item.strip()] or None
+    exclude_list = [item.strip() for item in (exclude_statuses or "").split(",") if item.strip()] or None
+    result = await asyncio.to_thread(db.count_cached_releases, series, status_list, exclude_list)
+    return JSONResponse({"status": "success", **result})
+
+
+@app.post("/api/maintenance/clear-releases")
+async def api_clear_releases(payload: Optional[Dict[str, Any]] = None):
+    body = payload or {}
+    if body.get("confirm") is not True:
+        raise HTTPException(status_code=400, detail="confirm must be true to clear cached releases")
+    series_name = str(body.get("series_name") or "").strip() or None
+    raw_statuses = body.get("statuses")
+    if raw_statuses is None:
+        statuses = None
+    elif isinstance(raw_statuses, str):
+        statuses = [item.strip() for item in raw_statuses.split(",") if item.strip()] or None
+    elif isinstance(raw_statuses, list):
+        statuses = [str(item).strip() for item in raw_statuses if str(item or "").strip()] or None
+    else:
+        raise HTTPException(status_code=400, detail="statuses must be a list or comma-separated string")
+    raw_excluded = body.get("exclude_statuses")
+    if raw_excluded is None:
+        exclude_statuses = None
+    elif isinstance(raw_excluded, list):
+        exclude_statuses = [str(item).strip() for item in raw_excluded if str(item or "").strip()] or None
+    else:
+        raise HTTPException(status_code=400, detail="exclude_statuses must be a list")
+    result = await asyncio.to_thread(
+        db.clear_cached_releases, series_name, statuses, auth_module.get_current_actor(), exclude_statuses,
+    )
+    return JSONResponse({"status": "success", **result})
 
 
 @app.get("/api/maintenance/series-attribution")
