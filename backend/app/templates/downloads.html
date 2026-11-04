@@ -3,6 +3,21 @@
 {% block title %}Downloader & Staging{% endblock %}
 
 {% block content %}
+<div class="mb-5 bg-darkcard border border-slate-800 rounded-2xl p-4" id="auto-download-diagnostics">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div>
+            <h2 class="text-lg font-bold text-white flex items-center gap-2"><i data-lucide="zap" class="w-5 h-5 text-amber-400"></i> Auto-download diagnostics</h2>
+            <p class="text-xs text-slate-400 mt-1">Explains whether new/transitioning feed releases are being auto-downloaded, and why not. Dedupe checks in-flight, staged volumes and qBittorrent limitations.</p>
+        </div>
+        <button type="button" onclick="refreshAutoDownloadDiagnostics()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Refresh diagnostics</button>
+    </div>
+    <div id="auto-download-summary" class="mt-3 text-xs text-slate-300">Loading…</div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
+        <div><h3 class="text-xs font-bold text-slate-200 mb-1">Why nothing fires</h3><ul id="auto-download-checklist" class="space-y-1 text-[11px] text-slate-400"></ul></div>
+        <div><h3 class="text-xs font-bold text-slate-200 mb-1">Recent decisions</h3><ul id="auto-download-decisions" class="space-y-1 text-[11px] text-slate-400 max-h-48 overflow-y-auto"></ul></div>
+    </div>
+</div>
+
 {% if manual_pickup_count and manual_pickup_count > 0 %}
 <div class="mb-5 flex items-center justify-between gap-3 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
     <p class="text-sm text-amber-200"><i data-lucide="hand" class="w-4 h-4 inline-block mr-1"></i><strong>{{ manual_pickup_count }}</strong> torrent(s) need manual volume mapping.</p>
@@ -1442,6 +1457,35 @@ async function executeDuplicatePurge() {
         });
     } catch (err) { showToast('Error: ' + err, 'error'); }
 }
+
+// --- Auto-download diagnostics (task-56) ---
+async function refreshAutoDownloadDiagnostics() {
+    const summary = document.getElementById('auto-download-summary');
+    const checklist = document.getElementById('auto-download-checklist');
+    const decisions = document.getElementById('auto-download-decisions');
+    try {
+        const res = await fetch('/api/downloads/auto-download/diagnostics');
+        const data = await res.json();
+        if (!res.ok) { if (summary) summary.textContent = data.detail || 'Diagnostics failed'; return; }
+        if (summary) {
+            const last = data.last_poll || {};
+            summary.innerHTML = `Global: <strong>${data.global_enabled ? 'on' : 'off'}</strong> · Engine: <strong>${escapeHtml(data.engine || '')}</strong> ${data.engine_ready ? '✓ ready' : '✗ ' + escapeHtml(data.engine_reason || 'unavailable')} · Feeds with auto-download: <strong>${data.feeds_auto_download || 0}/${data.feeds_total || 0}</strong> · Monitored series: <strong>${data.monitored_series || 0}</strong> · Last poll: ${last.releases_found || 0} found / ${last.new_releases || 0} new / ${last.transitions || 0} transitions / ${last.sent_to_downloader || 0} sent`;
+        }
+        if (checklist) {
+            checklist.innerHTML = (data.checklist || []).map(function (item) {
+                return `<li class="${item.ok ? 'text-emerald-300' : 'text-amber-300'}">${item.ok ? '✓' : '✗'} ${escapeHtml(item.label)}</li>`;
+            }).join('');
+        }
+        if (decisions) {
+            const rows = data.recent_decisions || [];
+            decisions.innerHTML = rows.length ? rows.map(function (item) {
+                const wanted = (item.wanted_volumes || []).join(', ');
+                return `<li class="${item.event === 'AUTO_DOWNLOAD_SUBMITTED' ? 'text-emerald-300' : 'text-slate-400'}"><span class="font-semibold">${escapeHtml(item.event.replace('AUTO_DOWNLOAD_', ''))}</span> ${escapeHtml(item.reason || '')} · ${escapeHtml(item.series || '')} ${wanted ? '→ v' + escapeHtml(wanted) : ''}</li>`;
+            }).join('') : '<li class="text-slate-500">No auto-download decisions yet.</li>';
+        }
+    } catch (err) { if (summary) summary.textContent = 'Diagnostics failed: ' + err; }
+}
+document.addEventListener('DOMContentLoaded', refreshAutoDownloadDiagnostics);
 </script>
 
 <!-- Manual series match modal (task-42) -->

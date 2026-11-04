@@ -124,6 +124,7 @@ class MangaScheduler:
         # poll and the interval poll from overlapping.
         self._feed_check_lock = threading.Lock()
         self._feed_check_state_lock = threading.Lock()
+        self._staging_volume_cache: Optional[tuple] = None
         self._feed_check_state: Dict[str, Any] = {
             "running": False,
             "started_at": None,
@@ -1039,6 +1040,164 @@ class MangaScheduler:
             logger.debug("Could not compute missing volumes for '%s': %s", release.get("title"), exc)
             return stored
 
+    def _auto_download_engine_ready(self) -> tuple:
+        """Cheap, no-network readiness check for the configured download engine."""
+        try:
+            engine = self.get_downloader_engine()
+        except Exception:
+            engine = "qbit"
+        if engine == "torbox":
+            enabled = as_bool(self.db.get_setting("torbox_enabled", "false"), default=False)
+            has_key = bool(str(self.db.get_setting("torbox_api_key", "") or "").strip())
+            return (enabled and has_key, "torbox" if enabled and has_key else "torbox_disabled_or_no_api_key")
+        try:
+            client = self.get_qbit_client()
+        except Exception:
+            client = None
+        return (client is not None, "qbit_connected" if client is not None else "qbit_unavailable")
+
+    def _log_auto_download_decision(self, submitted: bool, reason: str, feed_name: str,
+                                    rel, series: str, missing: List[float],
+                                    wanted: Optional[List[float]] = None) -> None:
+        event = "AUTO_DOWNLOAD_SUBMITTED" if submitted else "AUTO_DOWNLOAD_SKIPPED"
+        title = str(getattr(rel, "title", "") or "")
+        series_name = str(series or getattr(rel, "series_name", "") or "")
+        detail = {
+            "reason": reason,
+            "feed": feed_name,
+            "series": series_name,
+            "title": title,
+            "missing_volumes": [round(float(value), 2) for value in (missing or [])],
+            "wanted_volumes": [round(float(value), 2) for value in (wanted if wanted is not None else missing or [])],
+        }
+        label = "submitted" if submitted else f"skipped ({reason})"
+        try:
+            self._log_activity(
+                event, f"Auto-download {label}: '{title}'", json.dumps(detail),
+            )
+        except Exception as exc:
+            logger.debug("Could not audit auto-download decision: %s", exc)
+
+    def _staging_reserved_volumes(self) -> Dict[str, set]:
+        """Volumes already present in staging without needing a tracked-release row."""
+        now = time.time()
+        cached = getattr(self, "_staging_volume_cache", None)
+        if cached and now - cached[0] < 60:
+            return cached[1]
+        result: Dict[str, set] = {}
+        root = self.db.get_setting("staging_dir", "/staging")
+        try:
+            if root and os.path.isdir(root):
+                for current, dirs, names in os.walk(root):
+                    dirs[:] = [name for name in dirs if not name.startswith(".")]
+                    for name in names:
+                        if not name.lower().endswith((".cbz", ".cbr", ".zip", ".epub")):
+                            continue
+                        if name.lower().endswith((".part", ".tmp")) or name.startswith("."):
+                            continue
+                        try:
+                            parsed = extract_manga_bundle_and_volumes(name)
+                        except Exception:
+                            continue
+                        series = normalize_text(str(parsed.get("series_name") or ""))
+                        if not series:
+                            continue
+                        volumes = result.setdefault(series, set())
+                        for value in parsed.get("volumes") or []:
+                            try:
+                                volumes.add(float(value))
+                            except (TypeError, ValueError):
+                                continue
+        except Exception as exc:
+            logger.debug("Could not scan staging volumes for dedupe: %s", exc)
+        self._staging_volume_cache = (now, result)
+        return result
+
+    def get_auto_download_diagnostics(self) -> Dict[str, Any]:
+        """Read-only explanation of auto-download state and recent decisions."""
+        settings = self.db.get_all_settings() or {}
+        feeds = self.db.get_all_feeds() or []
+        engine_ready, engine_reason = self._auto_download_engine_ready()
+        try:
+            engine = self.get_downloader_engine()
+        except Exception:
+            engine = "qbit"
+        monitored = [series for series in (self.db.get_all_series() or []) if series.get("is_monitored")]
+        last_result = None
+        try:
+            status = self.get_feed_check_status() or {}
+            last_result = status.get("result")
+        except Exception:
+            last_result = None
+        logs = self.db.get_logs(limit=100) or []
+        decisions = []
+        for row in logs:
+            event = str(row.get("event_type") or "")
+            if event not in ("AUTO_DOWNLOAD_SUBMITTED", "AUTO_DOWNLOAD_SKIPPED", "IN_FLIGHT_DEDUPE"):
+                continue
+            details = {}
+            try:
+                details = json.loads(row.get("details") or "{}")
+            except (TypeError, ValueError):
+                details = {}
+            decisions.append({
+                "event": event,
+                "message": row.get("message") or "",
+                "reason": details.get("reason") or ("all_volumes_inflight" if event == "IN_FLIGHT_DEDUPE" else ""),
+                "feed": details.get("feed") or "",
+                "series": details.get("series") or "",
+                "missing_volumes": details.get("missing_volumes") or [],
+                "wanted_volumes": details.get("wanted_volumes") or [],
+                "created_at": row.get("created_at") or "",
+            })
+        global_enabled = str(settings.get("auto_download", "true")).lower() == "true"
+        auto_feeds = [feed for feed in feeds if feed.get("enabled") and feed.get("auto_download")]
+        checklist = [
+            {"key": "global_enabled", "ok": global_enabled,
+             "label": "Global Auto-download is enabled (Settings → General)."},
+            {"key": "feeds_enabled", "ok": len(auto_feeds) > 0,
+             "label": "At least one enabled feed has Auto-download on."},
+            {"key": "monitored_series", "ok": len(monitored) > 0,
+             "label": "At least one monitored/Calibre series can translate a release to REQUESTED."},
+            {"key": "engine_ready", "ok": engine_ready,
+             "label": f"Download engine ({engine}) is ready."},
+            {"key": "new_or_transition_releases", "ok": bool(last_result and (last_result.get("releases_found") or 0) > 0),
+             "label": "The last feed poll found releases; only new/transitioning ones auto-download."},
+        ]
+        return {
+            "status": "success",
+            "global_enabled": global_enabled,
+            "engine": engine,
+            "engine_ready": engine_ready,
+            "engine_reason": engine_reason,
+            "feeds": [
+                {"id": feed.get("id"), "name": feed.get("name"), "enabled": bool(feed.get("enabled")),
+                 "auto_download": bool(feed.get("auto_download"))}
+                for feed in feeds
+            ],
+            "feeds_total": len(feeds),
+            "feeds_auto_download": len(auto_feeds),
+            "monitored_series": len(monitored),
+            "tracked_releases": len(self.db.get_releases(limit=5000, offset=0) or []),
+            "last_poll": last_result or {},
+            "recent_decisions": decisions[:20],
+            "checklist": checklist,
+            "limitations": [
+                "qBittorrent cannot select individual files: a partial overlap downloads the "
+                "whole torrent, then the existing selective-volume filter applies when supported.",
+                "Staging-only volumes are detected by a bounded parsed-name scan; files with "
+                "unparseable names cannot reserve volumes.",
+            ],
+            "prerequisites": [
+                "Global setting auto_download=true and the feed’s Auto-download toggle on.",
+                "A monitored series in Calibre: releases are effectively REQUESTED (not DISCOVERY/IGNORED).",
+                "The release is new or transitions DISCOVERY/NEW → REQUESTED during a feed poll.",
+                "At least one missing volume remains after in-flight/staging dedupe.",
+                "A magnet/HTTP download URL and a ready downloader engine are available.",
+            ],
+            "staging_dedupe_volumes": {key: sorted(value) for key, value in self._staging_reserved_volumes().items()},
+        }
+
     def _auto_download_wanted(self, rel, stable_series: str, missing_vols: List[float]):
         """Auto-download only: exclude volumes already in flight/awaiting Calibre.
 
@@ -1063,6 +1222,14 @@ class MangaScheduler:
         except Exception as exc:
             logger.debug("In-flight reservation lookup failed for '%s': %s", getattr(rel, "title", ""), exc)
             reserved = set()
+        # Also reserve volumes whose files are already in staging but whose release row
+        # is missing/IDLE (external placement or old reset): bounded once-per-minute scan.
+        try:
+            staged = self._staging_reserved_volumes()
+            for candidate in series_names:
+                reserved |= staged.get(normalize_text(candidate), set())
+        except Exception as exc:
+            logger.debug("Staging reservation lookup failed for '%s': %s", getattr(rel, "title", ""), exc)
         wanted = [value for value in missing if round(value, 2) not in reserved]
         if len(wanted) != len(missing):
             in_flight = sorted({round(value, 2) for value in missing} & reserved)
@@ -3351,12 +3518,42 @@ class MangaScheduler:
                             except Exception as e:
                                 logger.debug(f"Webhook notification failed for new request: {e}")
 
+                        if is_new or is_transition:
+                            if not global_auto_download:
+                                self._log_auto_download_decision(
+                                    False, "global_disabled", feed_name, rel, series_key, missing_vols,
+                                )
+                            elif not feed.get("auto_download"):
+                                self._log_auto_download_decision(
+                                    False, "feed_disabled", feed_name, rel, series_key, missing_vols,
+                                )
                         if (is_new or is_transition) and global_auto_download and feed.get("auto_download"):
+                            engine_ready, engine_reason = self._auto_download_engine_ready()
+                            if not missing_vols:
+                                self._log_auto_download_decision(
+                                    False, "no_missing_volumes", feed_name, rel, series_key, missing_vols,
+                                )
+                                continue
+                            if not engine_ready:
+                                self._log_auto_download_decision(
+                                    False, f"engine_unavailable:{engine_reason}", feed_name, rel,
+                                    series_key, missing_vols,
+                                )
+                                continue
+                            if not (rel.download_url or getattr(rel, "link", None)):
+                                self._log_auto_download_decision(
+                                    False, "no_download_url", feed_name, rel, series_key, missing_vols,
+                                )
+                                continue
                             # In-flight dedupe (auto-download only): volumes already
                             # DOWNLOADING/COMPLETED for this series (not yet in Calibre)
                             # are never requested twice from a second release.
                             auto_wanted, _reserved = self._auto_download_wanted(rel, series_key, missing_vols)
                             if missing_vols and not auto_wanted:
+                                self._log_auto_download_decision(
+                                    False, "all_volumes_inflight", feed_name, rel, series_key,
+                                    missing_vols, auto_wanted,
+                                )
                                 # Remember the duplicate: the sweep retries it once the
                                 # in-flight reservation clears (it will never be "new").
                                 if rel_id:
@@ -3375,6 +3572,20 @@ class MangaScheduler:
                                 )
                                 if result.get("success") and not result.get("skipped"):
                                     total_sent_to_downloader += 1
+                                    self._log_auto_download_decision(
+                                        True, "submitted", feed_name, rel, series_key,
+                                        missing_vols, auto_wanted,
+                                    )
+                                elif result.get("skipped"):
+                                    self._log_auto_download_decision(
+                                        False, f"strict_skip:{result.get('message') or 'skipped'}",
+                                        feed_name, rel, series_key, missing_vols, auto_wanted,
+                                    )
+                                else:
+                                    self._log_auto_download_decision(
+                                        False, f"submit_error:{result.get('error') or result.get('message') or 'unknown'}",
+                                        feed_name, rel, series_key, missing_vols, auto_wanted,
+                                    )
                             else:
                                 success = qbit.add_torrent(
                                     url_or_magnet=rel.download_url,
@@ -3384,6 +3595,10 @@ class MangaScheduler:
                                 )
                                 if success:
                                     total_sent_to_downloader += 1
+                                    self._log_auto_download_decision(
+                                        True, "submitted", feed_name, rel, series_key,
+                                        missing_vols, auto_wanted,
+                                    )
                                     torrent_h = qbit.extract_torrent_hash(rel.download_url) if hasattr(qbit, "extract_torrent_hash") else None
                                     if not isinstance(torrent_h, str):
                                         torrent_h = None
@@ -3403,6 +3618,11 @@ class MangaScheduler:
                                                 "SELECTIVE_DOWNLOAD",
                                                 f"Selective download applied for '{rel.title}': skipped {len(sel_res.get('skipped_volumes', []))} owned/in-flight volumes; downloading {len(sel_res.get('kept_volumes', []))} missing volumes."
                                             )
+                                else:
+                                    self._log_auto_download_decision(
+                                        False, "submit_error:qbit_add_failed", feed_name, rel,
+                                        series_key, missing_vols, auto_wanted,
+                                    )
 
                 self.db.update_feed_status(feed_id, "OK", None)
             except Exception as e:

@@ -2192,6 +2192,13 @@ async def api_downloads_scan():
     })
 
 
+@app.get("/api/downloads/auto-download/diagnostics")
+async def api_auto_download_diagnostics():
+    """Read-only: why auto-download is/isn't firing + recent decisions."""
+    data = await asyncio.to_thread(scheduler.get_auto_download_diagnostics)
+    return JSONResponse(data)
+
+
 @app.get("/api/diagnostics/network")
 async def api_network_diagnostics():
     """Full in-container network snapshot (read-only, cheap, no network I/O)."""

@@ -277,8 +277,8 @@
                 <div class="flex items-start gap-2.5">
                     <input type="checkbox" id="setting-auto-download" {% if settings.auto_download == 'true' %}checked{% endif %} class="mt-0.5 rounded border-slate-700 bg-slate-900 text-brand-500 focus:ring-0">
                     <div>
-                        <label for="setting-auto-download" class="text-xs font-semibold text-white">Auto-Push to Downloader</label>
-                        <p class="text-[11px] text-slate-400">Automatically send wanted manga releases and bundles to qBittorrent.</p>
+                        <label for="setting-auto-download" class="text-xs font-semibold text-white">Auto-download new releases</label>
+                        <p class="text-[11px] text-slate-400">Automatically send new/transitioning wanted releases during feed polling to the downloader. Prerequisites: enabled feed with Auto-download on, monitored series, missing volumes not already in flight/staging, and a ready download engine. See Downloads → Auto-download diagnostics for the live checklist.</p>
                     </div>
                 </div>
 
