@@ -1,0 +1,21 @@
+{% for r in releases %}
+<div class="series-release-row p-3 hover:bg-slate-850/50 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs min-w-0">
+    <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2 flex-wrap min-w-0">
+            {% if r.link %}
+            <a href="{{ r.link|safe_url }}" target="_blank" rel="noopener noreferrer" class="font-bold text-slate-100 text-sm hover:text-brand-400 break-words-anywhere" title="{{ r.title }}">{{ r.title }}</a>
+            {% else %}
+            <span class="font-bold text-slate-100 text-sm break-words-anywhere" title="{{ r.title }}">{{ r.title }}</span>
+            {% endif %}
+            {% if r.status == 'REQUESTED' %}<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/20">Wanted</span>{% endif %}
+            {% if r.download_status == 'DOWNLOADING' %}<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">Downloading</span>{% endif %}
+        </div>
+        <div class="text-[11px] text-slate-400 mt-1">
+            {% if r.volumes %}Includes {{ r.volumes|length }} vols{% elif r.volume_start is not none and r.volume_end is not none %}Complete series (v{{ "%02d"|format(r.volume_start|int) }}-{{ "%02d"|format(r.volume_end|int) }}){% else %}Standalone{% endif %}
+        </div>
+    </div>
+    <div class="flex items-center gap-1.5">
+        {% if r.download_url %}<button onclick="downloadRelease({{ r.id }})" class="px-2.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-semibold text-xs">Download</button>{% endif %}
+    </div>
+</div>
+{% endfor %}

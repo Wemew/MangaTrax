@@ -2112,8 +2112,19 @@ class MangaDatabase:
             if str(row["name"] or "").strip()
         }
 
-    def get_releases(self, status: Optional[str] = None, limit: int = 500, offset: int = 0) -> List[Dict[str, Any]]:
+    def get_releases(self, status: Optional[str] = None, limit: int = 500, offset: int = 0,
+                     search: Optional[str] = None) -> List[Dict[str, Any]]:
         media_guard = tracked_media_clause()
+        search_clause = ""
+        search_params: List[Any] = []
+        if search and str(search).strip():
+            term = _like_contains(str(search).strip())
+            search_clause = (
+                " AND (lower(title) LIKE ? ESCAPE '\\' "
+                "OR lower(COALESCE(series_name, '')) LIKE ? ESCAPE '\\'"
+                " OR lower(COALESCE(release_group, '')) LIKE ? ESCAPE '\\')"
+            )
+            search_params = [term, term, term]
         with self.get_connection() as conn:
             cur = conn.cursor()
             priority_map = self._prioritized_priority_map(cur)
@@ -2124,26 +2135,26 @@ class MangaDatabase:
                     WHERE (is_complete = 1 OR lower(title) LIKE '%complete%')
                       AND status NOT IN ('BLACKLISTED', 'IGNORED')
                       AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
-                      AND {media_guard}
+                      AND {media_guard}{search_clause}
                     ORDER BY updated_at DESC LIMIT ? OFFSET ?;
-                """, (limit, offset))
+                """, (*search_params, limit, offset))
             elif status:
                 cur.execute(
-                    f"SELECT * FROM releases WHERE status = ? AND {media_guard} "
+                    f"SELECT * FROM releases WHERE status = ? AND {media_guard}{search_clause} "
                     "ORDER BY updated_at DESC LIMIT ? OFFSET ?;",
-                    (status, limit, offset),
+                    (status, *search_params, limit, offset),
                 )
             else:
                 cur.execute(f"""
                     SELECT * FROM releases 
                     WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
                       AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
-                      AND {media_guard}
+                      AND {media_guard}{search_clause}
                     ORDER BY 
                         CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                         updated_at DESC 
                     LIMIT ? OFFSET ?;
-                """, (limit, offset))
+                """, (*search_params, limit, offset))
             rows = [dict(r) for r in cur.fetchall()]
 
             cur.execute("SELECT search_term, canonical_title, romaji_title, cover_url, source FROM manga_metadata_cache;")
@@ -2178,6 +2189,33 @@ class MangaDatabase:
                 else:
                     r["display_series_name"] = s_name
             return rows
+
+    def count_releases(self, status: Optional[str] = None, search: Optional[str] = None) -> int:
+        media_guard = tracked_media_clause()
+        clauses = [f"({media_guard})"]
+        params: List[Any] = []
+        if status == "COMPLETED":
+            clauses.append("(is_complete = 1 OR lower(title) LIKE '%complete%')")
+            clauses.append("status NOT IN ('BLACKLISTED', 'IGNORED')")
+            clauses.append("(series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))")
+        elif status:
+            clauses.append("status = ?")
+            params.append(status)
+        else:
+            clauses.append("status NOT IN ('BLACKLISTED', 'IGNORED')")
+            clauses.append("(series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))")
+        if search and str(search).strip():
+            term = _like_contains(str(search).strip())
+            clauses.append(
+                "(lower(title) LIKE ? ESCAPE '\\' OR lower(COALESCE(series_name, '')) LIKE ? ESCAPE '\\' "
+                "OR lower(COALESCE(release_group, '')) LIKE ? ESCAPE '\\')"
+            )
+            params.extend([term, term, term])
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM releases WHERE " + " AND ".join(clauses) + ";", params,
+            ).fetchone()
+        return int(row["count"] or 0) if row else 0
 
     def search_releases(self, query: str, limit: int = 50) -> List[Dict[str, Any]]:
         """Literal (LIKE-escaped) search over release titles and series names.

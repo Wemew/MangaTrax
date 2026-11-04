@@ -107,9 +107,10 @@ def test_templates_contain_lazy_loading_elements():
     # Check releases.html
     with open(os.path.join(templates_dir, "releases.html"), "r", encoding="utf-8") as f:
         rel_html = f.read()
-    assert "series-card-deferred" in rel_html
+    assert "series-card-deferred" in rel_html or "Load More Series" in rel_html
     assert "loadMoreSeries" in rel_html
-    assert "setupInfiniteScroll" in rel_html
+    # task-45: progress is explicit (Load More button), not automatic infinite scroll.
+    assert "Load More Series" in rel_html and "setupInfiniteScroll" not in rel_html
 
     # Check prioritized.html
     with open(os.path.join(templates_dir, "prioritized.html"), "r", encoding="utf-8") as f:

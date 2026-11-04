@@ -66,7 +66,7 @@
     <!-- Quick Search Filter Bar -->
     <div class="bg-darkcard border border-slate-800 rounded-xl p-3 flex items-center gap-3 shadow-md">
         <i data-lucide="search" class="w-4 h-4 text-slate-400"></i>
-        <input type="text" id="releaseSearchInput" onkeyup="filterReleases()" placeholder="Filter by series name, author, or release group..." 
+        <input type="text" id="releaseSearchInput" oninput="handleReleaseSearch()" placeholder="Search series, title, or release group..." 
                class="bg-transparent border-0 text-sm text-slate-100 placeholder-slate-500 focus:outline-none w-full">
         <span id="matchCounter" class="text-xs text-slate-500 font-mono whitespace-nowrap"></span>
     </div>
@@ -117,6 +117,7 @@
             <i data-lucide="chevrons-down" class="w-4 h-4 text-brand-400"></i>
             <span>Load More Series (<span id="deferred-series-count">0</span> remaining)</span>
         </button>
+        <span id="series-showing-counter" class="block text-[11px] text-slate-500 mt-2">Showing 0 of 0 series</span>
     </div>
 
     {% else %}
@@ -152,14 +153,13 @@
                 </tbody>
             </table>
         </div>
-        {% if releases|length > 50 %}
         <div id="load-more-flat-container" class="text-center py-4 bg-slate-900/60 border-t border-slate-800">
             <button onclick="loadMoreFlat()" id="btn-load-more-flat" class="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
                 <i data-lucide="chevrons-down" class="w-4 h-4 text-brand-400"></i>
                 <span>Load More Releases (<span id="deferred-flat-count">{{ releases|length - 50 }}</span> remaining)</span>
             </button>
+            <span id="flat-showing-counter" class="block text-[11px] text-slate-500 mt-2">Showing 0 of 0 releases</span>
         </div>
-        {% endif %}
     </div>
     {% endif %}
 
@@ -168,6 +168,57 @@
 <script>
 const currentStatus = "{{ current_status or '' }}";
 const currentView = "{{ current_view or 'series' }}";
+let currentSearch = "";
+let _releaseSearchTimer = null;
+
+function resetReleasePagination() {
+    seriesOffset = 0;
+    flatOffset = 0;
+    hasMoreSeries = true;
+    hasMoreFlat = true;
+    isFirstSeriesBatch = true;
+    isFirstFlatBatch = true;
+    const seriesContainer = document.getElementById('seriesGroupContainer');
+    const flatBody = document.getElementById('flatTableBody');
+    if (seriesContainer) seriesContainer.innerHTML = '';
+    if (flatBody) flatBody.innerHTML = '';
+    const sBtn = document.getElementById('btn-load-more-series');
+    const fBtn = document.getElementById('btn-load-more-flat');
+    if (sBtn) { sBtn.classList.add('hidden'); sBtn.disabled = false; }
+    if (fBtn) { fBtn.classList.add('hidden'); fBtn.disabled = false; }
+}
+
+function handleReleaseSearch() {
+    clearTimeout(_releaseSearchTimer);
+    _releaseSearchTimer = setTimeout(function () {
+        currentSearch = (document.getElementById('releaseSearchInput')?.value || '').trim();
+        resetReleasePagination();
+        if (currentView === 'flat') fetchNextFlatBatch();
+        else fetchNextSeriesBatch();
+    }, 300);
+}
+
+async function showAllSeriesReleases(button) {
+    const seriesKey = button.dataset.seriesKey;
+    const total = parseInt(button.dataset.total || '0', 10);
+    let offset = parseInt(button.dataset.shown || '10', 10);
+    const container = document.getElementById('series-releases-' + seriesKey.replace(/[^a-z0-9]/gi, '').toLowerCase());
+    // Fall back to the container inside the button's card when the id differs.
+    const target = container || button.closest('.series-card')?.querySelector('[id^="series-releases-"]');
+    if (!target) return;
+    button.disabled = true;
+    try {
+        const res = await fetch(`/api/releases/series_releases?series_key=${encodeURIComponent(seriesKey)}&offset=${offset}&limit=10`);
+        const data = await res.json();
+        if (data.html) target.insertAdjacentHTML('beforeend', data.html);
+        offset += data.count || 0;
+        button.dataset.shown = String(offset);
+        if (window.lucide) lucide.createIcons();
+        if (!data.has_more || offset >= total) button.remove();
+        else button.textContent = `Show all ${total} releases`;
+    } catch (err) { showToast('Could not load series releases: ' + err, 'error'); }
+    finally { button.disabled = false; }
+}
 
 // Empty-state helper: reset the status query parameter and the client-side search.
 function clearReleaseFilters() {
@@ -204,7 +255,7 @@ async function fetchNextSeriesBatch() {
     if (spinner && !isFirstSeriesBatch) spinner.style.display = 'block';
 
     try {
-        const url = `/api/releases/cards?status=${encodeURIComponent(currentStatus)}&offset=${seriesOffset}&limit=${seriesLimit}`;
+        const url = `/api/releases/cards?status=${encodeURIComponent(currentStatus)}&offset=${seriesOffset}&limit=${seriesLimit}&search=${encodeURIComponent(currentSearch)}`;
         const res = await fetch(url);
         const data = await res.json();
 
@@ -248,13 +299,17 @@ async function fetchNextSeriesBatch() {
             filterReleases();
         }
 
-        if (!hasMoreSeries) {
-            if (spinner) spinner.style.display = 'none';
-        } else {
-            // Smoothly stream next batch down the page
-            if (spinner) spinner.style.display = 'block';
-            setTimeout(fetchNextSeriesBatch, 60);
+        const seriesMore = document.getElementById('load-more-series-container');
+        if (seriesMore) seriesMore.style.display = 'block';
+        const btn = document.getElementById('btn-load-more-series');
+        if (btn) {
+            btn.classList.toggle('hidden', !hasMoreSeries);
+            btn.disabled = false;
         }
+        const counter = document.getElementById('series-showing-counter');
+        if (counter) counter.textContent = `Showing ${seriesOffset} of ${data.total || seriesOffset} series`;
+        if (spinner) spinner.style.display = 'none';
+        if (!hasMoreSeries && btn) btn.classList.add('hidden');
     } catch (err) {
         console.error("Error loading series cards:", err);
         const btn = document.getElementById('btn-load-more-series');
@@ -264,29 +319,7 @@ async function fetchNextSeriesBatch() {
     }
 }
 
-function loadMoreSeries(batchSize = 24) {
-    // Unhide static deferred if any exists
-    const deferred = document.querySelectorAll('.series-card-deferred');
-    if (deferred.length > 0) {
-        let count = 0;
-        deferred.forEach(card => {
-            if (count < batchSize) {
-                card.classList.remove('hidden', 'series-card-deferred');
-                count++;
-            }
-        });
-        const remaining = document.querySelectorAll('.series-card-deferred').length;
-        const countEl = document.getElementById('deferred-series-count');
-        if (countEl) countEl.innerText = remaining;
-        if (remaining === 0) {
-            const container = document.getElementById('load-more-series-container');
-            if (container) container.style.display = 'none';
-        }
-        if (window.lucide) lucide.createIcons();
-    } else {
-        fetchNextSeriesBatch();
-    }
-}
+function loadMoreSeries() { fetchNextSeriesBatch(); }
 
 // Progressive flat releases lazy-loading
 let flatOffset = 0;
@@ -303,7 +336,7 @@ async function fetchNextFlatBatch() {
     if (spinner && !isFirstFlatBatch) spinner.style.display = 'block';
 
     try {
-        const url = `/api/releases/flat_rows?status=${encodeURIComponent(currentStatus)}&offset=${flatOffset}&limit=${flatLimit}`;
+        const url = `/api/releases/flat_rows?status=${encodeURIComponent(currentStatus)}&offset=${flatOffset}&limit=${flatLimit}&search=${encodeURIComponent(currentSearch)}`;
         const res = await fetch(url);
         const data = await res.json();
 
@@ -342,12 +375,17 @@ async function fetchNextFlatBatch() {
             filterReleases();
         }
 
-        if (!hasMoreFlat) {
-            if (spinner) spinner.style.display = 'none';
-        } else {
-            if (spinner) spinner.style.display = 'block';
-            setTimeout(fetchNextFlatBatch, 60);
+        const flatMore = document.getElementById('load-more-flat-container');
+        if (flatMore) flatMore.style.display = 'block';
+        const btn = document.getElementById('btn-load-more-flat');
+        if (btn) {
+            btn.classList.toggle('hidden', !hasMoreFlat);
+            btn.disabled = false;
         }
+        const counter = document.getElementById('flat-showing-counter');
+        if (counter) counter.textContent = `Showing ${flatOffset} of ${data.total || flatOffset} releases`;
+        if (spinner) spinner.style.display = 'none';
+        if (!hasMoreFlat && btn) btn.classList.add('hidden');
     } catch (err) {
         console.error("Error loading flat releases:", err);
         const btn = document.getElementById('btn-load-more-flat');
@@ -357,53 +395,9 @@ async function fetchNextFlatBatch() {
     }
 }
 
-function loadMoreFlat(batchSize = 50) {
-    const deferred = document.querySelectorAll('.flat-row-deferred');
-    if (deferred.length > 0) {
-        let count = 0;
-        deferred.forEach(row => {
-            if (count < batchSize) {
-                row.classList.remove('hidden', 'flat-row-deferred');
-                count++;
-            }
-        });
-        const remaining = document.querySelectorAll('.flat-row-deferred').length;
-        const countEl = document.getElementById('deferred-flat-count');
-        if (countEl) countEl.innerText = remaining;
-        if (remaining === 0) {
-            const container = document.getElementById('load-more-flat-container');
-            if (container) container.style.display = 'none';
-        }
-        if (window.lucide) lucide.createIcons();
-    } else {
-        fetchNextFlatBatch();
-    }
-}
-
-// Auto-trigger infinite scroll when near bottom
-function setupInfiniteScroll() {
-    const seriesContainer = document.getElementById('load-more-series-container');
-    if (seriesContainer && 'IntersectionObserver' in window) {
-        const obs = new IntersectionObserver((entries) => {
-            if (entries[0].isIntersecting) {
-                loadMoreSeries();
-            }
-        }, { rootMargin: '300px' });
-        obs.observe(seriesContainer);
-    }
-    const flatContainer = document.getElementById('load-more-flat-container');
-    if (flatContainer && 'IntersectionObserver' in window) {
-        const obs = new IntersectionObserver((entries) => {
-            if (entries[0].isIntersecting) {
-                loadMoreFlat();
-            }
-        }, { rootMargin: '300px' });
-        obs.observe(flatContainer);
-    }
-}
+function loadMoreFlat() { fetchNextFlatBatch(); }
 
 window.addEventListener('DOMContentLoaded', () => {
-    setupInfiniteScroll();
     if (currentView === 'flat') {
         const deferred = document.querySelectorAll('.flat-row-deferred');
         if (!deferred.length) {

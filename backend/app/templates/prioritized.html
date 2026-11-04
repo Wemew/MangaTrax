@@ -284,13 +284,11 @@ async function fetchNextSeriesBatch() {
             filterPrioritized();
         }
 
-        if (!hasMoreSeries) {
-            if (spinner) spinner.style.display = 'none';
-        } else {
-            // Smoothly stream next batch down the page
-            if (spinner) spinner.style.display = 'block';
-            setTimeout(fetchNextSeriesBatch, 60);
-        }
+        const btn = document.getElementById('btn-load-more-series');
+        if (btn) { btn.classList.toggle('hidden', !hasMoreSeries); btn.disabled = false; }
+        const counter = document.getElementById('prioritized-series-showing');
+        if (counter) counter.textContent = `Showing ${seriesOffset} of ${data.total || seriesOffset} series`;
+        if (spinner) spinner.style.display = 'none';
     } catch (err) {
         console.error("Error loading prioritized cards:", err);
         const btn = document.getElementById('btn-load-more-series');
@@ -300,28 +298,7 @@ async function fetchNextSeriesBatch() {
     }
 }
 
-function loadMoreSeries(batchSize = 24) {
-    const deferred = document.querySelectorAll('.series-card-deferred');
-    if (deferred.length > 0) {
-        let count = 0;
-        deferred.forEach(card => {
-            if (count < batchSize) {
-                card.classList.remove('hidden', 'series-card-deferred');
-                count++;
-            }
-        });
-        const remaining = document.querySelectorAll('.series-card-deferred').length;
-        const countEl = document.getElementById('deferred-series-count');
-        if (countEl) countEl.innerText = remaining;
-        if (remaining === 0) {
-            const container = document.getElementById('load-more-series-container');
-            if (container) container.style.display = 'none';
-        }
-        if (window.lucide) lucide.createIcons();
-    } else {
-        fetchNextSeriesBatch();
-    }
-}
+function loadMoreSeries() { fetchNextSeriesBatch(); }
 
 // Progressive flat releases lazy-loading
 let flatOffset = 0;
@@ -377,12 +354,11 @@ async function fetchNextFlatBatch() {
             filterPrioritized();
         }
 
-        if (!hasMoreFlat) {
-            if (spinner) spinner.style.display = 'none';
-        } else {
-            if (spinner) spinner.style.display = 'block';
-            setTimeout(fetchNextFlatBatch, 60);
-        }
+        const btn = document.getElementById('btn-load-more-flat');
+        if (btn) { btn.classList.toggle('hidden', !hasMoreFlat); btn.disabled = false; }
+        const counter = document.getElementById('prioritized-flat-showing');
+        if (counter) counter.textContent = `Showing ${flatOffset} of ${data.total || flatOffset} releases`;
+        if (spinner) spinner.style.display = 'none';
     } catch (err) {
         console.error("Error loading flat prioritized releases:", err);
         const btn = document.getElementById('btn-load-more-flat');
@@ -392,50 +368,7 @@ async function fetchNextFlatBatch() {
     }
 }
 
-function loadMoreFlat(batchSize = 50) {
-    const deferred = document.querySelectorAll('.flat-row-deferred');
-    if (deferred.length > 0) {
-        let count = 0;
-        deferred.forEach(row => {
-            if (count < batchSize) {
-                row.classList.remove('hidden', 'flat-row-deferred');
-                count++;
-            }
-        });
-        const remaining = document.querySelectorAll('.flat-row-deferred').length;
-        const countEl = document.getElementById('deferred-flat-count');
-        if (countEl) countEl.innerText = remaining;
-        if (remaining === 0) {
-            const container = document.getElementById('load-more-flat-container');
-            if (container) container.style.display = 'none';
-        }
-        if (window.lucide) lucide.createIcons();
-    } else {
-        fetchNextFlatBatch();
-    }
-}
-
-// Auto-trigger infinite scroll
-function setupInfiniteScroll() {
-    const seriesContainer = document.getElementById('load-more-series-container');
-    if (seriesContainer && 'IntersectionObserver' in window) {
-        const obs = new IntersectionObserver((entries) => {
-            if (entries[0].isIntersecting) {
-                loadMoreSeries();
-            }
-        }, { rootMargin: '300px' });
-        obs.observe(seriesContainer);
-    }
-    const flatContainer = document.getElementById('load-more-flat-container');
-    if (flatContainer && 'IntersectionObserver' in window) {
-        const obs = new IntersectionObserver((entries) => {
-            if (entries[0].isIntersecting) {
-                loadMoreFlat();
-            }
-        }, { rootMargin: '300px' });
-        obs.observe(flatContainer);
-    }
-}
+function loadMoreFlat() { fetchNextFlatBatch(); }
 
 window.addEventListener('DOMContentLoaded', () => {
     if (currentView === 'flat') {
@@ -449,7 +382,6 @@ window.addEventListener('DOMContentLoaded', () => {
             fetchNextSeriesBatch();
         }
     }
-    setupInfiniteScroll();
 });
 
 function filterPrioritized() {

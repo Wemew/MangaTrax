@@ -1166,6 +1166,18 @@ async def prioritized_view(request: Request, status: Optional[str] = None, view:
     )
 
 # --- Lazy Loading API Endpoints ---
+_SERIES_CARD_RELEASE_CAP = 10
+
+
+def _cap_group_releases(groups: list, cap: int = _SERIES_CARD_RELEASE_CAP) -> list:
+    for group in groups or []:
+        releases = list(group.get("releases") or [])
+        group["release_total"] = len(releases)
+        group["releases_shown"] = min(cap, len(releases))
+        group["releases"] = releases[:cap]
+    return groups
+
+
 @app.get("/api/releases/cards")
 async def api_releases_cards(
     request: Request,
@@ -1175,7 +1187,9 @@ async def api_releases_cards(
     search: Optional[str] = Query(None)
 ):
     clean_s = search.strip() if search else None
-    groups = db.get_releases_grouped_by_series(status=status, limit=limit, offset=offset, search=clean_s)
+    groups = _cap_group_releases(
+        db.get_releases_grouped_by_series(status=status, limit=limit, offset=offset, search=clean_s)
+    )
     total = db.count_releases_grouped_by_series(status=status, search=clean_s)
     has_more = (offset + len(groups)) < total
     html = templates.get_template("partials/series_card_chunk.html").render(
@@ -1199,7 +1213,9 @@ async def api_prioritized_cards(
     search: Optional[str] = Query(None)
 ):
     clean_s = search.strip() if search else None
-    groups = db.get_releases_grouped_by_series(status=status, prioritized_only=True, limit=limit, offset=offset, search=clean_s)
+    groups = _cap_group_releases(
+        db.get_releases_grouped_by_series(status=status, prioritized_only=True, limit=limit, offset=offset, search=clean_s)
+    )
     total = db.count_releases_grouped_by_series(status=status, prioritized_only=True, search=clean_s)
     has_more = (offset + len(groups)) < total
     html = templates.get_template("partials/series_card_chunk.html").render(
@@ -1219,9 +1235,12 @@ async def api_releases_flat_rows(
     request: Request,
     status: Optional[str] = None,
     offset: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200)
+    limit: int = Query(50, ge=1, le=200),
+    search: Optional[str] = Query(None)
 ):
-    releases = db.get_releases(status=status, limit=limit, offset=offset)
+    clean_search = search.strip() if search else None
+    releases = db.get_releases(status=status, limit=limit, offset=offset, search=clean_search)
+    total = db.count_releases(status=status, search=clean_search)
     seen_sigs = set()
     deduped = []
     for r in releases:
@@ -1231,7 +1250,7 @@ async def api_releases_flat_rows(
         if sig not in seen_sigs:
             seen_sigs.add(sig)
             deduped.append(r)
-    has_more = len(releases) == limit
+    has_more = (offset + len(releases)) < total
     html = templates.get_template("partials/flat_release_row_chunk.html").render(
         {"request": request, "releases": deduped}
     )
@@ -1239,8 +1258,42 @@ async def api_releases_flat_rows(
         "status": "success",
         "offset": offset,
         "count": len(deduped),
+        "total": total,
         "has_more": has_more,
         "html": html
+    })
+
+
+@app.get("/api/releases/series_releases")
+async def api_series_releases(
+    request: Request,
+    series_key: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(_SERIES_CARD_RELEASE_CAP, ge=1, le=50),
+    status: Optional[str] = None,
+):
+    groups = db.get_releases_grouped_by_series(status=status, search=series_key)
+    group = None
+    target_norm = (series_key or "").strip().lower()
+    for candidate in groups or []:
+        if (candidate.get("series_key") or "").strip().lower() == target_norm or (
+            candidate.get("series_name") or ""
+        ).strip().lower() == target_norm:
+            group = candidate
+            break
+    releases = list((group or {}).get("releases") or [])
+    total = len(releases)
+    page = releases[offset:offset + limit]
+    html = templates.get_template("partials/series_release_rows_chunk.html").render(
+        {"request": request, "releases": page}
+    )
+    return JSONResponse({
+        "status": "success",
+        "offset": offset,
+        "count": len(page),
+        "total": total,
+        "has_more": (offset + len(page)) < total,
+        "html": html,
     })
 
 @app.get("/api/prioritized/flat_rows")
