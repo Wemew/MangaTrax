@@ -105,6 +105,14 @@ query ($search: String) {
     status
     description
     genres
+    tags {
+      id
+      name
+      rank
+      isMediaSpoiler
+      isGeneralSpoiler
+      category
+    }
     synonyms
   }
 }
@@ -162,6 +170,9 @@ class AniListMetadataService:
                 "source": "fallback",
                 "anilist_id": None,
                 "synonyms": [],
+                "genres": [],
+                "tags": [],
+                "tags_sorted": [],
                 "matched_term": str(raw_series_name or ""),
             }
 
@@ -234,6 +245,9 @@ class AniListMetadataService:
                 "source": "fallback",
                 "anilist_id": None,
                 "synonyms": [],
+                "genres": [],
+                "tags": [],
+                "tags_sorted": [],
                 "matched_term": str(raw_series_name or ""),
             }
 
@@ -317,6 +331,25 @@ class AniListMetadataService:
                     if not canonical:
                         canonical = romaji or search_term
 
+                    raw_tags = media.get("tags") or []
+                    parsed_tags = []
+                    for tag in raw_tags:
+                        if not isinstance(tag, dict):
+                            continue
+                        name = str(tag.get("name") or "").strip()
+                        if not name:
+                            continue
+                        parsed_tags.append({
+                            "name": name,
+                            "rank": int(tag.get("rank") or 0),
+                            "category": str(tag.get("category") or ""),
+                            "spoiler": bool(tag.get("isMediaSpoiler") or tag.get("isGeneralSpoiler")),
+                        })
+                    # AniList prevalence: rank descending; Python sort is stable so ties
+                    # keep provider order.
+                    parsed_tags.sort(key=lambda item: -item["rank"])
+                    genres = [str(item).strip() for item in (media.get("genres") or []) if str(item).strip()]
+                    display_tags = [item["name"] for item in parsed_tags if not item["spoiler"]]
                     cover = media.get("coverImage", {}).get("extraLarge") or media.get("coverImage", {}).get("large") or ""
                     volumes = media.get("volumes")
                     status = media.get("status") or "UNKNOWN"
@@ -333,6 +366,9 @@ class AniListMetadataService:
                         # spinoff release.
                         "anilist_id": media.get("id"),
                         "synonyms": [str(item).strip() for item in synonyms if str(item or "").strip()],
+                        "genres": genres,
+                        "tags": parsed_tags,
+                        "tags_sorted": display_tags,
                         "matched_term": str(search_term or ""),
                         "cover_url": cover,
                         "total_volumes": volumes,

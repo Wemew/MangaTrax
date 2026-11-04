@@ -218,6 +218,15 @@
                         {% endfor %}
                     </div>
 
+                    {% if tag_display is defined %}
+                    {% set tag_info = tag_display(r.tags_json, view='releases') %}
+                    {% if tag_info and tag_info.chips %}
+                    <div class="flex flex-wrap items-center gap-1 mt-1" title="{{ tag_info.tooltip }}">
+                        {% for tag in tag_info.chips %}<span class="px-1.5 py-0.5 rounded bg-slate-800/80 border border-slate-700 text-slate-300 text-[10px]">{{ tag }}</span>{% endfor %}
+                        {% if tag_info.overflow %}<span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-500 text-[10px]">+{{ tag_info.overflow }}</span>{% endif %}
+                    </div>
+                    {% endif %}
+                    {% endif %}
                     {% if r.download_state %}
                     <div class="mt-1">
                         <span class="release-state-chip inline-flex items-center px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300 text-[10px] font-bold" data-state="{{ r.download_state.state }}" title="{{ r.download_state.label }}{% if r.download_state.error %}: {{ r.download_state.error }}{% endif %}">{{ r.download_state.label }}{% if r.download_state.state == 'downloading' and r.download_state.progress_pct %} {{ r.download_state.progress_pct }}%{% endif %}</span>

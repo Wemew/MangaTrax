@@ -774,6 +774,45 @@ class MangaScheduler:
         # (6) Unknown series: the parsed name IS the stable key (never the AniList title).
         return _make(raw, "raw")
 
+    def refresh_provider_tags(self, progress=None, cancel_check=None) -> Dict[str, Any]:
+        """Backfill provider tags for releases lacking them (task-49, rate-limited)."""
+        from app.tag_display import tags_from_metadata
+
+        rows = self.db.get_releases(limit=1000, offset=0)
+        series_names = []
+        seen = set()
+        for row in rows:
+            if row.get("tags_json") and row["tags_json"] not in ("", "[]"):
+                continue
+            name = (row.get("series_name") or "").strip()
+            key = normalize_text(name)
+            if name and key and key not in seen:
+                seen.add(key)
+                series_names.append(name)
+        updated = skipped = failed = 0
+        total = len(series_names)
+        for index, name in enumerate(series_names, 1):
+            if cancel_check and cancel_check():
+                raise RuntimeError("Cancelled by user")
+            if progress:
+                progress(index - 1, total, f"Fetching tags for '{name}'")
+            try:
+                meta = self.anilist.resolve_manga_series(name)
+                tags = tags_from_metadata(meta)
+                if not tags:
+                    skipped += 1
+                    continue
+                self.db.cache_manga_metadata(name.lower(), meta)
+                self.db.update_release_tags_for_series(name, tags)
+                self.db.update_series_tags(name, tags)
+                updated += 1
+            except Exception as exc:
+                logger.debug("Provider tag refresh failed for '%s': %s", name, exc)
+                failed += 1
+        if progress:
+            progress(total, total, "Provider tags refreshed")
+        return {"updated": updated, "skipped": skipped, "failed": failed, "total": total}
+
     def audit_series_attribution(self, progress=None) -> Dict[str, Any]:
         """Read-only audit: tracked releases whose own title parses to another series.
 
@@ -3327,6 +3366,15 @@ class MangaScheduler:
         }
 
         is_new, rel_id = self.db.upsert_release(rel_dict)
+        if rel_id:
+            try:
+                from app.tag_display import tags_from_metadata
+                provider_tags = tags_from_metadata(meta)
+                if provider_tags:
+                    self.db.update_release_tags(rel_id, provider_tags)
+                    self.db.update_series_tags(series_key, provider_tags)
+            except Exception as exc:
+                logger.debug("Could not persist provider tags for release %s: %s", rel_id, exc)
         return (is_new, status, missing_vols, rel_id, series_key)
 
     def detect_series_titles(self, series_name: str) -> List[str]:

@@ -639,6 +639,18 @@
                 </button>
             </div>
 
+            <!-- Provider tags (task-49) -->
+            <div class="mt-4 bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                    <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i data-lucide="tags" class="w-4 h-4 text-cyan-400"></i>
+                        Provider tags
+                    </h4>
+                    <button type="button" onclick="refreshProviderTags()" data-task-kind="tags:refresh" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Refresh provider tags</button>
+                </div>
+                <p class="text-[11px] text-slate-400">Backfills AniList genres/tags onto existing releases and series (rate-limited, cancellable, progress in the global Tasks panel).</p>
+            </div>
+
             <!-- Suspicious volume ranges (task-44) -->
             <div id="volume-range-card" class="mt-4 bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-2">
                 <div class="flex flex-wrap items-center justify-between gap-2">
@@ -1156,6 +1168,19 @@ function toggleVolumeRange(id) {
     if (_volumeRangeSelected.has(id)) _volumeRangeSelected.delete(id);
     else _volumeRangeSelected.add(id);
     _updateVolumeRangeButton();
+}
+
+async function refreshProviderTags() {
+    try {
+        const res = await fetch('/api/maintenance/refresh-tags', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Tag refresh failed', 'error'); return; }
+        showToast('Provider tag refresh started', 'success');
+        MangaTasks.poll();
+        if (data.task_id && window.MangaTasks) MangaTasks.watch(data.task_id, function (task) {
+            showToast(task.status === 'success' ? 'Provider tags refreshed' : 'Tag refresh failed', task.status === 'success' ? 'success' : 'error');
+        });
+    } catch (err) { showToast('Error: ' + err, 'error'); }
 }
 
 async function auditVolumeRanges() {

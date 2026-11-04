@@ -52,6 +52,21 @@
                 </a>
                 {% endif %}
             </form>
+            <div class="w-full md:flex-1 relative">
+                <div class="flex items-center gap-2">
+                    <input type="text" id="tag-picker-input" oninput="TagPicker.search()" placeholder="Filter by tag…" aria-label="Search tags" role="combobox" aria-expanded="false" aria-controls="tag-picker-menu" class="flex-1 bg-slate-950/70 border border-slate-700/80 rounded-xl px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500">
+                    <select id="tag-picker-mode" aria-label="Tag match mode" class="bg-slate-900 border border-slate-700 rounded-xl px-2 py-2 text-xs text-slate-200">
+                        <option value="include">Include</option>
+                        <option value="exclude">Exclude</option>
+                    </select>
+                    <button type="button" onclick="TagPicker.apply()" class="px-3 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold">Apply</button>
+                    <button type="button" onclick="TagPicker.clear()" class="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold">Clear</button>
+                </div>
+                <div id="tag-picker-menu" role="listbox" class="hidden absolute z-40 mt-1 w-full max-h-64 overflow-y-auto bg-darkcard border border-slate-700 rounded-xl shadow-2xl p-1"></div>
+                <div id="tag-picker-chips" class="flex flex-wrap gap-1.5 mt-2"></div>
+                <input type="hidden" id="tag-match-mode" value="{{ tag_match }}">
+                <input type="hidden" id="tag-sort-mode" value="{{ tag_sort }}">
+            </div>
             <div class="flex items-center justify-between w-full md:w-auto gap-4 text-xs text-slate-400">
                 <p class="hidden sm:block">
                     Showing <strong class="text-white">{{ (current_page - 1) * page_size + 1 if total_count > 0 else 0 }}</strong> to <strong class="text-white">{{ [current_page * page_size, total_count]|min }}</strong> of <strong class="text-white">{{ total_count }}</strong> potential series
@@ -144,6 +159,12 @@
                                 {% endif %}
                             </div>
 
+                            {% if item.tag_display and item.tag_display.chips %}
+                            <div class="flex flex-wrap items-center gap-1 mt-1.5" title="{{ item.tag_display.tooltip }}">
+                                {% for tag in item.tag_display.chips %}<span class="px-1.5 py-0.5 rounded bg-slate-800/80 border border-slate-700 text-slate-300 text-[10px]">{{ tag }}</span>{% endfor %}
+                                {% if item.tag_display.overflow %}<span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-500 text-[10px]">+{{ item.tag_display.overflow }}</span>{% endif %}
+                            </div>
+                            {% endif %}
                             <div class="flex flex-wrap items-center gap-1.5 mt-2 text-[11px] shrink-0">
                                 {% if item.link %}
                                 <a href="{{ item.link|safe_url }}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-slate-400 hover:text-brand-400 transition-colors bg-slate-900/90 px-2 py-0.5 rounded-md border border-slate-800 shrink-0 max-w-[150px]" title="Open RSS feed post">
@@ -534,5 +555,75 @@
             openBackfillModal();
         }
     }
+</script>
+
+<script>
+const TagPicker = (function () {
+    let selected = { include: {{ include_tags|tojson }}, exclude: {{ exclude_tags|tojson }} };
+    let suggestions = [];
+    function esc(value) { const d = document.createElement('div'); d.textContent = value == null ? '' : value; return d.innerHTML; }
+    function renderChips() {
+        const box = document.getElementById('tag-picker-chips');
+        if (!box) return;
+        box.innerHTML = '';
+        ['include', 'exclude'].forEach(function (mode) {
+            selected[mode].forEach(function (tag) {
+                const chip = document.createElement('button');
+                chip.type = 'button';
+                chip.className = mode === 'include'
+                    ? 'px-2 py-0.5 rounded-full bg-brand-500/15 border border-brand-500/40 text-brand-300 text-[10px] font-semibold'
+                    : 'px-2 py-0.5 rounded-full bg-rose-500/15 border border-rose-500/40 text-rose-300 text-[10px] font-semibold';
+                chip.textContent = (mode === 'exclude' ? '− ' : '+ ') + tag + ' ×';
+                chip.setAttribute('aria-label', (mode === 'exclude' ? 'Remove exclude ' : 'Remove include ') + tag);
+                chip.onclick = function () { selected[mode] = selected[mode].filter(function (t) { return t !== tag; }); renderChips(); };
+                box.appendChild(chip);
+            });
+        });
+    }
+    async function search() {
+        const input = document.getElementById('tag-picker-input');
+        const menu = document.getElementById('tag-picker-menu');
+        const q = (input && input.value || '').trim();
+        menu.classList.remove('hidden');
+        input.setAttribute('aria-expanded', 'true');
+        try {
+            const res = await fetch('/api/tags?q=' + encodeURIComponent(q) + '&limit=20');
+            const data = await res.json();
+            suggestions = data.tags || [];
+            menu.innerHTML = suggestions.length ? suggestions.map(function (tag, index) {
+                return `<button type="button" role="option" data-index="${index}" class="w-full text-left px-2 py-1.5 rounded hover:bg-slate-800 text-xs text-slate-200"><span>${esc(tag.name)}</span> <span class="text-slate-500 text-[10px]">${esc(tag.category || '')} · ${tag.count || 0}</span></button>`;
+            }).join('') : '<p class="p-2 text-slate-500 text-xs">No matching tags.</p>';
+            menu.querySelectorAll('button[data-index]').forEach(function (button) {
+                button.onclick = function () { add(suggestions[parseInt(button.dataset.index, 10)]); };
+            });
+        } catch (err) { menu.innerHTML = '<p class="p-2 text-rose-300 text-xs">Could not load tags.</p>'; }
+    }
+    function add(tag) {
+        if (!tag || !tag.name) return;
+        const mode = (document.getElementById('tag-picker-mode') || {}).value === 'exclude' ? 'exclude' : 'include';
+        if (!selected[mode].includes(tag.name)) selected[mode].push(tag.name);
+        document.getElementById('tag-picker-menu').classList.add('hidden');
+        document.getElementById('tag-picker-input').value = '';
+        renderChips();
+    }
+    function apply() {
+        const params = new URLSearchParams(window.location.search);
+        const q = (document.getElementById('discovery-search') || {}).value || '';
+        if (q.trim()) params.set('q', q.trim()); else params.delete('q');
+        if (selected.include.length) params.set('include_tags', selected.include.join(',')); else params.delete('include_tags');
+        if (selected.exclude.length) params.set('exclude_tags', selected.exclude.join(',')); else params.delete('exclude_tags');
+        params.set('sort', (document.getElementById('tag-sort-mode') || {}).value || 'relevance');
+        params.set('tag_match', (document.getElementById('tag-match-mode') || {}).value || 'any');
+        window.location.href = '/discovery?' + params.toString();
+    }
+    function clear() {
+        selected = { include: [], exclude: [] };
+        const params = new URLSearchParams(window.location.search);
+        ['include_tags', 'exclude_tags'].forEach(function (key) { params.delete(key); });
+        window.location.href = '/discovery?' + params.toString();
+    }
+    document.addEventListener('DOMContentLoaded', renderChips);
+    return { search: search, add: add, apply: apply, clear: clear, selected: selected };
+})();
 </script>
 {% endblock %}

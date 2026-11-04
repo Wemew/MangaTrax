@@ -892,6 +892,20 @@ class MangaDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_background_tasks_status_started "
                 "ON background_tasks(status, started_at);"
             )
+            # task-49: provider tags (AniList) for display + filtering.
+            for table, column, ddl in (
+                ("manga_metadata_cache", "genres_json", "TEXT DEFAULT '[]'"),
+                ("manga_metadata_cache", "tags_json", "TEXT DEFAULT '[]'"),
+                ("manga_metadata_cache", "tags_updated_at", "TEXT DEFAULT ''"),
+                ("releases", "tags_json", "TEXT DEFAULT '[]'"),
+                ("releases", "tags_text", "TEXT DEFAULT ''"),
+                ("series_tracking", "tags_json", "TEXT DEFAULT '[]'"),
+                ("series_tracking", "tags_text", "TEXT DEFAULT ''"),
+            ):
+                try:
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl};")
+                except Exception:
+                    pass
 
             conn.commit()
         finally:
@@ -1203,6 +1217,83 @@ class MangaDatabase:
         except Exception as exc:
             logger.debug("Could not read activity log stats: %s", exc)
         return stats
+
+    # --- Provider tags (task-49) ---
+    def update_release_tags(self, release_id: int, tags: List[Dict[str, Any]]) -> None:
+        from app.tag_display import encode_tags
+        payload = encode_tags(tags)
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE releases SET tags_json = ?, tags_text = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (payload["tags_json"], payload["tags_text"], int(release_id)),
+            )
+            conn.commit()
+
+    def update_release_tags_for_series(self, series_name: str, tags: List[Dict[str, Any]]) -> int:
+        from app.tag_display import encode_tags
+        payload = encode_tags(tags)
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE releases SET tags_json = ?, tags_text = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE lower(trim(series_name)) = lower(trim(?));",
+                (payload["tags_json"], payload["tags_text"], str(series_name)),
+            )
+            conn.commit()
+            return max(0, int(cur.rowcount or 0))
+
+    def update_series_tags(self, series_name: str, tags: List[Dict[str, Any]]) -> None:
+        from app.tag_display import encode_tags
+        payload = encode_tags(tags)
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE series_tracking SET tags_json = ?, tags_text = ? WHERE lower(trim(name)) = lower(trim(?));",
+                (payload["tags_json"], payload["tags_text"], str(series_name)),
+            )
+            conn.commit()
+
+    def get_known_tags(self, query: str = "", limit: int = 20) -> List[Dict[str, Any]]:
+        """Cheap tag universe from cached/denormalised tags, ranked for autocomplete."""
+        from app.tag_display import normalise_tag
+        counts: Dict[str, Dict[str, Any]] = {}
+        with self.get_connection() as conn:
+            for row in conn.execute("SELECT tags_json, genres_json FROM manga_metadata_cache;").fetchall():
+                try:
+                    tags = json.loads(row["tags_json"] or "[]")
+                except (TypeError, ValueError):
+                    tags = []
+                try:
+                    genres = json.loads(row["genres_json"] or "[]")
+                except (TypeError, ValueError):
+                    genres = []
+                tags = [{"name": genre, "category": "Genre", "rank": 100000, "spoiler": False}
+                        for genre in genres] + (tags if isinstance(tags, list) else [])
+                for tag in tags:
+                    if not isinstance(tag, dict) or tag.get("spoiler"):
+                        continue
+                    name = str(tag.get("name") or "").strip()
+                    norm = normalise_tag(name)
+                    if not norm:
+                        continue
+                    item = counts.setdefault(norm, {"name": name, "category": tag.get("category") or "", "count": 0, "rank": 0})
+                    item["count"] += 1
+                    item["rank"] = max(item["rank"], int(tag.get("rank") or 0))
+        needle = normalise_tag(query)
+        items = list(counts.values())
+        if needle:
+            items = [item for item in items if needle in normalise_tag(item["name"])]
+        def sort_key(item):
+            norm = normalise_tag(item["name"])
+            if normalise_tag(item["name"]) == needle:
+                match = 0
+            elif norm.startswith(needle):
+                match = 1
+            elif needle in norm:
+                match = 2
+            else:
+                match = 3
+            return (match, -item["count"], -item["rank"], norm)
+        items.sort(key=sort_key)
+        return items[:max(1, min(int(limit), 50))]
 
     # --- Background tasks (task-47) ---
     def create_background_task(self, kind: str, title: str, scope: Optional[str] = None,
@@ -2406,7 +2497,27 @@ class MangaDatabase:
                 return d
             return None
 
-    def count_discovery_releases(self, search: Optional[str] = None) -> int:
+    @staticmethod
+    def _discovery_tag_sql(include_tags=None, exclude_tags=None, tag_match: str = "any"):
+        from app.tag_display import normalise_tag
+        clauses, params = [], []
+        include = [normalise_tag(tag) for tag in (include_tags or []) if normalise_tag(tag)]
+        exclude = [normalise_tag(tag) for tag in (exclude_tags or []) if normalise_tag(tag)]
+        if include:
+            if str(tag_match).lower() == "all":
+                for tag in include:
+                    clauses.append("r.tags_text LIKE ? ESCAPE '\\'")
+                    params.append(f"%|{tag}|%")
+            else:
+                clauses.append("(" + " OR ".join("r.tags_text LIKE ? ESCAPE '\\'" for _ in include) + ")")
+                params.extend([f"%|{tag}|%" for tag in include])
+        for tag in exclude:
+            clauses.append("(r.tags_text IS NULL OR r.tags_text NOT LIKE ? ESCAPE '\\')")
+            params.append(f"%|{tag}|%")
+        return clauses, params, include
+
+    def count_discovery_releases(self, search: Optional[str] = None,
+                                 include_tags=None, exclude_tags=None, tag_match: str = "any") -> int:
         """
         Returns total count of unique discovered manga series (Volume 1 or unnumbered standalones)
         which are not in Calibre, not monitored in series_tracking, and not blacklisted.
@@ -2420,6 +2531,12 @@ class MangaDatabase:
                 clean_s = _like_contains(search.strip())
                 search_clause = "AND (lower(r.title) LIKE ? ESCAPE '\\' OR lower(r.series_name) LIKE ? ESCAPE '\\')"
                 params.extend([clean_s, clean_s])
+            tag_clauses, tag_params, _include = self._discovery_tag_sql(
+                include_tags, exclude_tags, tag_match,
+            )
+            if tag_clauses:
+                search_clause += " AND " + " AND ".join(tag_clauses)
+                params.extend(tag_params)
 
             query = f"""
                 WITH ranked_discovery AS (
@@ -2447,7 +2564,9 @@ class MangaDatabase:
             row = cur.fetchone()
             return row[0] if row else 0
 
-    def get_discovery_releases(self, limit: int = 24, offset: int = 0, search: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_discovery_releases(self, limit: int = 24, offset: int = 0, search: Optional[str] = None,
+                               include_tags=None, exclude_tags=None, tag_match: str = "any",
+                               sort: str = "newest") -> List[Dict[str, Any]]:
         """
         Returns releases that are Volume 1 or unnumbered (standalone),
         which are NOT currently in Calibre, NOT in series_tracking, and NOT blacklisted.
@@ -2462,10 +2581,29 @@ class MangaDatabase:
                 clean_s = _like_contains(search.strip())
                 search_clause = "AND (lower(r.title) LIKE ? ESCAPE '\\' OR lower(r.series_name) LIKE ? ESCAPE '\\')"
                 params.extend([clean_s, clean_s])
+            tag_clauses, tag_params, include_norm = self._discovery_tag_sql(
+                include_tags, exclude_tags, tag_match,
+            )
+            if tag_clauses:
+                search_clause += " AND " + " AND ".join(tag_clauses)
+                params.extend(tag_params)
+            match_select = ""
+            match_params = []
+            if include_norm:
+                match_select = ", (" + " + ".join(
+                    "CASE WHEN r.tags_text LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END" for _ in include_norm
+                ) + ") AS tag_match_count"
+                match_params = [f"%|{tag}|%" for tag in include_norm]
+            if sort == "relevance" and include_norm:
+                order_clause = "ORDER BY tag_match_count DESC, updated_at DESC, id DESC"
+            elif sort == "series":
+                order_clause = "ORDER BY lower(coalesce(series_name, title)) ASC, updated_at DESC, id DESC"
+            else:
+                order_clause = "ORDER BY updated_at DESC, id DESC"
 
             query = f"""
                 WITH ranked_discovery AS (
-                    SELECT r.*,
+                    SELECT r.*{match_select},
                            ROW_NUMBER() OVER (
                                PARTITION BY lower(trim(coalesce(nullif(r.series_name, ''), r.title)))
                                ORDER BY 
@@ -2485,10 +2623,10 @@ class MangaDatabase:
                 )
                 SELECT * FROM ranked_discovery
                 WHERE rn = 1
-                ORDER BY updated_at DESC, id DESC
+                {order_clause}
                 LIMIT ? OFFSET ?;
             """
-            params.extend([limit, offset])
+            params = match_params + params + [limit, offset]
             cur.execute(query, tuple(params))
             rows = [dict(row) for row in cur.fetchall()]
 
@@ -2946,7 +3084,10 @@ class MangaDatabase:
                     "total_volumes": row["total_volumes"],
                     "status": row["status"],
                     "synopsis": row["synopsis"],
-                    "source": row["source"]
+                    "source": row["source"],
+                    "genres_json": row["genres_json"] if "genres_json" in row.keys() else "[]",
+                    "tags_json": row["tags_json"] if "tags_json" in row.keys() else "[]",
+                    "tags_updated_at": row["tags_updated_at"] if "tags_updated_at" in row.keys() else "",
                 }
             return None
 
@@ -2955,11 +3096,14 @@ class MangaDatabase:
         canonical = data.get("canonical_title") or search_term
         with self.get_connection() as conn:
             cur = conn.cursor()
+            tags = data.get("tags") or []
+            genres = data.get("genres") or []
             cur.execute("""
                 INSERT INTO manga_metadata_cache (
                     search_term, canonical_title, romaji_title, cover_url,
-                    total_volumes, status, synopsis, source, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    total_volumes, status, synopsis, source, created_at,
+                    genres_json, tags_json, tags_updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(search_term) DO UPDATE SET
                     canonical_title = excluded.canonical_title,
                     romaji_title = excluded.romaji_title,
@@ -2967,7 +3111,10 @@ class MangaDatabase:
                     total_volumes = excluded.total_volumes,
                     status = excluded.status,
                     synopsis = excluded.synopsis,
-                    source = excluded.source;
+                    source = excluded.source,
+                    genres_json = CASE WHEN excluded.genres_json != '[]' THEN excluded.genres_json ELSE manga_metadata_cache.genres_json END,
+                    tags_json = CASE WHEN excluded.tags_json != '[]' THEN excluded.tags_json ELSE manga_metadata_cache.tags_json END,
+                    tags_updated_at = CASE WHEN excluded.tags_json != '[]' THEN CURRENT_TIMESTAMP ELSE manga_metadata_cache.tags_updated_at END;
             """, (
                 clean_key,
                 canonical,
@@ -2976,7 +3123,9 @@ class MangaDatabase:
                 data.get("total_volumes"),
                 data.get("status", "UNKNOWN"),
                 data.get("synopsis", ""),
-                data.get("source", "anilist")
+                data.get("source", "anilist"),
+                json.dumps(genres),
+                json.dumps(tags),
             ))
             conn.commit()
 
@@ -2984,7 +3133,17 @@ class MangaDatabase:
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("SELECT * FROM manga_metadata_cache;")
-            return {row["search_term"].lower(): dict(row) for row in cur.fetchall()}
+            result = {}
+            from app.tag_display import decode_tags
+            for row in cur.fetchall():
+                item = dict(row)
+                try:
+                    item["genres"] = json.loads(item.get("genres_json") or "[]")
+                except (TypeError, ValueError):
+                    item["genres"] = []
+                item["tags"] = decode_tags(item.get("tags_json"), item.get("tags_text"))
+                result[item["search_term"].lower()] = item
+            return result
 
     def get_display_title(self, stable_key: str) -> str:
         """Cosmetic display title for a STABLE matching key (never used for matching).

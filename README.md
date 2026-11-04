@@ -334,6 +334,30 @@ files are left alone and emptied folders are pruned safely.
 
 ---
 
+## Tag display (AniList provider tags)
+
+AniList genres and tags are stored ranked (rank descending, provider order on ties) and
+denormalised to `releases.tags_text`/`series_tracking.tags_text` as exact tokens
+(`|action|comedy|`). Spoiler-tagged provider tags are stored with a flag but never shown
+or used for filtering by default. Genres are treated as the highest-priority tags.
+
+Display policy (`app/tag_display.py`):
+
+| View | Chips | Rule |
+|---|---|---|
+| Discovery cards | 5 | genres first (provider order), then highest-rank tags, `+N` overflow tooltip |
+| Series page cards/rows | 4 | same order, tooltip has full list |
+| Releases grouped/flat rows | 3 | compact; nothing rendered when empty |
+| Dashboard recent items | 3 | compact |
+
+Discovery toolbar filters server-side with exact-token matching:
+`include_tags`, `exclude_tags`, `tag_match=any|all`, `sort=relevance|newest|series`
+(relevance = count of included tags first, then recency). The tag picker (`/api/tags?q=`)
+is an autocomplete over the known tag universe ordered exact → prefix → substring → count.
+Selections live in the URL and are reload-safe/shareable.
+
+---
+
 ## Long-running actions (progress convention)
 
 Every button that can take more than ~2 seconds must start a **persisted background

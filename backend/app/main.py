@@ -266,6 +266,11 @@ async def add_security_headers(request: Request, call_next):
 
 # Setup Templates
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+try:
+    from app.tag_display import display_tags as _display_tags
+    templates.env.globals["tag_display"] = _display_tags
+except Exception:  # pragma: no cover - E2E shim has no Jinja environment
+    pass
 
 from app.timezone_util import format_localtime, format_localdate
 
@@ -1484,19 +1489,55 @@ async def api_releases_grouped(status: Optional[str] = None):
     groups = db.get_releases_grouped_by_series(status=status)
     return JSONResponse({"status": "success", "count": len(groups), "series_groups": groups})
 
+@app.post("/api/maintenance/refresh-tags")
+async def api_refresh_provider_tags():
+    """Backfill AniList tags onto existing releases/series (persisted task)."""
+    info = background_tasks.run_in_background(
+        db, "tags:refresh", "Refresh provider tags",
+        lambda reporter: scheduler.refresh_provider_tags(
+            progress=reporter.report, cancel_check=lambda: reporter.cancelled,
+        ),
+        actor=auth_module.get_current_actor(), scope="tags", cancellable=True,
+    )
+    return JSONResponse({"status": "started", **info})
+
+
+@app.get("/api/tags")
+async def api_tags(q: Optional[str] = None, limit: int = Query(20, ge=1, le=50)):
+    tags = await asyncio.to_thread(db.get_known_tags, q or "", limit)
+    return JSONResponse({"status": "success", "tags": tags, "count": len(tags)})
+
+
 @app.get("/discovery", response_class=HTMLResponse)
 async def discovery_view(
     request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(24, ge=6, le=120),
-    q: Optional[str] = Query(None)
+    q: Optional[str] = Query(None),
+    include_tags: Optional[str] = Query(None),
+    exclude_tags: Optional[str] = Query(None),
+    tag_match: str = Query("any"),
+    sort: str = Query("newest"),
 ):
     clean_q = q.strip() if q else None
-    total_count = db.count_discovery_releases(search=clean_q)
+    include_list = [item.strip() for item in (include_tags or "").split(",") if item.strip()]
+    exclude_list = [item.strip() for item in (exclude_tags or "").split(",") if item.strip()]
+    clean_match = tag_match if tag_match in ("any", "all") else "any"
+    clean_sort = sort if sort in ("relevance", "newest", "series") else "newest"
+    total_count = db.count_discovery_releases(
+        search=clean_q, include_tags=include_list, exclude_tags=exclude_list, tag_match=clean_match,
+    )
     total_pages = max(1, math.ceil(total_count / page_size))
     current_page = min(page, total_pages) if total_count > 0 else 1
     offset = (current_page - 1) * page_size
-    discovered = db.get_discovery_releases(limit=page_size, offset=offset, search=clean_q)
+    discovered = db.get_discovery_releases(
+        limit=page_size, offset=offset, search=clean_q,
+        include_tags=include_list, exclude_tags=exclude_list,
+        tag_match=clean_match, sort=clean_sort,
+    )
+    from app.tag_display import display_tags
+    for row in discovered:
+        row["tag_display"] = display_tags(row.get("tags_json"), view="discovery")
     blacklisted = db.get_blacklisted_series()
 
     return templates.TemplateResponse(
@@ -1510,7 +1551,11 @@ async def discovery_view(
             "page_size": page_size,
             "total_pages": total_pages,
             "total_count": total_count,
-            "search_query": clean_q or ""
+            "search_query": clean_q or "",
+            "include_tags": include_list,
+            "exclude_tags": exclude_list,
+            "tag_match": clean_match,
+            "tag_sort": clean_sort,
         }
     )
 
