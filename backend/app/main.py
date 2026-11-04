@@ -22,7 +22,7 @@ from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
-from app import downloads_inventory, network_diagnostics, storage_health
+from app import background_tasks, downloads_inventory, network_diagnostics, storage_health
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
 from app.downloader.base import DownloaderError, parse_queued_handle_id
 from app.downloader.torbox import TorboxDownloader
@@ -1165,6 +1165,61 @@ async def prioritized_view(request: Request, status: Optional[str] = None, view:
         }
     )
 
+# --- Background tasks (task-47) ---
+@app.get("/api/tasks")
+async def api_tasks(active: int = Query(0, ge=0, le=1), kind: Optional[str] = None,
+                    limit: int = Query(50, ge=1, le=200)):
+    tasks = await asyncio.to_thread(
+        db.list_background_tasks, bool(active), kind, limit,
+    )
+    return JSONResponse({
+        "status": "success",
+        "active_count": len(db.list_background_tasks(active_only=True, limit=200)),
+        "tasks": [background_tasks.serialize_task(task) for task in tasks],
+    })
+
+
+@app.get("/api/tasks/{task_id}")
+async def api_task_detail(task_id: int):
+    task = await asyncio.to_thread(db.get_background_task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return JSONResponse({"status": "success", "task": background_tasks.serialize_task(task)})
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+async def api_task_cancel(task_id: int):
+    task = await asyncio.to_thread(db.get_background_task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not background_tasks.cancel_supported(task_id):
+        raise HTTPException(status_code=409, detail="This task does not support cancellation")
+    background_tasks.request_cancel(db, task_id)
+    return JSONResponse({"status": "success", "task_id": task_id, "cancelling": True})
+
+
+def _recorded_task(kind: str, title: str, fn, actor: str = "user",
+                   scope: Optional[str] = None) -> tuple:
+    """Run a quick/moderate action with persisted progress (foreground compatibility).
+
+    Long network actions use ``background_tasks.run_in_background`` instead; quick
+    maintenance actions still record a task so the global UI and reload-reattachment
+    have consistent state.
+    """
+    task_id = db.create_background_task(kind, title, scope=scope, actor=actor)
+    reporter = background_tasks.TaskReporter(db, task_id, None)
+    db.log_activity("BACKGROUND_TASK_STARTED", f"Task #{task_id}: {title}", kind)
+    try:
+        result = fn(reporter)
+        db.finish_background_task(task_id, "success", result=result)
+        db.log_activity("BACKGROUND_TASK_FINISHED", f"Task #{task_id} finished", json.dumps(result or {}, default=str)[:500])
+        return result, background_tasks.serialize_task(db.get_background_task(task_id))
+    except Exception as exc:
+        db.finish_background_task(task_id, "failed", f"{type(exc).__name__}: {exc}")
+        db.log_activity("BACKGROUND_TASK_FINISHED", f"Task #{task_id} failed", str(exc)[:500])
+        raise
+
+
 # --- Lazy Loading API Endpoints ---
 _SERIES_CARD_RELEASE_CAP = 10
 
@@ -1570,8 +1625,20 @@ async def api_calibre_sync():
     The background worker's own sync respects ``scheduler._calibre_sync_lock``, so a
     manual trigger and the startup/first-tick sync can never run concurrently.
     """
-    res = scheduler.sync_calibre_library()
-    return JSONResponse(res)
+    def _sync_worker(reporter):
+        reporter.report(0, 0, "Scanning Calibre library…", force=True)
+        result = scheduler.sync_calibre_library()
+        reporter.report(1, 1, "Calibre sync complete", progress_pct=100.0, force=True)
+        return result
+    res, task = await asyncio.to_thread(
+        _recorded_task, "sync:calibre", "Sync Calibre library", _sync_worker,
+        auth_module.get_current_actor(), None,
+    )
+    payload = dict(res or {})
+    payload["task_id"] = task["id"]
+    payload["task"] = task
+    payload.setdefault("status", "success")
+    return JSONResponse(payload)
 
 @app.get("/api/calibre/status")
 async def api_calibre_status():
@@ -1630,7 +1697,28 @@ async def api_feeds_check():
     ``GET /api/feeds/check/status`` for progress and the result (including per-feed
     failures, so a dead Nyaa lookup no longer looks like a silent success).
     """
-    return JSONResponse(scheduler.start_feed_check())
+    started = scheduler.start_feed_check()
+
+    def _feed_monitor(reporter):
+        reporter.report(0, 0, "Polling feeds…", force=True)
+        import time as _time
+        while True:
+            status = scheduler.get_feed_check_status() or {}
+            if not status.get("running"):
+                break
+            reporter.report(0, 0, f"Polling feeds… {status.get('message') or ''}".strip(), force=True)
+            _time.sleep(0.75)
+        final = scheduler.get_feed_check_status() or {}
+        reporter.report(1, 1, "Feed poll complete", progress_pct=100.0, force=True)
+        return final
+    task_info = background_tasks.run_in_background(
+        db, "feeds:poll", "Poll Feeds", _feed_monitor, actor=auth_module.get_current_actor(),
+        scope="feeds",
+    )
+    payload = dict(started or {})
+    payload["task_id"] = task_info["task_id"]
+    payload["task"] = task_info["task"]
+    return JSONResponse(payload)
 
 @app.get("/api/feeds/check/status")
 async def api_feeds_check_status():
@@ -1771,37 +1859,45 @@ async def api_downloads_prune_empty(payload: Optional[Dict[str, Any]] = None):
     """Manually prune EMPTY leftover folders (never rmtree; busy dirs skipped)."""
     body = payload or {}
     include_staging = bool(body.get("include_staging"))
-    result = await asyncio.to_thread(
-        downloads_pipeline.prune_empty_folders,
-        scheduler.get_downloads_dir(create=False),
-        _staging_dir_setting(),
-        db,
-        include_staging,
-        "user",
+    result, task = await asyncio.to_thread(
+        _recorded_task, "downloads:prune", "Prune empty download folders",
+        lambda reporter: downloads_pipeline.prune_empty_folders(
+            scheduler.get_downloads_dir(create=False), _staging_dir_setting(), db,
+            include_staging, "user",
+        ),
+        auth_module.get_current_actor(), None,
     )
-    return JSONResponse({"status": "success", **result})
+    return JSONResponse({"status": "success", **result, "task_id": task["id"], "task": task})
 
 
 @app.post("/api/downloads/flatten-staging")
 async def api_downloads_flatten_staging():
     """Move every file in nested staging folders into the flat staging root."""
-    result = await asyncio.to_thread(
-        downloads_pipeline.flatten_staging_dir, _staging_dir_setting(), db,
+    result, task = await asyncio.to_thread(
+        _recorded_task, "downloads:flatten", "Flatten staging folder",
+        lambda reporter: downloads_pipeline.flatten_staging_dir(_staging_dir_setting(), db),
+        auth_module.get_current_actor(), None,
     )
-    return JSONResponse({"status": "success", **result})
+    return JSONResponse({"status": "success", **result, "task_id": task["id"], "task": task})
 
 
 @app.post("/api/downloads/scan")
 async def api_downloads_scan():
     """Rescan the raw downloads folder and return the fresh inventory."""
-    inventory = await asyncio.to_thread(
-        downloads_inventory.refresh_inventory, db, scheduler.get_downloads_dir(create=False),
+    inventory, task = await asyncio.to_thread(
+        _recorded_task, "downloads:rescan", "Rescan downloads folder",
+        lambda reporter: downloads_inventory.refresh_inventory(
+            db, scheduler.get_downloads_dir(create=False),
+        ),
+        auth_module.get_current_actor(), None,
     )
     return JSONResponse({
         "status": "success",
         "inventory": inventory,
         "last_scanned_at": inventory.get("scanned_at") or "",
         "entries": inventory.get("entries") or [],
+        "task_id": task["id"],
+        "task": task,
     })
 
 
@@ -1831,11 +1927,21 @@ async def api_network_speedtest(payload: Optional[Dict[str, Any]] = None):
         connections = int(body.get("connections") or network_diagnostics.SPEEDTEST_DEFAULT_CONNECTIONS)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="bytes and connections must be integers")
-    result = await asyncio.to_thread(
-        network_diagnostics.run_speedtest,
-        bytes_total, connections, network_diagnostics.SPEEDTEST_URL,
-        network_diagnostics.SPEEDTEST_TIMEOUT_SECONDS, db.get_all_settings(),
+    def _speed_worker(reporter):
+        reporter.report(0, connections, f"Speed test: {connections} connection(s), {bytes_total} bytes…", force=True)
+        outcome = network_diagnostics.run_speedtest(
+            bytes_total, connections, network_diagnostics.SPEEDTEST_URL,
+            network_diagnostics.SPEEDTEST_TIMEOUT_SECONDS, db.get_all_settings(),
+        )
+        reporter.report(connections, connections, "Speed test complete", progress_pct=100.0, force=True)
+        return outcome
+    result, task = await asyncio.to_thread(
+        _recorded_task, "speedtest", "Network speed test", _speed_worker,
+        auth_module.get_current_actor(), None,
     )
+    result = dict(result or {})
+    result["task_id"] = task["id"]
+    result["task"] = task
     try:
         db.set_setting("last_speedtest_json", json.dumps({
             key: result.get(key) for key in
@@ -2106,10 +2212,14 @@ async def api_clear_releases(payload: Optional[Dict[str, Any]] = None):
         exclude_statuses = [str(item).strip() for item in raw_excluded if str(item or "").strip()] or None
     else:
         raise HTTPException(status_code=400, detail="exclude_statuses must be a list")
-    result = await asyncio.to_thread(
-        db.clear_cached_releases, series_name, statuses, auth_module.get_current_actor(), exclude_statuses,
+    result, task = await asyncio.to_thread(
+        _recorded_task, "releases:clear", "Clear cached releases",
+        lambda reporter: db.clear_cached_releases(
+            series_name, statuses, auth_module.get_current_actor(), exclude_statuses,
+        ),
+        auth_module.get_current_actor(), series_name,
     )
-    return JSONResponse({"status": "success", **result})
+    return JSONResponse({"status": "success", **result, "task_id": task["id"], "task": task})
 
 
 @app.get("/api/maintenance/series-attribution")
@@ -2140,8 +2250,12 @@ async def api_series_attribution_repair(payload: Optional[Dict[str, Any]] = None
 @app.post("/api/logs/prune")
 async def api_logs_prune():
     """Manually prune activity_logs (retention + max rows) and checkpoint the WAL."""
-    result = await asyncio.to_thread(scheduler.prune_activity_logs, "user")
-    return JSONResponse({"status": "success", **result})
+    result, task = await asyncio.to_thread(
+        _recorded_task, "logs:prune", "Prune activity log",
+        lambda reporter: scheduler.prune_activity_logs("user"),
+        auth_module.get_current_actor(), None,
+    )
+    return JSONResponse({"status": "success", **result, "task_id": task["id"], "task": task})
 
 
 # --- Tagger: preview / manual tagging (PROJECT.md feature 16) ---
@@ -2701,6 +2815,32 @@ async def api_update_series_link(series_id: int, payload: Dict[str, Any]):
     db.update_series_link(series_id, model.website_url)
     return JSONResponse({"status": "success", "website_url": model.website_url})
 
+def _attach_backfill_task(series_name: str) -> Dict[str, Any]:
+    """Monitor the scheduler's existing backfill thread as a persisted task."""
+    import time as _time
+
+    def _monitor(reporter):
+        reporter.report(0, 0, f"Refreshing '{series_name}'…", force=True)
+        while getattr(scheduler, "is_backfilling", False):
+            try:
+                message = db.get_setting("backfill_progress", "") or f"Refreshing '{series_name}'…"
+            except Exception:
+                message = f"Refreshing '{series_name}'…"
+            reporter.report(0, 0, message, force=True)
+            _time.sleep(0.75)
+        try:
+            message = db.get_setting("backfill_progress", "") or "Series refresh complete"
+        except Exception:
+            message = "Series refresh complete"
+        reporter.report(1, 1, message, progress_pct=100.0, force=True)
+        return {"series_name": series_name, "progress": message}
+
+    return background_tasks.run_in_background(
+        db, "backfill:series", f"Refresh series: {series_name}", _monitor,
+        actor=auth_module.get_current_actor(), scope=series_name,
+    )
+
+
 @app.post("/api/series/{series_id}/backfill")
 async def api_series_backfill(series_id: int, payload: Optional[Dict[str, Any]] = None):
     """Refresh one series in the background: metadata, Calibre info, then Nyaa crawl."""
@@ -2713,7 +2853,11 @@ async def api_series_backfill(series_id: int, payload: Optional[Dict[str, Any]] 
     res = scheduler.run_series_backfill_async(
         target["name"], max_pages=model.max_pages, actor=auth_module.get_current_actor(),
     )
-    return JSONResponse(res)
+    task_info = _attach_backfill_task(target["name"])
+    payload = dict(res or {})
+    payload["task_id"] = task_info["task_id"]
+    payload["task"] = task_info["task"]
+    return JSONResponse(payload)
 
 @app.post("/api/series/backfill")
 async def api_series_backfill_by_name(payload: Dict[str, Any]):
@@ -2722,7 +2866,11 @@ async def api_series_backfill_by_name(payload: Dict[str, Any]):
     res = scheduler.run_series_backfill_async(
         model.series_name, max_pages=model.max_pages, actor=auth_module.get_current_actor(),
     )
-    return JSONResponse(res)
+    task_info = _attach_backfill_task(model.series_name)
+    payload = dict(res or {})
+    payload["task_id"] = task_info["task_id"]
+    payload["task"] = task_info["task"]
+    return JSONResponse(payload)
 
 @app.post("/api/releases/{release_id}/status")
 async def api_update_release_status(release_id: int, payload: Dict[str, Any]):

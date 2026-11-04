@@ -868,6 +868,30 @@ class MangaDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_series_alias_overrides_target "
                 "ON series_alias_overrides(target_name);"
             )
+            # task-47: persisted background tasks (reload-safe progress).
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS background_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    scope TEXT,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    progress_pct REAL DEFAULT 0,
+                    message TEXT DEFAULT '',
+                    items_done INTEGER DEFAULT 0,
+                    items_total INTEGER DEFAULT 0,
+                    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    finished_at TIMESTAMP,
+                    actor TEXT DEFAULT 'system',
+                    error TEXT DEFAULT '',
+                    result_json TEXT DEFAULT '',
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_background_tasks_status_started "
+                "ON background_tasks(status, started_at);"
+            )
 
             conn.commit()
         finally:
@@ -1179,6 +1203,97 @@ class MangaDatabase:
         except Exception as exc:
             logger.debug("Could not read activity log stats: %s", exc)
         return stats
+
+    # --- Background tasks (task-47) ---
+    def create_background_task(self, kind: str, title: str, scope: Optional[str] = None,
+                               actor: str = "system") -> int:
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO background_tasks (kind, title, scope, status, actor, started_at, updated_at) "
+                "VALUES (?, ?, ?, 'running', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);",
+                (str(kind), str(title), str(scope or ""), str(actor or "system")),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def update_background_task(self, task_id: int, done: Optional[int] = None,
+                               total: Optional[int] = None, message: Optional[str] = None,
+                               progress_pct: Optional[float] = None) -> None:
+        fields = ["updated_at = CURRENT_TIMESTAMP"]
+        params: List[Any] = []
+        if done is not None:
+            fields.append("items_done = ?")
+            params.append(max(0, int(done)))
+        if total is not None:
+            fields.append("items_total = ?")
+            params.append(max(0, int(total)))
+        if message is not None:
+            fields.append("message = ?")
+            params.append(str(message)[:500])
+        if progress_pct is not None:
+            fields.append("progress_pct = ?")
+            params.append(max(0.0, min(100.0, float(progress_pct))))
+        params.append(int(task_id))
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE background_tasks SET " + ", ".join(fields) + " WHERE id = ?;", params,
+            )
+            conn.commit()
+
+    def finish_background_task(self, task_id: int, status: str = "success",
+                               error: str = "", result: Any = None) -> None:
+        if status not in ("success", "failed", "cancelled"):
+            status = "success"
+        result_json = ""
+        if result is not None:
+            try:
+                result_json = json.dumps(result, default=str)[:20000]
+            except Exception:
+                result_json = ""
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE background_tasks SET status = ?, error = ?, result_json = ?, "
+                "progress_pct = CASE WHEN ? = 'success' THEN 100 ELSE progress_pct END, "
+                "finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (status, str(error or "")[:2000], result_json, status, int(task_id)),
+            )
+            conn.commit()
+
+    def get_background_task(self, task_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM background_tasks WHERE id = ?;", (int(task_id),)).fetchone()
+        return dict(row) if row else None
+
+    def list_background_tasks(self, active_only: bool = False, kind: Optional[str] = None,
+                              limit: int = 50) -> List[Dict[str, Any]]:
+        clauses = []
+        params: List[Any] = []
+        if active_only:
+            clauses.append("status = 'running'")
+        if kind:
+            clauses.append("kind = ?")
+            params.append(str(kind))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(max(1, min(int(limit), 200)))
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM background_tasks{where} ORDER BY id DESC LIMIT ?;", params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def prune_background_tasks(self, days: int = 7) -> int:
+        try:
+            days = max(1, int(days))
+        except (TypeError, ValueError):
+            days = 7
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM background_tasks WHERE status != 'running' "
+                "AND finished_at IS NOT NULL AND finished_at < datetime('now', ?);",
+                (f"-{days} days",),
+            )
+            conn.commit()
+            return max(0, int(cur.rowcount or 0))
 
     # --- Suspicious volume-range repair (task-44) ---
     def audit_suspicious_volume_ranges(self) -> Dict[str, Any]:

@@ -378,7 +378,17 @@
     </footer>
 
     <!-- Global Scripts & Lucide Init -->
-    <script>
+    <!-- Global background tasks (task-47) -->
+<div id="global-tasks" class="fixed bottom-4 right-4 z-50 text-xs">
+    <button type="button" id="tasks-toggle" onclick="MangaTasks.togglePanel()" aria-expanded="false" aria-controls="tasks-panel" class="flex items-center gap-2 px-3 py-2 rounded-xl bg-darkcard border border-slate-700 shadow-xl text-slate-200 hover:border-brand-500">
+        <i data-lucide="activity" class="w-4 h-4 text-brand-400"></i>
+        <span>Tasks</span>
+        <span id="tasks-active-count" class="px-1.5 py-0.5 rounded-full bg-brand-500/20 text-brand-300 font-bold">0</span>
+    </button>
+    <div id="tasks-panel" class="hidden mt-2 w-80 max-h-96 overflow-y-auto bg-darkcard border border-slate-700 rounded-xl shadow-2xl p-3 space-y-2" aria-live="polite"></div>
+    <div id="tasks-toast" class="hidden mt-2 w-80 bg-darkcard border border-slate-700 rounded-xl shadow-xl p-3 text-slate-200" role="status" aria-live="polite"></div>
+</div>
+<script>
         lucide.createIcons();
 
         function showToast(message, type = 'success') {
@@ -979,6 +989,151 @@
             document.querySelectorAll('.nav-link-loading').forEach(el => el.classList.remove('nav-link-loading'));
             document.body.style.cursor = '';
         });
+    </script>
+    <script>
+    // task-47: persisted background-task UI. Server-side state means a page reload
+    // reattaches to running tasks instead of losing progress.
+    const MangaTasks = (function () {
+        let tasks = [];
+        let seen = {};
+        let timer = null;
+        let busyCallbacks = {};
+
+        function esc(value) {
+            const div = document.createElement('div');
+            div.textContent = String(value == null ? '' : value);
+            return div.innerHTML;
+        }
+
+        function render() {
+            const active = tasks.filter(function (task) { return task.active; });
+            const count = document.getElementById('tasks-active-count');
+            if (count) count.textContent = String(active.length);
+            const panel = document.getElementById('tasks-panel');
+            if (!panel) return;
+            if (!tasks.length) {
+                panel.innerHTML = '<p class="text-slate-500 py-2 text-center">No recent tasks.</p>';
+                return;
+            }
+            panel.innerHTML = tasks.slice(0, 12).map(function (task) {
+                const pct = Math.max(0, Math.min(100, Number(task.progress_pct || 0)));
+                const bar = task.items_total
+                    ? `<div class="h-1.5 bg-slate-800 rounded-full overflow-hidden mt-1"><div class="h-full bg-brand-500" style="width: ${pct}%"></div></div>`
+                    : (task.active ? '<div class="h-1.5 bg-slate-800 rounded-full overflow-hidden mt-1"><div class="h-full bg-brand-500 animate-pulse w-1/2"></div></div>' : '');
+                const cls = task.status === 'failed' ? 'text-rose-300 border-rose-500/40'
+                    : task.status === 'running' ? 'text-brand-300 border-brand-500/40'
+                    : 'text-emerald-300 border-emerald-500/30';
+                return `<div class="rounded-lg border ${cls} p-2">
+                    <div class="flex items-center justify-between gap-2"><span class="font-semibold truncate">${esc(task.title)}</span><span class="font-mono text-[10px]">${task.active ? pct.toFixed(0) + '%' : esc(task.status)}</span></div>
+                    ${bar}
+                    <div class="text-[10px] text-slate-400 mt-1 truncate">${esc(task.message || '')} · ${task.elapsed_seconds || 0}s${task.eta_seconds ? ' · ETA ' + task.eta_seconds + 's' : ''}</div>
+                    ${task.error ? `<div class="text-[10px] text-rose-300 mt-1">${esc(task.error)}</div>` : ''}
+                    ${task.active && task.cancellable ? `<button type="button" onclick="MangaTasks.cancel(${task.id})" class="mt-1 px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-[10px]">Cancel</button>` : ''}
+                </div>`;
+            }).join('');
+        }
+
+        function toastFinished() {
+            tasks.forEach(function (task) {
+                const prior = seen[task.id];
+                if (prior && prior === 'running' && task.status !== 'running') {
+                    const box = document.getElementById('tasks-toast');
+                    if (box) {
+                        box.classList.remove('hidden');
+                        box.innerHTML = task.status === 'success'
+                            ? `<span class="text-emerald-300 font-semibold">${esc(task.title)} finished.</span>`
+                            : `<span class="text-rose-300 font-semibold">${esc(task.title)} ${esc(task.status)}:</span> ${esc(task.error || '')}`;
+                        setTimeout(function () { box.classList.add('hidden'); }, 5000);
+                    }
+                }
+                seen[task.id] = task.status;
+            });
+        }
+
+        async function poll() {
+            try {
+                const res = await fetch('/api/tasks?active=0&limit=20', { headers: { 'Accept': 'application/json' } });
+                if (res.ok) {
+                    const data = await res.json();
+                    tasks = data.tasks || [];
+                    toastFinished();
+                    render();
+                    reattach();
+                }
+            } catch (err) { /* polling is best-effort */ }
+        }
+
+        function reattach() {
+            document.querySelectorAll('[data-task-kind]').forEach(function (button) {
+                const kind = button.getAttribute('data-task-kind');
+                const scope = button.getAttribute('data-task-scope') || '';
+                const active = tasks.find(function (task) {
+                    return task.active && task.kind === kind && (!scope || task.scope === scope);
+                });
+                if (active) {
+                    if (!button.disabled) button.dataset.taskWasEnabled = '1';
+                    button.disabled = true;
+                    button.textContent = active.items_total
+                        ? `${active.progress_pct.toFixed(0)}%`
+                        : 'Running…';
+                } else if (button.dataset.taskWasEnabled === '1') {
+                    button.disabled = false;
+                    button.dataset.taskWasEnabled = '';
+                }
+            });
+        }
+
+        function bindButton(button, kind, scope) {
+            if (!button) return;
+            button.setAttribute('data-task-kind', kind);
+            if (scope) button.setAttribute('data-task-scope', scope);
+            reattach();
+        }
+
+        function watch(taskId, onDone) {
+            busyCallbacks[taskId] = onDone;
+            const pollTask = async function () {
+                try {
+                    const res = await fetch('/api/tasks/' + taskId);
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    if (data.task && data.task.active) {
+                        setTimeout(pollTask, 1500);
+                    } else if (busyCallbacks[taskId]) {
+                        const callback = busyCallbacks[taskId];
+                        delete busyCallbacks[taskId];
+                        callback(data.task);
+                    }
+                } catch (err) { /* best-effort */ }
+            };
+            setTimeout(pollTask, 1500);
+        }
+
+        async function cancel(taskId) {
+            try {
+                const res = await fetch('/api/tasks/' + taskId + '/cancel', { method: 'POST' });
+                if (!res.ok) {
+                    const data = await res.json().catch(function () { return {}; });
+                    if (window.showToast) showToast(data.detail || 'Task cannot be cancelled', 'error');
+                }
+                poll();
+            } catch (err) { /* best-effort */ }
+        }
+
+        function togglePanel() {
+            const panel = document.getElementById('tasks-panel');
+            const button = document.getElementById('tasks-toggle');
+            if (!panel) return;
+            panel.classList.toggle('hidden');
+            if (button) button.setAttribute('aria-expanded', panel.classList.contains('hidden') ? 'false' : 'true');
+            if (window.lucide) lucide.createIcons();
+        }
+
+        document.addEventListener('DOMContentLoaded', function () { poll(); timer = setInterval(poll, 1500); });
+        window.addEventListener('pageshow', function () { poll(); });
+        return { bindButton: bindButton, watch: watch, cancel: cancel, togglePanel: togglePanel, poll: poll, get tasks() { return tasks; } };
+    })();
+    window.MangaTasks = MangaTasks;
     </script>
     {% block scripts %}{% endblock %}
 </body>
