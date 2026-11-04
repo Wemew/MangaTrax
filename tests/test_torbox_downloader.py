@@ -1020,7 +1020,12 @@ def test_downloads_status_engine_aware():
             assert key in item, (key, item)
         assert item["engine"] == "torbox" and item["state"] == "downloading", item
 
-        # Unreachable Torbox: still HTTP 200 with a valid degraded payload.
+        # Unreachable Torbox: still HTTP 200 with a valid degraded payload.  The
+        # task-32 last-good cache is deliberately bypassed here (fresh build) so this
+        # exercises the live failure path rather than a cached snapshot.
+        import app.main as main_module
+        with main_module._TORBOX_STATUS_LOCK:
+            main_module._TORBOX_STATUS_CACHE.update({"payload": None, "at": 0.0, "building": False, "db_id": id(main_module.db)})
         unreachable = MagicMock()
         unreachable.test_connection.return_value = {"success": False, "message": "connection refused"}
         unreachable.timeout = 1.0

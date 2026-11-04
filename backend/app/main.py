@@ -2,6 +2,7 @@ import os
 import json
 import math
 import time
+import threading
 import asyncio
 import logging
 from typing import Dict, Any, Optional
@@ -40,6 +41,15 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("mangatrax")
+
+# Torbox status last-good cache (task-32): transient API blips must not empty the UI.
+_TORBOX_STATUS_TTL_SECONDS = 1.0
+_TORBOX_STATUS_STALE_AFTER_SECONDS = 30.0
+_TORBOX_SPEED_HISTORY_LIMIT = 120
+_TORBOX_SPEED_AVG_SAMPLES = 10
+_TORBOX_STATUS_CACHE: Dict[str, Any] = {"payload": None, "at": 0.0, "building": False}
+_TORBOX_STATUS_LOCK = threading.Lock()
+_TORBOX_SPEED_HISTORY: Dict[str, list] = {}
 
 # Directories & Configuration
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -421,7 +431,7 @@ def _build_downloader_status(timeout: Optional[float] = None) -> Dict[str, Any]:
     }
 
     if payload["engine"] == "torbox":
-        return _build_torbox_downloader_status(payload, effective_timeout)
+        return _torbox_status_cached(payload, effective_timeout)
 
     try:
         qbit = scheduler.get_qbit_client()
@@ -446,6 +456,12 @@ def _build_downloader_status(timeout: Optional[float] = None) -> Dict[str, Any]:
     payload["downloader"]["version"] = str(connection.get("version") or "")
     payload["downloader"]["message"] = str(connection.get("message") or "")
     if not connected:
+        payload["torrents"] = _torbox_db_rows()
+        payload["active"] = [row for row in payload["torrents"] if row.get("is_active")]
+        payload["count"] = len(payload["torrents"])
+        payload["live_state_available"] = False
+        payload["degraded"] = True
+        _torbox_apply_speed_history(payload["torrents"], live=False)
         return payload
 
     try:
@@ -457,6 +473,7 @@ def _build_downloader_status(timeout: Optional[float] = None) -> Dict[str, Any]:
         return payload
 
     torrents = [_torrent_status_view(torrent) for torrent in (raw_torrents or []) if isinstance(torrent, dict)]
+    payload["live_state_available"] = True
     active = [torrent for torrent in torrents if torrent["is_active"]]
     total_size = sum(torrent["size_bytes"] for torrent in active)
     downloaded = sum(torrent["downloaded_bytes"] for torrent in active)
@@ -601,6 +618,118 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
     }
 
 
+def _torbox_db_rows(limit: int = 20) -> list:
+    """DB-derived Torbox rows (available even when the live API is down)."""
+    try:
+        releases = db.get_downloader_releases("torbox", limit=limit)
+    except Exception as exc:
+        logger.debug("Could not read Torbox releases for status: %s", exc)
+        return []
+    return [_torbox_release_view(release, None) for release in releases]
+
+
+def _torbox_decorate(payload: Dict[str, Any], now: float, stale: bool, age: float) -> Dict[str, Any]:
+    """Attach cache/staleness metadata without mutating the cached object."""
+    result = dict(payload)
+    result["downloader"] = dict(payload.get("downloader") or {})
+    result["generated_at"] = datetime.now(timezone.utc).isoformat()
+    result["cache_age_seconds"] = round(max(0.0, age), 2)
+    result["stale"] = bool(stale)
+    result["stale_age_seconds"] = round(max(0.0, age), 1) if stale else 0
+    result["live_state_available"] = not bool(stale) and bool(payload.get("live_state_available", False))
+    if stale:
+        result["degraded"] = True
+        result["downloader"]["message"] = (
+            (result["downloader"].get("message") or "")
+            + f" (showing last known state from {max(0, int(age))}s ago)"
+        ).strip()
+        result["torrents"] = list(payload.get("torrents") or [])
+        result["active"] = [row for row in result["torrents"] if row.get("is_active")]
+        result["count"] = len(result["torrents"])
+    return result
+
+
+def _torbox_apply_speed_history(torrents: list, live: bool) -> None:
+    """Capped per-release speed history + rolling average for the UI sparkline."""
+    for torrent in torrents:
+        key = str(torrent.get("release_id") or torrent.get("hash") or torrent.get("name"))
+        speed = int(torrent.get("speed_bps") or torrent.get("download_speed") or 0)
+        history = _TORBOX_SPEED_HISTORY.setdefault(key, [])
+        if live:
+            history.append(max(0, speed))
+            if len(history) > _TORBOX_SPEED_HISTORY_LIMIT:
+                del history[:-_TORBOX_SPEED_HISTORY_LIMIT]
+        torrent["speed_history"] = list(history[-60:])
+        samples = history[-_TORBOX_SPEED_AVG_SAMPLES:]
+        torrent["speed_avg_bps"] = int(sum(samples) / len(samples)) if samples else 0
+
+
+def _torbox_status_cached(initial_payload: Dict[str, Any], timeout: float) -> Dict[str, Any]:
+    """Last-good cache + single-flight around the Torbox status build (≈1 s TTL)."""
+    now = time.time()
+    db_identity = id(db)
+    with _TORBOX_STATUS_LOCK:
+        if _TORBOX_STATUS_CACHE.get("db_id") not in (None, db_identity):
+            _TORBOX_STATUS_CACHE.update({"payload": None, "at": 0.0, "building": False})
+        _TORBOX_STATUS_CACHE["db_id"] = db_identity
+        cached = _TORBOX_STATUS_CACHE.get("payload")
+        cached_at = float(_TORBOX_STATUS_CACHE.get("at") or 0.0)
+        if cached is not None and (now - cached_at) < _TORBOX_STATUS_TTL_SECONDS:
+            return _torbox_decorate(cached, now, stale=False, age=now - cached_at)
+        if _TORBOX_STATUS_CACHE.get("building"):
+            if cached is not None:
+                return _torbox_decorate(cached, now, stale=True, age=now - cached_at)
+            # Single-flight: never start a second concurrent build.  With no last-good
+            # state, serve DB-derived rows until the in-flight build finishes.
+            fallback = dict(initial_payload)
+            fallback["torrents"] = _torbox_db_rows()
+            fallback["active"] = [row for row in fallback["torrents"] if row.get("is_active")]
+            fallback["count"] = len(fallback["torrents"])
+            fallback["live_state_available"] = False
+            fallback["status"] = "degraded"
+            fallback["degraded"] = True
+            fallback["downloader"] = dict(fallback.get("downloader") or {})
+            fallback["downloader"]["message"] = "Refreshing downloader state…"
+            _torbox_apply_speed_history(fallback["torrents"], live=False)
+            return _torbox_decorate(fallback, now, stale=False, age=0.0)
+        _TORBOX_STATUS_CACHE["building"] = True
+
+    built: Optional[Dict[str, Any]] = None
+    try:
+        built = _build_torbox_downloader_status(initial_payload, timeout)
+    except Exception as exc:  # pragma: no cover - defensive: status must never 500
+        logger.debug("Torbox status build failed: %s", exc)
+        built = None
+    finally:
+        with _TORBOX_STATUS_LOCK:
+            _TORBOX_STATUS_CACHE["building"] = False
+
+    if built is not None and built.get("status") == "success" and (built.get("downloader") or {}).get("connected"):
+        _torbox_apply_speed_history(built.get("torrents") or [], live=True)
+        with _TORBOX_STATUS_LOCK:
+            _TORBOX_STATUS_CACHE["payload"] = built
+            _TORBOX_STATUS_CACHE["at"] = time.time()
+        return _torbox_decorate(built, time.time(), stale=False, age=0.0)
+
+    now = time.time()
+    with _TORBOX_STATUS_LOCK:
+        cached = _TORBOX_STATUS_CACHE.get("payload")
+        cached_at = float(_TORBOX_STATUS_CACHE.get("at") or 0.0)
+    if cached is not None and (now - cached_at) <= _TORBOX_STATUS_STALE_AFTER_SECONDS:
+        return _torbox_decorate(cached, now, stale=True, age=now - cached_at)
+
+    # No usable last-good state: serve DB-derived rows (live_state_available False).
+    fallback = built or dict(initial_payload)
+    fallback["torrents"] = _torbox_db_rows()
+    fallback["active"] = [row for row in fallback["torrents"] if row.get("is_active")]
+    fallback["count"] = len(fallback["torrents"])
+    fallback["live_state_available"] = False
+    fallback["status"] = fallback.get("status") or "degraded"
+    fallback["degraded"] = True
+    _torbox_apply_speed_history(fallback["torrents"], live=False)
+    return _torbox_decorate(fallback, now, stale=cached is not None, age=(now - cached_at) if cached else 0.0)
+
+
 def _build_torbox_downloader_status(payload: Dict[str, Any], timeout: float) -> Dict[str, Any]:
     """Torbox branch of ``/api/downloads/status``; never raises."""
     payload["downloader"]["enabled"] = as_bool(db.get_setting("torbox_enabled", "false"), default=False)
@@ -608,6 +737,11 @@ def _build_torbox_downloader_status(payload: Dict[str, Any], timeout: float) -> 
         payload["status"] = "disabled"
         payload["degraded"] = False
         payload["downloader"]["message"] = "Torbox is disabled in MangaTrax settings."
+        payload["torrents"] = _torbox_db_rows()
+        payload["active"] = [row for row in payload["torrents"] if row.get("is_active")]
+        payload["count"] = len(payload["torrents"])
+        payload["live_state_available"] = False
+        _torbox_apply_speed_history(payload["torrents"], live=False)
         return payload
 
     try:
@@ -615,6 +749,11 @@ def _build_torbox_downloader_status(payload: Dict[str, Any], timeout: float) -> 
         downloader.timeout = max(1.0, min(float(timeout), 30.0))
     except Exception as exc:  # pragma: no cover - defensive
         payload["downloader"]["message"] = f"Could not construct the Torbox client: {exc}"
+        payload["torrents"] = _torbox_db_rows()
+        payload["active"] = [row for row in payload["torrents"] if row.get("is_active")]
+        payload["count"] = len(payload["torrents"])
+        payload["live_state_available"] = False
+        _torbox_apply_speed_history(payload["torrents"], live=False)
         return payload
 
     try:
@@ -636,6 +775,11 @@ def _build_torbox_downloader_status(payload: Dict[str, Any], timeout: float) -> 
     except Exception as exc:
         payload["degraded"] = True
         payload["downloader"]["message"] = f"Connected, but the Torbox queue failed: {exc}"
+        payload["torrents"] = _torbox_db_rows()
+        payload["active"] = [row for row in payload["torrents"] if row.get("is_active")]
+        payload["count"] = len(payload["torrents"])
+        payload["live_state_available"] = False
+        _torbox_apply_speed_history(payload["torrents"], live=False)
         return payload
 
     torrents = []

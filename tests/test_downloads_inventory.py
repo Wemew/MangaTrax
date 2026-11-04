@@ -211,7 +211,7 @@ def test_template_wiring():
         "Downloads Folder (raw)", "raw-downloads-card", "downloads_inventory.entries",
         "Ready to move", "Awaiting Calibre", "Partial / still downloading", "Unmatched",
         "Tag & move now", "Rescan", "rescanDownloads()", "Last scanned",
-        "inventory-last-scan", "autoRefreshDownloadsInventory",
+        "inventory-last-scan", "renderInventory", "refreshDownloadsNow",
     ):
         assert needle in downloads, f"missing Downloads template wiring: {needle}"
     releases = open(

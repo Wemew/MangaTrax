@@ -135,6 +135,8 @@
                 <span id="torbox-last-checked" class="text-[11px] text-slate-500">
                     {% if torbox_last_checked_seconds_ago is not none %}Last checked {{ torbox_last_checked_seconds_ago }}s ago{% else %}Not checked yet{% endif %}
                 </span>
+                <span id="torbox-updated" class="text-[11px] text-slate-600">Updated just now</span>
+                <span id="torbox-reconnecting" class="hidden px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Reconnecting…</span>
                 <button type="button" onclick="checkTorboxNow()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition-colors">
                     <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-cyan-400"></i>
                     Check now
@@ -157,7 +159,7 @@
                             <th class="py-3 px-4 text-right">Controls</th>
                         </tr>
                     </thead>
-                    <tbody class="divide-y divide-slate-800/60">
+                    <tbody id="torbox-queue-body" class="divide-y divide-slate-800/60">
                         {% for t in torrents %}
                         <tr id="torbox-row-{{ t.release_id }}" data-release-id="{{ t.release_id }}" class="hover:bg-slate-850/50 transition-colors">
                             <td class="py-3 px-4 max-w-xs font-semibold text-white truncate break-words-anywhere" title="{{ t.name }}">
@@ -192,12 +194,15 @@
                                 </div>
                                 {% endif %}
                             </td>
-                            <td class="py-3 px-4 font-mono text-cyan-400 torbox-speed">
-                                {% if t.phase == 'fetching' %}
-                                {{ (t.speed_bps / 1024 / 1024)|round(1) }} MB/s
-                                {% else %}
-                                {{ (t.dlspeed / 1024 / 1024)|round(2) }} MB/s
-                                {% endif %}
+                            <td class="py-3 px-4">
+                                <div class="torbox-speed font-mono text-cyan-400 text-sm font-bold">
+                                    {% if t.phase == 'fetching' %}
+                                    {{ (t.speed_bps / 1024 / 1024)|round(1) }} MB/s
+                                    {% else %}
+                                    {{ (t.dlspeed / 1024 / 1024)|round(2) }} MB/s
+                                    {% endif %}
+                                </div>
+                                <div class="torbox-spark mt-1 h-4 w-20 text-cyan-500/70" id="torbox-spark-{{ t.release_id }}"></div>
                             </td>
                             <td class="py-3 px-4 capitalize text-slate-300">
                                 {% if t.failed %}
@@ -289,7 +294,7 @@
                         <th class="py-3 px-4 text-right">Action</th>
                     </tr>
                 </thead>
-                <tbody class="divide-y divide-slate-800/60">
+                <tbody id="inventory-body" class="divide-y divide-slate-800/60">
                     {% for e in downloads_inventory.entries %}
                     <tr class="hover:bg-slate-850/50 transition-colors">
                         <td class="py-3 px-4 font-semibold text-white max-w-xs truncate break-words-anywhere" title="{{ e.relative }}">{{ e.name }}</td>
@@ -324,7 +329,7 @@
             </table>
         </div>
         {% else %}
-        <div class="px-6 py-8 text-center text-slate-500 text-xs">
+        <div id="inventory-empty" class="px-6 py-8 text-center text-slate-500 text-xs">
             Downloads folder is empty{% if downloads_inventory and not downloads_inventory.exists %} or not configured{% endif %}.
             <span class="text-slate-600">Last scanned {% if downloads_inventory_scanned_seconds is not none %}{{ downloads_inventory_scanned_seconds }}s ago{% else %}never{% endif %}.</span>
         </div>
@@ -530,7 +535,7 @@ async function saveDownloaderConfig() {
         if (data.status === 'success') {
             if (data.connection && data.connection.success) {
                 showToast(data.connection.message, 'success');
-                setTimeout(() => location.reload(), 900);
+                await refreshDownloadsNow();
             } else {
                 showToast(data.connection?.message || 'Settings saved, but downloader unreachable.', 'warning');
             }
@@ -587,20 +592,18 @@ async function deleteTorrent(hash) {
     }
 }
 
+let _downloadsPollTimer = null;
+let _lastTorboxRows = new Map();
+
 async function retryTorbox(releaseId) {
     if (!confirm('Retry this Torbox download? Strict volume selection applies.')) return;
     try {
         const res = await fetch(`/api/downloads/torbox/${releaseId}/retry`, { method: 'POST' });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-            showToast(data.detail || 'Retry failed', 'error');
-            return;
-        }
-        showToast(data.message || (data.status === 'success' ? 'Torbox retry submitted' : 'Nothing to retry'), data.status === 'success' ? 'success' : 'info');
-        setTimeout(() => location.reload(), 800);
-    } catch (err) {
-        showToast('Error: ' + err, 'error');
-    }
+        if (!res.ok) { showToast(data.detail || 'Retry failed', 'error'); return; }
+        showToast(data.message || 'Torbox retry submitted', data.status === 'success' ? 'success' : 'info');
+        await refreshDownloadsNow();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
 }
 
 async function removeTorbox(releaseId) {
@@ -608,112 +611,211 @@ async function removeTorbox(releaseId) {
     try {
         const res = await fetch(`/api/downloads/torbox/${releaseId}/remove`, { method: 'POST' });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-            showToast(data.detail || 'Remove failed', 'error');
-            return;
-        }
+        if (!res.ok) { showToast(data.detail || 'Remove failed', 'error'); return; }
         showToast(data.removed ? 'Removed from Torbox' : 'Local state cleared', 'success');
-        setTimeout(() => location.reload(), 800);
-    } catch (err) {
-        showToast('Error: ' + err, 'error');
-    }
+        await refreshDownloadsNow();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
 }
 
 async function checkTorboxNow() {
     try {
         const res = await fetch('/api/downloads/torbox/poll', { method: 'POST' });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-            showToast(data.detail || 'Torbox check failed', 'error');
-            return;
-        }
+        if (!res.ok) { showToast(data.detail || 'Torbox check failed', 'error'); return; }
         showToast(`Torbox checked: ${data.checked || 0} release(s), ${data.queued_fetch || 0} fetch(es) queued`, 'success');
-        setTimeout(() => location.reload(), 900);
-    } catch (err) {
-        showToast('Error: ' + err, 'error');
+        await refreshDownloadsNow();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
+}
+
+function _fmtMb(bytes) { return (Number(bytes || 0) / 1024 / 1024).toFixed(1); }
+function _fmtSize(bytes) { return (Number(bytes || 0) / 1024 / 1024).toFixed(1) + ' MB'; }
+
+function _sparklineSvg(history) {
+    const values = (history || []).slice(-40).map(v => Math.max(0, Number(v) || 0));
+    if (values.length < 2) return '';
+    const max = Math.max(...values, 1);
+    const width = 80, height = 16;
+    const points = values.map((v, i) => `${(i / (values.length - 1) * width).toFixed(1)},${(height - (v / max * (height - 2)) - 1).toFixed(1)}`).join(' ');
+    return `<svg viewBox="0 0 ${width} ${height}" class="w-20 h-4" preserveAspectRatio="none"><polyline fill="none" stroke="currentColor" stroke-width="1.2" points="${points}"></polyline></svg>`;
+}
+
+function _torboxProgressHtml(t) {
+    if (t.phase === 'fetching') {
+        return `<div class="torbox-progress-text text-[11px] text-cyan-300 mb-1">Fetching ${t.progress_pct}% · ${_fmtMb(t.downloaded_bytes)} MB / ${_fmtMb(t.total_bytes)} MB · ${_fmtMb(t.speed_bps)} MB/s</div>` +
+            `<div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden"><div class="torbox-bar-fill bg-cyan-500 h-1.5 rounded-full" style="width: ${t.progress_pct}%"></div></div>`;
+    }
+    if (t.phase === 'ready') return '<div class="torbox-progress-text text-[11px] text-amber-300">Ready — fetch queued</div>';
+    if (t.phase === 'routing') return '<div class="torbox-progress-text text-[11px] text-teal-300">Processing/routing…</div>';
+    const pct = Number(t.progress || 0) * 100;
+    return `<div class="flex items-center justify-between text-[11px] text-slate-400 mb-1"><span>${pct.toFixed(1)}%</span><span>ETA: ${Math.floor((t.eta || 0) / 60)}m</span></div>` +
+        `<div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden"><div class="torbox-bar-fill bg-cyan-500 h-1.5 rounded-full" style="width: ${pct}%"></div></div>`;
+}
+
+function _torboxStateHtml(t) {
+    if (t.failed) {
+        return `<span class="inline-flex items-center px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/40 text-rose-300 text-[10px] font-bold">Failed</span>` +
+            (t.error ? `<div class="text-[10px] text-rose-300/80 max-w-[260px] truncate mt-0.5" title="${escapeHtml(t.error)}">${escapeHtml(t.error)}</div>` : '');
+    }
+    const label = _stateLabel(t);
+    const cls = t.phase === 'fetching' ? 'text-cyan-300' : (t.phase === 'ready' ? 'text-amber-300' : (t.phase === 'routing' ? 'text-teal-300' : ''));
+    return `<span class="torbox-state capitalize ${cls}">${label}</span>`;
+}
+
+function _stateLabel(t) {
+    if (t.phase === 'fetching') return 'Fetching';
+    if (t.phase === 'ready') return 'Ready — fetch queued';
+    if (t.phase === 'routing') return 'Processing/routing…';
+    return t.state || 'queued';
+}
+
+function _torboxControlsHtml(t) {
+    let html = '<div class="flex items-center justify-end gap-1.5">';
+    if (t.failed || t.can_retry) {
+        html += `<button onclick="retryTorbox(${t.release_id})" class="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold"><i data-lucide="refresh-cw" class="w-3 h-3"></i> Retry</button>`;
+    }
+    html += `<button onclick="removeTorbox(${t.release_id})" title="Remove from Torbox (frees the active slot)" aria-label="Remove from Torbox" class="p-1 rounded bg-slate-800 hover:bg-rose-900/30 text-rose-400"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>`;
+    return html + '</div>';
+}
+
+function _torboxRowHtml(t) {
+    const speed = `<div class="torbox-speed font-mono text-cyan-400 text-sm font-bold">${_fmtMb(t.phase === 'fetching' ? t.speed_bps : t.dlspeed)} MB/s</div>` +
+        `<div class="torbox-spark mt-1 h-4 w-20 text-cyan-500/70" id="torbox-spark-${t.release_id}">${_sparklineSvg(t.speed_history)}</div>`;
+    return `<td class="py-3 px-4 max-w-xs font-semibold text-white truncate break-words-anywhere" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</td>` +
+        `<td class="py-3 px-4 text-slate-300">${_fmtSize(t.phase === 'fetching' && t.total_bytes ? t.total_bytes : t.size)}</td>` +
+        `<td class="py-3 px-4">${_torboxProgressHtml(t)}</td>` +
+        `<td class="py-3 px-4">${speed}</td>` +
+        `<td class="py-3 px-4">${_torboxStateHtml(t)}</td>` +
+        `<td class="py-3 px-4 text-right">${_torboxControlsHtml(t)}</td>`;
+}
+
+function renderTorboxQueue(torrents, meta) {
+    const tbody = document.getElementById('torbox-queue-body');
+    if (!tbody) return;
+    meta = meta || {};
+    const rows = Array.isArray(torrents) ? torrents : [];
+    const stale = Boolean(meta.stale) || meta.live_state_available === false;
+    const chip = document.getElementById('torbox-reconnecting');
+    if (chip) chip.classList.toggle('hidden', !stale);
+
+    if (stale && rows.length === 0 && _lastTorboxRows.size > 0) return; // keep last rows
+    if (!stale && meta.live_state_available !== false && rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="py-10 text-center text-slate-500">No active downloads in the Torbox queue.</td></tr>';
+        _lastTorboxRows.clear();
+        return;
+    }
+    const seen = new Set();
+    for (const t of rows) {
+        const key = String(t.release_id);
+        seen.add(key);
+        let row = document.getElementById(`torbox-row-${t.release_id}`);
+        if (!row) {
+            row = document.createElement('tr');
+            row.id = `torbox-row-${t.release_id}`;
+            row.dataset.releaseId = key;
+            row.className = 'hover:bg-slate-850/50 transition-colors';
+            tbody.appendChild(row);
+        }
+        row.innerHTML = _torboxRowHtml(t);
+        _lastTorboxRows.set(key, t);
+    }
+    if (!stale) {
+        for (const key of Array.from(_lastTorboxRows.keys())) {
+            if (!seen.has(key)) {
+                const row = document.getElementById(`torbox-row-${key}`);
+                if (row) row.remove();
+                _lastTorboxRows.delete(key);
+            }
+        }
+    }
+    const updated = document.getElementById('torbox-updated');
+    if (updated) {
+        const age = Number(meta.cache_age_seconds || 0);
+        updated.textContent = age > 0 ? `Updated ${age.toFixed(1)}s ago` : 'Updated just now';
     }
 }
 
-function _fmtMb(bytes) {
-    return (Number(bytes || 0) / 1024 / 1024).toFixed(1);
+function _inventoryStateHtml(e) {
+    if (e.state === 'ready') return '<span class="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-[10px] font-bold">Ready to move</span>';
+    if (e.state === 'awaiting_calibre') return '<span class="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 text-[10px] font-bold">Awaiting Calibre</span>';
+    if (e.state === 'partial') return '<span class="px-1.5 py-0.5 rounded bg-slate-700/40 border border-slate-600 text-slate-300 text-[10px] font-bold">Partial / still downloading</span>';
+    return '<span class="px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/40 text-rose-300 text-[10px] font-bold">Unmatched</span>';
 }
 
-async function refreshTorboxProgress() {
-    if (document.hidden) return;
+function renderInventory(inventory, lastScannedAt) {
+    const tbody = document.getElementById('inventory-body');
+    if (!tbody || !inventory) return;
+    const entries = Array.isArray(inventory.entries) ? inventory.entries : [];
+    if (entries.length === 0) {
+        tbody.innerHTML = '';
+    } else {
+        const existing = new Set(Array.from(tbody.querySelectorAll('tr[data-relative]')).map(r => r.dataset.relative));
+        for (const e of entries) {
+            let row = tbody.querySelector(`tr[data-relative="${CSS.escape(e.relative || e.name)}"]`);
+            if (!row) {
+                row = document.createElement('tr');
+                row.className = 'hover:bg-slate-850/50 transition-colors';
+                row.dataset.relative = e.relative || e.name || '';
+                tbody.appendChild(row);
+            }
+            const series = e.series_name ? `${escapeHtml(e.series_name)}${(e.volumes || []).length ? ' · v' + e.volumes.join(', ') : ''}` : '-';
+            const age = (e.age_seconds === null || e.age_seconds === undefined) ? '-' : `${Math.floor(e.age_seconds / 60)}m`;
+            const release = e.release ? `${escapeHtml(e.release.title)} <span class="text-slate-500">(${escapeHtml(e.release.download_status)})</span>` : '-';
+            row.innerHTML = `<td class="py-3 px-4 font-semibold text-white max-w-xs truncate" title="${escapeHtml(e.relative || e.name)}">${escapeHtml(e.name)}</td>` +
+                `<td class="py-3 px-4 text-slate-300">${e.file_count}${e.cbz_count ? ` (${e.cbz_count} cbz)` : ''}</td>` +
+                `<td class="py-3 px-4 text-slate-300">${_fmtSize(e.size_bytes)}</td>` +
+                `<td class="py-3 px-4 text-slate-400">${age}</td>` +
+                `<td class="py-3 px-4 text-slate-300">${series}</td>` +
+                `<td class="py-3 px-4">${_inventoryStateHtml(e)}</td>` +
+                `<td class="py-3 px-4 text-slate-400 max-w-xs truncate">${release}</td>` +
+                `<td class="py-3 px-4 text-right">${e.state === 'ready' ? '<button onclick="tagMoveNow()" class="px-2 py-1 rounded bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-[10px] font-bold">Tag & move now</button>' : '<span class="text-[10px] text-slate-600">-</span>'}</td>`;
+        }
+        const seen = new Set(entries.map(e => e.relative || e.name || ''));
+        for (const row of Array.from(tbody.querySelectorAll('tr[data-relative]'))) {
+            if (!seen.has(row.dataset.relative)) row.remove();
+        }
+    }
+    const empty = document.getElementById('inventory-empty');
+    if (empty) empty.classList.toggle('hidden', entries.length > 0);
+    const label = document.getElementById('inventory-last-scan');
+    if (label && lastScannedAt) {
+        const seconds = Math.max(0, Math.round((Date.now() - Date.parse(lastScannedAt)) / 1000));
+        label.textContent = `Last scanned ${seconds}s ago`;
+    }
+}
+
+async function refreshDownloadsNow() {
+    if (_downloadsPollTimer) { clearTimeout(_downloadsPollTimer); _downloadsPollTimer = null; }
+    let active = false;
     try {
         const res = await fetch('/api/downloads/status', { headers: { 'Accept': 'application/json' } });
-        if (!res.ok) return;
-        const data = await res.json();
-        const last = data.downloader && data.downloader.last_checked_seconds_ago;
-        const header = document.getElementById('torbox-last-checked');
-        if (header && last !== undefined && last !== null) header.textContent = `Last checked ${last}s ago`;
-        for (const t of (data.torrents || [])) {
-            const row = document.getElementById(`torbox-row-${t.release_id}`);
-            if (!row) continue;
-            const text = row.querySelector('.torbox-progress-text');
-            const bar = row.querySelector('.torbox-bar-fill');
-            const speed = row.querySelector('.torbox-speed');
-            const state = row.querySelector('.torbox-state');
-            if (text && t.phase === 'fetching') {
-                text.textContent = `Fetching ${t.progress_pct}% · ${_fmtMb(t.downloaded_bytes)} MB / ${_fmtMb(t.total_bytes)} MB · ${_fmtMb(t.speed_bps)} MB/s`;
-                if (bar) bar.style.width = `${t.progress_pct}%`;
-            } else if (text && t.phase === 'ready') {
-                text.textContent = 'Ready — fetch queued';
-            } else if (text && t.phase === 'routing') {
-                text.textContent = 'Processing/routing…';
-            }
-            if (speed && t.phase === 'fetching') speed.textContent = `${_fmtMb(t.speed_bps)} MB/s`;
-            if (state && t.phase === 'routing') state.textContent = 'Processing/routing…';
+        if (res.ok) {
+            const data = await res.json();
+            renderTorboxQueue(data.torrents || [], data);
+            renderInventory(data.inventory, data.last_scanned_at);
+            const last = data.downloader && data.downloader.last_checked_seconds_ago;
+            const header = document.getElementById('torbox-last-checked');
+            if (header && last !== undefined && last !== null) header.textContent = `Last checked ${last}s ago`;
+            active = (data.torrents || []).some(t => t && (t.is_active || ['ready', 'fetching', 'routing'].includes(t.phase)));
         }
-    } catch (err) {
-        // Progress refresh is best-effort; never bother the user with transient errors.
-    }
+    } catch (err) { /* keep last rows; retry shortly */ }
+    _downloadsPollTimer = setTimeout(refreshDownloadsNow, active ? 1000 : 5000);
 }
-
-{% if engine == 'torbox' %}
-setInterval(refreshTorboxProgress, 2000);
-{% endif %}
 
 async function rescanDownloads() {
     try {
         const res = await fetch('/api/downloads/scan', { method: 'POST' });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-            showToast(data.detail || 'Rescan failed', 'error');
-            return;
-        }
+        if (!res.ok) { showToast(data.detail || 'Rescan failed', 'error'); return; }
         showToast(`Downloads scanned: ${(data.entries || []).length} entr(ies)`, 'success');
-        setTimeout(() => location.reload(), 700);
-    } catch (err) {
-        showToast('Error: ' + err, 'error');
-    }
+        await refreshDownloadsNow();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
 }
 
-function tagMoveNow() {
-    triggerStagingTag();
-}
+function tagMoveNow() { triggerStagingTag(); }
 
-(function autoRefreshDownloadsInventory() {
-    const card = document.getElementById('raw-downloads-card');
-    if (!card) return;
-    setInterval(async () => {
-        if (document.hidden) return;
-        try {
-            const res = await fetch('/api/downloads/status', { headers: { 'Accept': 'application/json' } });
-            if (!res.ok) return;
-            const data = await res.json();
-            if (data.last_scanned_at && card.dataset.scannedAt && data.last_scanned_at !== card.dataset.scannedAt) {
-                location.reload();
-                return;
-            }
-            const label = document.getElementById('inventory-last-scan');
-            if (label && data.last_scanned_at) {
-                const seconds = Math.max(0, Math.round((Date.now() - Date.parse(data.last_scanned_at)) / 1000));
-                label.textContent = `Last scanned ${seconds}s ago`;
-            }
-        } catch (err) { /* best-effort */ }
-    }, 5000);
-})();
+{% if engine == 'torbox' %}
+refreshDownloadsNow();
+{% endif %}
 
 // --- ComicInfo <Series> audit & explicit repair (M2 data repair) ---
 let _selectedAuditFiles = new Set();
