@@ -492,7 +492,7 @@ def _torrent_status_view(torrent: Dict[str, Any]) -> Dict[str, Any]:
         "downloaded_bytes": downloaded_bytes,
         "download_speed": download_speed,
         "upload_speed": upload_speed,
-        "eta_seconds": eta_seconds,
+        "eta_seconds": int(eta_seconds) if eta_seconds is not None else 0,
         "ratio": round(_as_float(torrent.get("ratio")), 3),
         "seeds": int(_as_float(torrent.get("num_seeds"))),
         "peers": int(_as_float(torrent.get("num_leechs"))),
@@ -637,18 +637,38 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
         state = local_phase
     files = info.get("files") or []
     saved = release.get("downloader_id") or ""
+    # Normalise every numeric field up front: templates must never do arithmetic on
+    # None (task-36 hotfix).  Local fetch progress wins while phase == fetching; the
+    # live Torbox values are used for everything else and only when valid.
     progress = float(info.get("progress") or 0.0)
     size = int(info.get("size") or 0)
     local_total = int(progress_data.get("total_bytes") or 0) or size
     local_downloaded = int(progress_data.get("downloaded_bytes") or 0)
     if local_phase == "fetching" and local_total:
-        progress = max(0.0, min(1.0, local_downloaded / local_total))
+        progress = local_downloaded / local_total
+    progress = max(0.0, min(1.0, progress))
     local_speed = int(progress_data.get("speed_bps") or 0)
-    if local_phase == "fetching":
-        speed = local_speed or speed
+    live_speed = int(info.get("download_speed") or 0)
+    live_eta_raw = info.get("eta")
+    live_eta = 0
+    if isinstance(live_eta_raw, (int, float)):
+        try:
+            live_eta = max(0, int(live_eta_raw))
+        except (TypeError, ValueError):
+            live_eta = 0
     local_eta = None
     if local_phase == "fetching" and local_speed > 0 and local_total > local_downloaded:
-        local_eta = int((local_total - local_downloaded) / local_speed)
+        local_eta = max(0, int((local_total - local_downloaded) / local_speed))
+    if local_phase == "fetching":
+        speed = local_speed or live_speed
+        eta = int(local_eta if local_eta is not None else live_eta)
+    else:
+        speed = live_speed
+        eta = live_eta
+    downloaded_bytes = local_downloaded if local_phase == "fetching" else int(round(size * progress))
+    total_bytes = int(local_total or size or 0)
+    speed_bps = int(local_speed if local_phase == "fetching" else live_speed)
+    eta = int(eta or 0)
     progress_pct = round(progress * 100.0, 1)
     try:
         last_checked_epoch = float(db.get_setting("torbox_last_poll_at", "0") or 0)
@@ -661,8 +681,6 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
     last_checked_seconds_ago = (
         max(0, int(time.time() - last_checked_epoch)) if last_checked_epoch else None
     )
-    eta = info.get("eta") if isinstance(info.get("eta"), (int, float)) else None
-    speed = int(info.get("download_speed") or 0)
     try:
         wanted_volumes = sorted(float(v) for v in json.loads(release.get("download_wanted_json") or "[]"))
         if not wanted_volumes:
@@ -694,10 +712,10 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
         "download_status": db_status,
         "phase": local_phase or ("done" if db_status == "COMPLETED" else "ready" if state == "ready" else ""),
         "progress_pct": progress_pct,
-        "downloaded_bytes": local_downloaded if local_phase == "fetching" else int(round(size * progress)),
-        "total_bytes": local_total,
-        "speed_bps": local_speed if local_phase == "fetching" else 0,
-        "eta_seconds": local_eta,
+        "downloaded_bytes": downloaded_bytes,
+        "total_bytes": total_bytes,
+        "speed_bps": speed_bps,
+        "eta_seconds": eta,
         "last_checked_at": last_checked_iso,
         "last_checked_seconds_ago": last_checked_seconds_ago,
         "downloaded_at": str(release.get("downloaded_at") or ""),
@@ -719,13 +737,16 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
         "size": size,
         "eta": eta,
         "dlspeed": speed,
-        "downloaded_bytes": int(round(size * progress)),
+        "downloaded_bytes": downloaded_bytes,
         "download_speed": speed,
         "upload_speed": 0,
-        "eta_seconds": int(eta) if eta is not None else None,
+        "eta_seconds": eta,
         "ratio": 0.0,
-        "seeds": info.get("seeds") or 0,
-        "is_active": (not failed) and state in ("queued", "queued_slot", "downloading", "stalled"),
+        "seeds": int(info.get("seeds") or 0),
+        "is_active": (not failed) and (
+            state in ("queued", "queued_slot", "downloading", "stalled", "fetching", "routing")
+            or local_phase in ("ready", "fetching", "routing")
+        ),
         "queued": state == "queued_slot",
         "queue_position": info.get("queue_position"),
         "active_limit": info.get("active_limit"),

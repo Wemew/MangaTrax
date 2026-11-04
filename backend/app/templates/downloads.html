@@ -167,18 +167,18 @@
                             </td>
                             <td class="py-3 px-4 text-slate-300">
                                 {% if t.phase == 'fetching' and t.total_bytes %}
-                                {{ (t.total_bytes / 1024 / 1024)|round(1) }} MB
+                                {{ ((t.total_bytes or 0) / 1024 / 1024)|round(1) }} MB
                                 {% else %}
-                                {{ (t.size / 1024 / 1024)|round(1) }} MB
+                                {{ ((t.size or 0) / 1024 / 1024)|round(1) }} MB
                                 {% endif %}
                             </td>
                             <td class="py-3 px-4">
                                 {% if t.phase == 'fetching' %}
                                 <div class="torbox-progress-text flex items-center justify-between text-[11px] text-cyan-300 mb-1">
-                                    <span>Fetching {{ t.progress_pct }}% · {{ (t.downloaded_bytes / 1024 / 1024)|round(1) }} MB / {{ (t.total_bytes / 1024 / 1024)|round(1) }} MB · {{ (t.speed_bps / 1024 / 1024)|round(1) }} MB/s</span>
+                                    <span>Fetching {{ t.progress_pct or 0 }}% · {{ ((t.downloaded_bytes or 0) / 1024 / 1024)|round(1) }} MB / {{ ((t.total_bytes or 0) / 1024 / 1024)|round(1) }} MB · {{ ((t.speed_bps or 0) / 1024 / 1024)|round(1) }} MB/s</span>
                                 </div>
                                 <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                                    <div class="torbox-bar-fill bg-cyan-500 h-1.5 rounded-full" style="width: {{ t.progress_pct }}%"></div>
+                                    <div class="torbox-bar-fill bg-cyan-500 h-1.5 rounded-full" style="width: {{ t.progress_pct or 0 }}%"></div>
                                 </div>
                                 {% elif t.phase == 'ready' %}
                                 <div class="torbox-progress-text text-[11px] text-amber-300">Ready — fetch queued</div>
@@ -186,20 +186,20 @@
                                 <div class="torbox-progress-text text-[11px] text-teal-300">Processing/routing…</div>
                                 {% else %}
                                 <div class="flex items-center justify-between text-[11px] text-slate-400 mb-1">
-                                    <span>{{ (t.progress * 100)|round(1) }}%</span>
-                                    <span>ETA: {{ (t.eta / 60)|int if t.eta > 0 else 0 }}m</span>
+                                    <span>{{ ((t.progress or 0) * 100)|round(1) }}%</span>
+                                    <span>ETA: {{ ((t.eta or 0) / 60)|int if (t.eta or 0) > 0 else 0 }}m</span>
                                 </div>
                                 <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                                    <div class="torbox-bar-fill bg-cyan-500 h-1.5 rounded-full" style="width: {{ (t.progress * 100)|round }}%"></div>
+                                    <div class="torbox-bar-fill bg-cyan-500 h-1.5 rounded-full" style="width: {{ ((t.progress or 0) * 100)|round }}%"></div>
                                 </div>
                                 {% endif %}
                             </td>
                             <td class="py-3 px-4">
                                 <div class="torbox-speed font-mono text-cyan-400 text-sm font-bold">
                                     {% if t.phase == 'fetching' %}
-                                    {{ (t.speed_bps / 1024 / 1024)|round(1) }} MB/s
+                                    {{ ((t.speed_bps or 0) / 1024 / 1024)|round(1) }} MB/s
                                     {% else %}
-                                    {{ (t.dlspeed / 1024 / 1024)|round(2) }} MB/s
+                                    {{ ((t.dlspeed or 0) / 1024 / 1024)|round(2) }} MB/s
                                     {% endif %}
                                 </div>
                                 <div class="torbox-spark mt-1 h-4 w-20 text-cyan-500/70" id="torbox-spark-{{ t.release_id }}"></div>

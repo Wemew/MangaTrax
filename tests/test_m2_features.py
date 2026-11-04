@@ -611,7 +611,7 @@ def test_downloads_status_endpoint():
         assert success["active"][0]["progress_percent"] == 25.0, success
         assert success["active"][0]["download_speed"] == 100, success
         assert success["active"][0]["eta_seconds"] == 75, success
-        assert success["torrents"][1]["eta_seconds"] is None, success["torrents"][1]
+        assert success["torrents"][1]["eta_seconds"] == 0, success["torrents"][1]
         assert success["totals"]["download_speed"] == 100, success["totals"]
         assert success["totals"]["progress"] == 0.25, success["totals"]
         # Every downloader call must use a short, explicit timeout.
