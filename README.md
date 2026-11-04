@@ -353,7 +353,8 @@ Display policy (`app/tag_display.py`):
 Discovery toolbar filters server-side with exact-token matching:
 `include_tags`, `exclude_tags`, `tag_match=any|all`, `sort=relevance|newest|series`
 (relevance = count of included tags first, then recency). The tag picker (`/api/tags?q=`)
-is an autocomplete over the known tag universe ordered exact → prefix → substring → count.
+is an autocomplete over the known tag universe (union of the metadata cache, release tags and
+series tags) ordered exact → prefix → substring → count.
 Selections live in the URL and are reload-safe/shareable.
 
 ---

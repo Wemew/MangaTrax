@@ -1253,7 +1253,7 @@ class MangaDatabase:
 
     def get_known_tags(self, query: str = "", limit: int = 20) -> List[Dict[str, Any]]:
         """Cheap tag universe from cached/denormalised tags, ranked for autocomplete."""
-        from app.tag_display import normalise_tag
+        from app.tag_display import decode_tags, normalise_tag
         counts: Dict[str, Dict[str, Any]] = {}
         with self.get_connection() as conn:
             for row in conn.execute("SELECT tags_json, genres_json FROM manga_metadata_cache;").fetchall():
@@ -1274,9 +1274,35 @@ class MangaDatabase:
                     norm = normalise_tag(name)
                     if not norm:
                         continue
-                    item = counts.setdefault(norm, {"name": name, "category": tag.get("category") or "", "count": 0, "rank": 0})
+                    category = str(tag.get("category") or "")
+                    item = counts.setdefault(norm, {"name": name, "category": category, "count": 0, "rank": 0})
+                    if category.lower() == "genre":
+                        item["category"] = "Genre"
+                    elif not item.get("category") and category:
+                        item["category"] = category
                     item["count"] += 1
                     item["rank"] = max(item["rank"], int(tag.get("rank") or 0))
+            # task-51: union denormalised release/series tags once per row so the
+            # picker is populated even when the metadata-cache row is stale/missing.
+            for table in ("releases", "series_tracking"):
+                for extra in conn.execute(
+                    f"SELECT tags_json, tags_text FROM {table} WHERE tags_json != '[]' OR tags_text != '';"
+                ).fetchall():
+                    for extra_tag in decode_tags(extra["tags_json"], extra["tags_text"]):
+                        if not isinstance(extra_tag, dict) or extra_tag.get("spoiler"):
+                            continue
+                        name = str(extra_tag.get("name") or "").strip()
+                        norm = normalise_tag(name)
+                        if not norm:
+                            continue
+                        category = str(extra_tag.get("category") or "")
+                        item = counts.setdefault(norm, {"name": name, "category": category, "count": 0, "rank": 0})
+                        if category.lower() == "genre":
+                            item["category"] = "Genre"
+                        elif not item.get("category") and category:
+                            item["category"] = category
+                        item["count"] += 1
+                        item["rank"] = max(item["rank"], int(extra_tag.get("rank") or 0))
         needle = normalise_tag(query)
         items = list(counts.values())
         if needle:

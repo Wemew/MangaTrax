@@ -34,8 +34,20 @@
     <td class="py-3 px-4 text-center font-semibold text-brand-400">
         Vol. {{ s.latest_index|int if s.latest_index == s.latest_index|int else s.latest_index }}
     </td>
-    <td class="py-3 px-4 max-w-xs truncate text-slate-400">
+    <td class="py-3 px-4 max-w-xs text-slate-400">
+        {% if tag_display is defined %}
+        {% set tag_info = tag_display(s.tags_json, view='series') %}
+        {% if tag_info and tag_info.chips %}
+        <div class="flex flex-wrap items-center gap-1" title="{{ tag_info.tooltip }}">
+            {% for tag in tag_info.chips %}<span class="px-1.5 py-0.5 rounded bg-slate-800/80 border border-slate-700 text-slate-300 text-[10px]">{{ tag }}</span>{% endfor %}
+            {% if tag_info.overflow %}<span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-500 text-[10px]">+{{ tag_info.overflow }}</span>{% endif %}
+        </div>
+        {% else %}
+        <span class="truncate block">{{ s.tags or '-' }}</span>
+        {% endif %}
+        {% else %}
         {{ s.tags or '-' }}
+        {% endif %}
     </td>
     <td class="py-3 px-4 text-right">
         <div class="flex items-center justify-end gap-2">

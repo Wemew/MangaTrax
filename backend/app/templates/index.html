@@ -186,6 +186,15 @@
                         <h3 class="text-sm font-semibold text-white leading-snug line-clamp-2 break-words-anywhere" title="{{ r.title }}">
                             {{ r.title }}
                         </h3>
+                        {% if tag_display is defined %}
+                        {% set tag_info = tag_display(r.tags_json, view='dashboard') %}
+                        {% if tag_info and tag_info.chips %}
+                        <div class="flex flex-wrap items-center gap-1" title="{{ tag_info.tooltip }}">
+                            {% for tag in tag_info.chips %}<span class="px-1.5 py-0.5 rounded bg-slate-800/80 border border-slate-700 text-slate-300 text-[10px]">{{ tag }}</span>{% endfor %}
+                            {% if tag_info.overflow %}<span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-500 text-[10px]">+{{ tag_info.overflow }}</span>{% endif %}
+                        </div>
+                        {% endif %}
+                        {% endif %}
 
                         {% if r.missing_volumes %}
                         <p class="text-[11px] text-amber-400 font-medium line-clamp-1">
