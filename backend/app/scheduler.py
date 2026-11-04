@@ -2473,7 +2473,7 @@ class MangaScheduler:
 
 
     # --- Calibre Sync Task ---
-    def sync_calibre_library(self) -> Dict[str, Any]:
+    def sync_calibre_library(self, progress=None) -> Dict[str, Any]:
         """
         Scans the Calibre metadata.db in zero-lock read-only mode, updates series tracking,
         and auto-resolves any requests for volumes that have now been added to Calibre.
@@ -2497,9 +2497,15 @@ class MangaScheduler:
                 return {"success": False, "message": msg, "synced_series": 0, "resolved_requests": 0}
 
             try:
+                if progress:
+                    progress(0, 0, "Scanning Calibre library…")
                 series_list = scanner.get_all_series()
                 volumes_map = scanner.get_series_volumes_map()
+                if progress:
+                    progress(0, len(series_list), f"Updating {len(series_list)} tracked series…")
                 synced_count = self.db.sync_calibre_series(series_list, volumes_map=volumes_map)
+                if progress:
+                    progress(len(series_list), len(series_list), f"Synced {synced_count} Calibre series")
 
                 # Build matcher
                 meta_cache = self.db.get_all_manga_metadata_cache()
@@ -2537,6 +2543,8 @@ class MangaScheduler:
                 except Exception as e:
                     logger.debug(f"Complete releases expansion error during Calibre sync: {e}")
 
+                if progress:
+                    progress(len(series_list), len(series_list), f"Resolved {len(resolved)} requests; reconciling releases")
                 summary = f"Synced {synced_count} manga series from Calibre; auto-resolved {len(resolved)} acquired requests."
                 logger.info(summary)
                 self._log_activity("CALIBRE_SYNC", summary)
@@ -3733,7 +3741,8 @@ class MangaScheduler:
                 logger.debug("Series reconcile skipped release %s: %s", release.get("id"), exc)
         return changed
 
-    def backfill_series(self, series_name: str, max_pages: int = 3, actor: Optional[str] = None) -> Dict[str, Any]:
+    def backfill_series(self, series_name: str, max_pages: int = 3, actor: Optional[str] = None,
+                         progress=None) -> Dict[str, Any]:
         """
         Targeted historical backfill for an individual manga series on Nyaa.
         Queries all past volume releases & bundles on Nyaa for the series and resolves them against Calibre.
@@ -3752,6 +3761,9 @@ class MangaScheduler:
         refresh_actor = actor or "scheduler"
         logger.info(f"Starting series refresh + targeted backfill for {title_display} (max_pages={max_pages})")
 
+        if progress:
+            progress(0, 4, "Provider metadata phase")
+
         # Phase 1: provider metadata (display/enrichment only; never the stable key).
         self.db.set_setting("backfill_progress", f"Refreshing metadata for {title_display}...")
         try:
@@ -3766,6 +3778,9 @@ class MangaScheduler:
                 actor=refresh_actor,
             )
 
+        if progress:
+            progress(1, 4, "Calibre info phase")
+
         # Phase 2: Calibre info for this one series (skips cleanly when unavailable).
         self.db.set_setting("backfill_progress", f"Refreshing Calibre info for {title_display}...")
         try:
@@ -3779,6 +3794,9 @@ class MangaScheduler:
                 json.dumps({"error": str(exc)}),
                 actor=refresh_actor,
             )
+
+        if progress:
+            progress(2, 4, "Reconciling releases phase")
 
         # Reconcile only this series' releases against the refreshed metadata/ownership.
         self.db.set_setting("backfill_progress", f"Reconciling releases for {title_display}...")
@@ -3836,6 +3854,8 @@ class MangaScheduler:
                 "backfill_progress",
                 f"Crawling Nyaa page {page} for {title_display} (up to {max_pages} pages each)...",
             )
+            if progress:
+                progress(min(int(page or 0), int(max_pages)), int(max_pages), f"Nyaa page {page}/{max_pages}")
 
         nyaa = NyaaMangaProvider(name=f"Nyaa: {primary_title}", config={"delay_seconds": 1.0, "base_url": self._nyaa_base_url()})
         crawl_error = ""
@@ -3857,9 +3877,13 @@ class MangaScheduler:
         total_requested = 0
         total_sent_to_downloader = 0
 
-        for rel in releases:
+        total_releases = len(releases)
+        for release_index, rel in enumerate(releases, 1):
             if self.stop_backfill_requested:
                 break
+            if progress:
+                progress(release_index - 1, total_releases,
+                         f"Crawled {min(max_pages, max_pages)} pages; {release_index}/{total_releases} releases processed")
             is_new, status, missing_vols, rel_id, stable_series = self._process_release(
                 rel, f"Nyaa: {primary_title}", matcher, known_series_keys=known_series_keys,
                 target_identity=target_identity,
@@ -3967,7 +3991,8 @@ class MangaScheduler:
             },
         }
 
-    def run_series_backfill_async(self, series_name: str, max_pages: int = 3, actor: Optional[str] = None) -> Dict[str, Any]:
+    def run_series_backfill_async(self, series_name: str, max_pages: int = 3, actor: Optional[str] = None,
+                                  progress=None) -> Dict[str, Any]:
         """
         Launches the three-phase series refresh + targeted backfill in a background
         daemon thread, allowing the user to navigate pages while tracking live progress
@@ -3986,7 +4011,7 @@ class MangaScheduler:
                 f"Refreshing metadata and Calibre info for '{series_name}', then crawling Nyaa...",
             )
             try:
-                res = self.backfill_series(series_name, max_pages=max_pages, actor=actor)
+                res = self.backfill_series(series_name, max_pages=max_pages, actor=actor, progress=progress)
                 self.db.set_setting("backfill_status", "idle")
                 self.db.set_setting("backfill_progress", res.get("message", f"Series refresh for '{series_name}' complete."))
             except Exception as e:

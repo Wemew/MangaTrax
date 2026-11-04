@@ -1236,6 +1236,17 @@ def _recorded_task(kind: str, title: str, fn, actor: str = "user",
     db.log_activity("BACKGROUND_TASK_STARTED", f"Task #{task_id}: {title}", kind)
     try:
         result = fn(reporter)
+        if isinstance(result, dict):
+            counts = ", ".join(
+                f"{key}: {value}" for key, value in result.items()
+                if isinstance(value, int) and not isinstance(value, bool)
+            )
+            if counts:
+                current = db.get_background_task(task_id) or {}
+                if int(current.get("items_total") or 0) > 0:
+                    reporter.report(message=f"Completed — {counts}", progress_pct=100.0, force=True)
+                else:
+                    reporter.report(1, 1, f"Completed — {counts}", progress_pct=100.0, force=True)
         db.finish_background_task(task_id, "success", result=result)
         db.log_activity("BACKGROUND_TASK_FINISHED", f"Task #{task_id} finished", json.dumps(result or {}, default=str)[:500])
         return result, background_tasks.serialize_task(db.get_background_task(task_id))
@@ -1692,8 +1703,8 @@ async def api_calibre_sync():
     """
     def _sync_worker(reporter):
         reporter.report(0, 0, "Scanning Calibre library…", force=True)
-        result = scheduler.sync_calibre_library()
-        reporter.report(1, 1, "Calibre sync complete", progress_pct=100.0, force=True)
+        result = scheduler.sync_calibre_library(progress=reporter.report)
+        reporter.report(message="Calibre sync complete", progress_pct=100.0, force=True)
         return result
     res, task = await asyncio.to_thread(
         _recorded_task, "sync:calibre", "Sync Calibre library", _sync_worker,
@@ -2912,30 +2923,40 @@ async def api_update_series_link(series_id: int, payload: Dict[str, Any]):
     db.update_series_link(series_id, model.website_url)
     return JSONResponse({"status": "success", "website_url": model.website_url})
 
-def _attach_backfill_task(series_name: str) -> Dict[str, Any]:
-    """Monitor the scheduler's existing backfill thread as a persisted task."""
+def _start_backfill_task(series_name: str, max_pages: int) -> tuple:
+    """Start the scheduler backfill with a persisted reporter (task-50 counters)."""
+    import threading
     import time as _time
 
-    def _monitor(reporter):
-        reporter.report(0, 0, f"Refreshing '{series_name}'…", force=True)
-        while getattr(scheduler, "is_backfilling", False):
-            try:
-                message = db.get_setting("backfill_progress", "") or f"Refreshing '{series_name}'…"
-            except Exception:
-                message = f"Refreshing '{series_name}'…"
-            reporter.report(0, 0, message, force=True)
-            _time.sleep(0.75)
-        try:
-            message = db.get_setting("backfill_progress", "") or "Series refresh complete"
-        except Exception:
-            message = "Series refresh complete"
-        reporter.report(1, 1, message, progress_pct=100.0, force=True)
-        return {"series_name": series_name, "progress": message}
-
-    return background_tasks.run_in_background(
-        db, "backfill:series", f"Refresh series: {series_name}", _monitor,
-        actor=auth_module.get_current_actor(), scope=series_name,
+    task_id = db.create_background_task(
+        "backfill:series", f"Refresh series: {series_name}", scope=series_name,
+        actor=auth_module.get_current_actor(),
     )
+    reporter = background_tasks.TaskReporter(db, task_id, None)
+    reporter.report(0, max_pages, f"Refreshing '{series_name}'…", force=True)
+    res = scheduler.run_series_backfill_async(
+        series_name, max_pages=max_pages, actor=auth_module.get_current_actor(),
+        progress=reporter.report,
+    )
+    if not getattr(scheduler, "is_backfilling", False):
+        db.finish_background_task(task_id, "success", result=res)
+    else:
+        def _watch():
+            while getattr(scheduler, "is_backfilling", False):
+                try:
+                    message = db.get_setting("backfill_progress", "") or f"Refreshing '{series_name}'…"
+                except Exception:
+                    message = f"Refreshing '{series_name}'…"
+                reporter.report(0, max_pages, message)
+                _time.sleep(0.75)
+            try:
+                message = db.get_setting("backfill_progress", "") or "Series refresh complete"
+            except Exception:
+                message = "Series refresh complete"
+            reporter.report(max_pages, max_pages, message, progress_pct=100.0, force=True)
+            db.finish_background_task(task_id, "success", result={"series_name": series_name, "message": message})
+        threading.Thread(target=_watch, daemon=True).start()
+    return res, background_tasks.serialize_task(db.get_background_task(task_id))
 
 
 @app.post("/api/series/{series_id}/backfill")
@@ -2947,26 +2968,20 @@ async def api_series_backfill(series_id: int, payload: Optional[Dict[str, Any]] 
     if not target:
         raise HTTPException(status_code=404, detail="Series not found")
 
-    res = scheduler.run_series_backfill_async(
-        target["name"], max_pages=model.max_pages, actor=auth_module.get_current_actor(),
-    )
-    task_info = _attach_backfill_task(target["name"])
+    res, task = _start_backfill_task(target["name"], model.max_pages)
     payload = dict(res or {})
-    payload["task_id"] = task_info["task_id"]
-    payload["task"] = task_info["task"]
+    payload["task_id"] = task["id"]
+    payload["task"] = task
     return JSONResponse(payload)
 
 @app.post("/api/series/backfill")
 async def api_series_backfill_by_name(payload: Dict[str, Any]):
     """Refresh one series by name in the background: metadata, Calibre info, then Nyaa crawl."""
     model = _validated_payload(schemas.SeriesBackfillByNameRequest, payload)
-    res = scheduler.run_series_backfill_async(
-        model.series_name, max_pages=model.max_pages, actor=auth_module.get_current_actor(),
-    )
-    task_info = _attach_backfill_task(model.series_name)
+    res, task = _start_backfill_task(model.series_name, model.max_pages)
     payload = dict(res or {})
-    payload["task_id"] = task_info["task_id"]
-    payload["task"] = task_info["task"]
+    payload["task_id"] = task["id"]
+    payload["task"] = task
     return JSONResponse(payload)
 
 @app.post("/api/releases/{release_id}/status")
