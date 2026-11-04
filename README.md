@@ -252,6 +252,68 @@ mount), parallel connections will not help. Check the task-28 storage-health ban
 
 ---
 
+## Network diagnostics: why is the container slower than the host?
+
+MangaTrax downloads run **inside** the container, so any container networking overhead
+directly caps download speed. Settings -> Maintenance has a "Network diagnostics" card
+(with **Run speed test** and **Copy JSON**) and the same snapshot is available from
+`GET /api/diagnostics/network` plus `GET /health` (`network` block). The speed test uses
+a **fixed Cloudflare endpoint only** (no arbitrary URL) and is rate-limited to once a
+minute.
+
+Common host-vs-container gaps and fixes:
+
+- **Bridge/veth NAT overhead** — default `bridge` networking sends every packet through
+  the host's veth/NAT; high pps can be CPU-bound. Try `network_mode: host` (then publish
+  ports differently) if you can give up isolation.
+- **MTU mismatch** — Docker defaults to 1500; if the host/jumbo path uses 9000, TLS
+  stalls/fragments. Align with `com.docker.network.driver.mtu=1500` (or the host MTU).
+- **Missing sysctls in the container netns** — the container may not inherit BBR/buffer
+  tuning:
+  ```yaml
+  services:
+    mangatrax:
+      sysctls:
+        - net.ipv4.tcp_congestion_control=bbr
+        - net.core.default_qdisc=fq
+        - net.core.rmem_max=33554432
+        - net.core.wmem_max=33554432
+        - net.ipv4.tcp_rmem=4096 87380 33554432
+        - net.ipv4.tcp_wmem=4096 65536 33554432
+  ```
+  (Some sysctls are namespaced; the card's values are what the container actually sees.)
+- **CPU quota throttling** — a low `cpu.max` quota makes TLS/copy work CPU-bound; check
+  the card's quota/throttled counters and raise the limit.
+- **conntrack limits** — many parallel connections can exhaust `nf_conntrack` on the
+  host (look for drops in `dmesg`); raise `net.netfilter.nf_conntrack_max`.
+- **Docker DNS on parallel connections** — `127.0.0.11` can serialize/latency-spike
+  resolutions; cache/avoid repeated lookups.
+
+### Speed-test byte limit (important)
+
+Cloudflare's `__down` endpoint returns **HTTP 403 with a 1-byte body** for requests above
+**90 MB** — that is why a "1 GB" test looks like 0 MB/s. MangaTrax caps each request at
+90,000,000 bytes and splits a larger total into sequential rounds per connection
+(`bytes=360000000, connections=4` = one round of 90 MB per connection;
+`bytes=1000000000, connections=4` = 3 rounds per connection). The response reports actual
+bytes, per-connection MB/s and aggregate MB/s; a 403/short body is reported as an error
+naming the endpoint limit, never as a fast download.
+
+Equivalent shell recipe for a 1 GB-equivalent test (repeat rounds, sum bytes/time):
+
+```bash
+# 10 rounds x 90 MB, one connection (adjust -x/parallel for multiple connections)
+for i in $(seq 1 10); do
+  curl -s -o /dev/null -w '%{size_download} %{time_total}\n' \
+    'https://speed.cloudflare.com/__down?bytes=90000000'
+done
+```
+
+If the WAN test and `dd` to `/downloads` are fast but Torbox single streams are slow,
+raise `torbox_download_concurrency` / `torbox_parallel_chunks` in Settings -> Downloader.
+
+---
+
 ## 📄 License
 
 MIT License. See [LICENSE](LICENSE) for details.

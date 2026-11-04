@@ -515,6 +515,43 @@
                     </button>
                 </div>
             </div>
+
+            <!-- Network diagnostics (task-33) -->
+            <div id="network-diagnostics-card" class="mt-4 bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3"
+                 data-snapshot='{{ network_diagnostics|tojson }}'>
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                    <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i data-lucide="activity" class="w-4 h-4 text-cyan-400"></i>
+                        Network diagnostics (container vs host)
+                    </h4>
+                    <div class="flex items-center gap-2">
+                        <button type="button" onclick="copyNetworkDiagnostics()" aria-label="Copy network diagnostics JSON" title="Copy the full diagnostics JSON" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Copy JSON</button>
+                        <button type="button" onclick="runNetworkSpeedTest()" id="btn-network-speedtest" aria-label="Run network speed test" class="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5">
+                            <i data-lucide="gauge" class="w-3.5 h-3.5"></i> Run speed test
+                        </button>
+                    </div>
+                </div>
+                {% if network_diagnostics and network_diagnostics.warnings %}
+                <ul class="text-[11px] text-amber-300/90 list-disc pl-5 space-y-0.5">
+                    {% for warning in network_diagnostics.warnings %}<li>{{ warning }}</li>{% endfor %}
+                </ul>
+                {% endif %}
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 text-[11px]">
+                    <div class="text-slate-400">Container: <span class="text-slate-200">{{ 'yes' if network_diagnostics and network_diagnostics.container else 'no' }}</span></div>
+                    <div class="text-slate-400">MTU: <span class="text-slate-200">{{ (network_diagnostics.mtu if network_diagnostics else [])|join(', ') or 'unknown' }}</span></div>
+                    <div class="text-slate-400">Congestion: <span class="text-slate-200">{{ (network_diagnostics.sysctls.tcp_congestion_control if network_diagnostics and network_diagnostics.sysctls else '') or 'unknown' }}</span></div>
+                    <div class="text-slate-400">qdisc: <span class="text-slate-200">{{ (network_diagnostics.sysctls.default_qdisc if network_diagnostics and network_diagnostics.sysctls else '') or 'unknown' }}</span></div>
+                    <div class="text-slate-400">tcp_rmem: <span class="text-slate-200">{{ (network_diagnostics.sysctls.tcp_rmem if network_diagnostics and network_diagnostics.sysctls else '') or 'unknown' }}</span></div>
+                    <div class="text-slate-400">tcp_wmem: <span class="text-slate-200">{{ (network_diagnostics.sysctls.tcp_wmem if network_diagnostics and network_diagnostics.sysctls else '') or 'unknown' }}</span></div>
+                    <div class="text-slate-400">CPU quota: <span class="text-slate-200">{{ (network_diagnostics.cpu.quota_cores if network_diagnostics and network_diagnostics.cpu and network_diagnostics.cpu.quota_cores is not none else 'none') }} core(s) / {{ (network_diagnostics.cpu.count if network_diagnostics and network_diagnostics.cpu else '?') }}</span></div>
+                    <div class="text-slate-400">Throttled: <span class="text-slate-200">{{ (network_diagnostics.cpu.throttled_count if network_diagnostics and network_diagnostics.cpu and network_diagnostics.cpu.throttled_count is not none else 'n/a') }}</span></div>
+                    <div class="text-slate-400">TCP retrans: <span class="text-slate-200">{{ (network_diagnostics.tcp.retrans_rate_pct if network_diagnostics and network_diagnostics.tcp and network_diagnostics.tcp.retrans_rate_pct is not none else 'n/a') }}%</span></div>
+                    <div class="text-slate-400">Torbox conns/chunks: <span class="text-slate-200">{{ (network_diagnostics.app.torbox_download_concurrency if network_diagnostics and network_diagnostics.app else '?') }} / {{ (network_diagnostics.app.torbox_parallel_chunks if network_diagnostics and network_diagnostics.app else '?') }}</span></div>
+                    <div class="text-slate-400">DNS: <span class="text-slate-200">{{ (network_diagnostics.dns.resolvers if network_diagnostics and network_diagnostics.dns else [])|join(', ') or 'unknown' }}{% if network_diagnostics and network_diagnostics.dns and network_diagnostics.dns.docker_embedded_dns %} (Docker DNS){% endif %}</span></div>
+                </div>
+                <div id="network-speedtest-result" class="hidden text-[11px] text-slate-300 space-y-1"></div>
+                <p class="text-[10px] text-slate-500">Cloudflare caps a single speed-test request at 90 MB; larger runs are split into sequential rounds per connection. Speed units are MB/s (decimal).</p>
+            </div>
         </div>
 
         <!-- Advanced / Dangerous (opt-in: MANGATRAX_DEBUG_ACTIONS=1) -->
@@ -806,6 +843,53 @@ async function saveSettings(e) {
         }
     } catch (err) {
         showToast('Error: ' + err, 'error');
+    }
+}
+
+async function runNetworkSpeedTest() {
+    const btn = document.getElementById('btn-network-speedtest');
+    const out = document.getElementById('network-speedtest-result');
+    if (!btn || !out) return;
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="animate-spin inline-block w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full"></span> Testing...';
+    out.classList.remove('hidden');
+    out.textContent = 'Running speed test (Cloudflare, fixed endpoint; >90 MB split into rounds)...';
+    try {
+        const res = await fetch('/api/diagnostics/speedtest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bytes: 100000000, connections: 4 })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            out.innerHTML = `<span class="text-rose-300">Speed test failed: ${escapeHtml(data.detail || data.error || res.status)}</span>`;
+            return;
+        }
+        if (data.status !== 'success') {
+            out.innerHTML = `<span class="text-rose-300">Speed test failed: ${escapeHtml(data.error || 'unknown error')}</span>`;
+            return;
+        }
+        const per = (data.per_connection || []).map(c => `conn ${c.connection}: ${c.mbps} MB/s (${(c.bytes / 1e6).toFixed(1)} MB)`).join(' · ');
+        out.innerHTML = `<div class="text-cyan-300 font-bold">Aggregate: ${data.aggregate_mbps} MB/s (${(data.bytes_transferred / 1e6).toFixed(1)} MB in ${data.wall_seconds}s, ${data.connections} connections)</div>` +
+            `<div class="text-slate-400">${escapeHtml(per)}</div>` +
+            (data.capped ? '<div class="text-amber-300/80">Per-request cap applied: sequential rounds of ≤90 MB per connection.</div>' : '');
+    } catch (err) {
+        out.innerHTML = `<span class="text-rose-300">Speed test error: ${escapeHtml(err)}</span>`;
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = original;
+    }
+}
+
+async function copyNetworkDiagnostics() {
+    const card = document.getElementById('network-diagnostics-card');
+    if (!card) return;
+    try {
+        await navigator.clipboard.writeText(card.dataset.snapshot || '{}');
+        showToast('Network diagnostics JSON copied', 'success');
+    } catch (err) {
+        showToast('Copy failed: ' + err, 'error');
     }
 }
 

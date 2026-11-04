@@ -20,7 +20,7 @@ from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
-from app import downloads_inventory, storage_health
+from app import downloads_inventory, network_diagnostics, storage_health
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
 from app.downloader.base import DownloaderError, parse_queued_handle_id
 from app.downloader.torbox import TorboxDownloader
@@ -50,6 +50,8 @@ _TORBOX_SPEED_AVG_SAMPLES = 10
 _TORBOX_STATUS_CACHE: Dict[str, Any] = {"payload": None, "at": 0.0, "building": False}
 _TORBOX_STATUS_LOCK = threading.Lock()
 _TORBOX_SPEED_HISTORY: Dict[str, list] = {}
+_NETWORK_SPEEDTEST_LAST: Dict[str, float] = {}
+_NETWORK_SPEEDTEST_MIN_INTERVAL_SECONDS = 60.0
 
 # Directories & Configuration
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -862,6 +864,12 @@ async def health_check():
         payload["storage"] = _storage_health_payload()
     except Exception as exc:  # pragma: no cover - /health must never fail on diagnostics
         payload["storage"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    try:
+        payload["network"] = network_diagnostics.collect_network_diagnostics(
+            settings=db.get_all_settings(),
+        )
+    except Exception as exc:  # pragma: no cover - diagnostics must never fail /health
+        payload["network"] = {"error": f"{type(exc).__name__}: {exc}", "warnings": []}
     return JSONResponse(payload)
 
 
@@ -1275,6 +1283,9 @@ async def settings_view(request: Request):
             "prioritized_groups": prioritized_groups,
             "torbox_api_key_set": torbox_key_set,
             "storage_health": _storage_health_payload(),
+            "network_diagnostics": network_diagnostics.collect_network_diagnostics(
+                settings=db.get_all_settings(),
+            ),
             "debug_actions_enabled": AUTH_CONFIG.debug_actions
         }
     )
@@ -1497,6 +1508,53 @@ async def api_downloads_scan():
         "last_scanned_at": inventory.get("scanned_at") or "",
         "entries": inventory.get("entries") or [],
     })
+
+
+@app.get("/api/diagnostics/network")
+async def api_network_diagnostics():
+    """Full in-container network snapshot (read-only, cheap, no network I/O)."""
+    snapshot = await asyncio.to_thread(
+        network_diagnostics.collect_network_diagnostics, db.get_all_settings(),
+    )
+    return JSONResponse(snapshot)
+
+
+@app.post("/api/diagnostics/speedtest")
+async def api_network_speedtest(payload: Optional[Dict[str, Any]] = None):
+    """Bounded speed test against the fixed Cloudflare endpoint (never arbitrary URLs)."""
+    now = time.time()
+    last = _NETWORK_SPEEDTEST_LAST.get("at", 0.0)
+    if now - last < _NETWORK_SPEEDTEST_MIN_INTERVAL_SECONDS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Speed test rate-limited; wait {int(_NETWORK_SPEEDTEST_MIN_INTERVAL_SECONDS - (now - last))}s.",
+        )
+    _NETWORK_SPEEDTEST_LAST["at"] = now
+    body = payload or {}
+    try:
+        bytes_total = int(body.get("bytes") or network_diagnostics.SPEEDTEST_DEFAULT_BYTES)
+        connections = int(body.get("connections") or network_diagnostics.SPEEDTEST_DEFAULT_CONNECTIONS)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="bytes and connections must be integers")
+    result = await asyncio.to_thread(
+        network_diagnostics.run_speedtest,
+        bytes_total, connections, network_diagnostics.SPEEDTEST_URL,
+        network_diagnostics.SPEEDTEST_TIMEOUT_SECONDS, db.get_all_settings(),
+    )
+    try:
+        db.set_setting("last_speedtest_json", json.dumps({
+            key: result.get(key) for key in
+            ("status", "bytes_requested", "bytes_transferred", "connections",
+             "aggregate_mbps", "per_connection", "wall_seconds", "capped", "error")
+        }))
+    except Exception as exc:  # pragma: no cover - result persistence is best effort
+        logger.debug("Could not persist last speed test: %s", exc)
+    if result.get("status") == "error" and (
+        "must be between" in str(result.get("error") or "")
+        or "URL rejected" in str(result.get("error") or "")
+    ):
+        return JSONResponse(result, status_code=400)
+    return JSONResponse(result)
 
 
 # --- Tagger: preview / manual tagging (PROJECT.md feature 16) ---
