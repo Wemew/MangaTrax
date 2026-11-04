@@ -35,7 +35,24 @@ def test_parser_matrix():
         ("Cuckoos Vols 100-105 (Digital)", "Cuckoos", [100.0, 101.0, 102.0, 103.0, 104.0, 105.0], [], False),
         ("Some Manga 01-05 (Digital)", "Some", [], [[1.0, 5.0]], True),
         ("Some Manga 1-5 (Digital)", "Some", [1.0, 2.0, 3.0, 4.0, 5.0], [], False),
+        ("A Couple of Cuckoos 205 (2024) (Digital) (Rillant)", "A Couple of Cuckoos", [], [], True),
+        ("That Time I Got Reincarnated as a Slime 119", "That Time I Got Reincarnated as a Slime", [], [], True),
+        ("Series 100", "Series", [], [], True),
+        ("Series (2024)", "Series", [], [], False),
+        ("Series 5", "Series", [], [], True),
+        ("Series v205", "Series", [205.0], [], False),
     ]
+    for title in (
+        "A Couple of Cuckoos 205 (2024) (Digital) (Rillant)",
+        "That Time I Got Reincarnated as a Slime 119",
+        "Series 100",
+    ):
+        parsed = extract_manga_bundle_and_volumes(title)
+        assert parsed["chapter_start"] == parsed["chapter_end"], (title, parsed)
+        assert parsed["chapter_start"] >= 100, (title, parsed)
+        assert is_chapter_only(title) is True, title
+    for title in ("Series (2024)", "Series v205"):
+        assert is_chapter_only(title) is False, title
     for title, expected_series, expected_volumes, expected_ranges, expected_chapter in cases:
         parsed = extract_manga_bundle_and_volumes(title)
         assert parsed["series_name"] == expected_series, (title, parsed["series_name"])

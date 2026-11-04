@@ -203,8 +203,11 @@ def test_parser_is_chapter_only_is_left_context_free():
 
     # Bare trailing numbers are NOT chapter-only for the parser: without library
     # context the number may be part of the series name.
-    for title in ("Chainsaw Man 180", "One Piece 108", "Mob Psycho 100",
-                  "20th Century Boys", "7th Time Loop", "Isekai Ojisan 2"):
+    # task-44: standalone bare 3-digit trailing numbers are chapter-only, while
+    # 2-digit bare numbers / non-trailing numbers are unchanged.
+    for title in ("Chainsaw Man 180", "One Piece 108", "Mob Psycho 100"):
+        assert is_chapter_only(title) is True, title
+    for title in ("20th Century Boys", "7th Time Loop", "Isekai Ojisan 2"):
         assert is_chapter_only(title) is False, title
 
     # The parser's own pure classifications still work (existing machinery).
@@ -321,12 +324,11 @@ def test_bare_number_title_not_discarded_without_library_context():
             _release("Chainsaw Man 180", "guard-3001"),
             _release("Chainsaw Man 181", "guard-3002"),
         )
-        assert result["releases_found"] == 2, result
-        stored = ctx.releases()
-        assert len(stored) == 2, stored
-        assert {row["series_name"] for row in stored} == {"Chainsaw Man"}, stored
-        assert ctx.discards() == [], ctx.discards()
-        print("    [PASSED] no known series -> no discard, grouped under the clean key.")
+        # task-44: 3-digit bare chapter numbers are chapter-only regardless of context.
+        assert result["releases_found"] == 0, result
+        assert ctx.releases() == [], ctx.releases()
+        assert len(ctx.discards()) == 2, ctx.discards()
+        print("    [PASSED] 3-digit bare chapter numbers are chapter-only, not phantom volumes.")
     finally:
         ctx.close()
 

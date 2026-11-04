@@ -450,7 +450,9 @@ def test_chapters_and_mixed_updates():
     assert is_chapter_only("[danke-Empire] Bleach v01-v20 [Digital]") is False
     assert is_chapter_only("Look Back [Digital] [CBZ]") is False
     assert is_chapter_only("Goodbye, Eri (2022) [Digital]") is False
-    assert is_chapter_only("Mob Psycho 100 [Digital]") is False
+    # task-44: bare 3-digit trailing numbers are chapter-only for the pure parser;
+    # the scheduler context guard still protects a tracked "Mob Psycho 100".
+    assert is_chapter_only("Mob Psycho 100 [Digital]") is True
 
     # 3. Mixed releases must NOT be flagged as chapter-only, and only volume info extracted
     assert is_chapter_only("Bleach Vol. 1 (Ch. 1-7)") is False

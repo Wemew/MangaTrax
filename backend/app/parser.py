@@ -485,6 +485,33 @@ def _parse_bare_chapter_range(title: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def _parse_bare_chapter_number(title: str) -> Optional[Dict[str, Any]]:
+    """Standalone bare trailing number >= 100 is a single chapter (task-44 gap).
+
+    ``"A Couple of Cuckoos 205"`` -> chapter 205; explicit ``v205``/``Vol. 205`` are
+    volumes; 2-digit bare numbers and edition years are left unchanged.
+    """
+    if not title:
+        return None
+    cleaned = clean_manga_title(title)
+    match = _TRAILING_BARE_NUMBER_RE.search(cleaned.strip())
+    if not match:
+        return None
+    try:
+        number = float(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    if number < 100 or 1900 <= number <= 2099:
+        return None
+    token = int(number) if number.is_integer() else number
+    if re.search(rf"(?i)\b(?:volumes?|vols?|vol|v)\.?\s*{re.escape(str(token))}", str(title)):
+        return None
+    series = cleaned[: match.start()].strip(" -–—:,|./")
+    if not series:
+        return None
+    return {"series": series, "number": number}
+
+
 def _extract_chapter_as_volume(title: str) -> Optional[Dict[str, Any]]:
     """Parse the "<chapters A-B> as v<X>-<Y> [+ <chapters C-D>]" idiom.
 
@@ -1230,6 +1257,14 @@ def is_chapter_only(raw_title: str) -> bool:
     if has_volume:
         return False
 
+    # task-44: a standalone bare trailing chapter number (>=100) is chapter-only.
+    try:
+        bare_chapter_number = _parse_bare_chapter_number(raw_title)
+    except Exception:
+        bare_chapter_number = None
+    if bare_chapter_number:
+        return True
+
     # 1. Explicit chapter keywords: chapter/chap/ch/c/#.  The marker may be followed
     #    immediately by the number ("Ch1-50", "Chapter1-50") -- requiring a separator
     #    sent those titles into the bare volume-range bundle path (50 phantom volumes).
@@ -1501,6 +1536,10 @@ def _extract_manga_bundle_and_volumes_impl(raw_title: str, known_groups: Optiona
         )
 
     if not cleaned or is_chapter_only(raw_title):
+        # Bare single chapter number (>=100): expose it as a start/end pair too.
+        if result.get("chapter_start") is None and result.get("chapter_number") is not None:
+            result["chapter_start"] = result["chapter_number"]
+            result["chapter_end"] = result["chapter_number"]
         return _apply_chapter_series_strip(result)
 
     # Pattern 1: Multi-volume bundle range (plural-aware: Vol/Vols/Volume/Volumes/Book):

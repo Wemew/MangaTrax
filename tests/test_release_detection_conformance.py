@@ -546,15 +546,13 @@ def test_scheduler_chapter_guard_and_series_keys():
         stored = {row["series_name"] for row in db_mps.get_releases()}
         assert stored == {"Mob Psycho 100"}, stored
 
-        # --- Unknown series: retained under the CLEAN series key ----------------
+        # --- Unknown series: task-44 treats 3-digit bare numbers as chapter-only ---
         db_unknown, scheduler_unknown = _make_scheduler(os.path.join(base, "unknown"))
         for title in ["Dandadan 250 (Digital) (1r0n)", "Dandadan 251"]:
-            assert _process(db_unknown, scheduler_unknown, title)[1] != "CHAPTER_ONLY"
-        rows = db_unknown.get_releases()
-        assert len(rows) == 2, rows
-        assert {row["series_name"] for row in rows} == {"Dandadan"}, rows
-        assert not [r for r in db_unknown.get_logs(limit=200) if r["event_type"] == "CHAPTER_DISCARDED"]
-        print("    [PASSED] chapters discard only when known; retained under the clean series key.")
+            assert _process(db_unknown, scheduler_unknown, title)[1] == "CHAPTER_ONLY"
+        assert db_unknown.get_releases() == []
+        assert [r for r in db_unknown.get_logs(limit=200) if r["event_type"] == "CHAPTER_DISCARDED"]
+        print("    [PASSED] 3-digit bare chapter numbers are CHAPTER_ONLY; numbered series remain protected.")
     finally:
         shutil.rmtree(base, ignore_errors=True)
 

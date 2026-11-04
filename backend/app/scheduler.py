@@ -2784,14 +2784,50 @@ class MangaScheduler:
                     # like the context-guarded marker-less path, single chapters keep
                     # their previous silent path.
                     if is_chapter_only(rel.title):
-                        range_reason = self._explicit_chapter_range_reason(rel, known_series_keys)
-                        if range_reason:
-                            self._log_activity(
-                                "CHAPTER_DISCARDED",
-                                f"Discarded chapter range release: '{rel.title}'",
-                                range_reason,
+                        from app.parser import _parse_bare_chapter_number, extract_manga_bundle_and_volumes
+                        bare_chapter = None
+                        chapter_series = ""
+                        try:
+                            bare_chapter = _parse_bare_chapter_number(rel.title)
+                            parsed_chapter = extract_manga_bundle_and_volumes(rel.title)
+                            chapter_series = (parsed_chapter.get("series_name") or "").strip()
+                        except Exception:
+                            pass
+                        numbered_known = (
+                            bare_chapter is not None and (
+                                normalize_text(rel.title) in known_series_keys
+                                or (chapter_series and normalize_text(chapter_series) in known_series_keys
+                                    and normalize_text(rel.title) == normalize_text(chapter_series))
                             )
-                        continue
+                        )
+                        if bare_chapter is not None and normalize_text(rel.title) in known_series_keys:
+                            numbered_known = True
+                        if not numbered_known and bare_chapter is not None and not discard_unmarked_chapters:
+                            # Respect the existing opt-out for marker-less chapters; the
+                            # explicit Ch./Chapter markers below remain always-discarded.
+                            numbered_known = True
+                        if not numbered_known:
+                            range_reason = self._explicit_chapter_range_reason(rel, known_series_keys)
+                            if bare_chapter is not None:
+                                series_known = chapter_series and normalize_text(chapter_series) in known_series_keys
+                                reason = (
+                                    f"bare 3-digit chapter number {bare_chapter['number']:g} of "
+                                    f"{'known ' if series_known else ''}series '{chapter_series}'"
+                                )
+                                self._log_activity(
+                                    "CHAPTER_DISCARDED",
+                                    f"Discarded chapter release: '{rel.title}'",
+                                    reason,
+                                )
+                            elif range_reason:
+                                self._log_activity(
+                                    "CHAPTER_DISCARDED",
+                                    f"Discarded chapter range release: '{rel.title}'",
+                                    range_reason,
+                                )
+                            continue
+                        # A real numbered series name ("Mob Psycho 100") is not a chapter;
+                        # fall through to normal ingestion/grouping.
                     if is_light_novel(rel.title):
                         continue
                     # Marker-less chapters ("Chainsaw Man 180"): discarded only when the
@@ -3083,8 +3119,51 @@ class MangaScheduler:
         if is_jpegxl_release(rel.title):
             self._log_jpegxl_discard(rel)
             return (False, "JPEGXL", [], None, None)
+        # Load the known-series context early: a bare 3-digit trailing number is
+        # chapter-only under task-44, but a real numbered series name ("Mob Psycho 100")
+        # that is tracked must still be ingested rather than discarded.
+        if known_series_keys is None:
+            try:
+                known_series_keys = self._known_series_keys(matcher)
+            except Exception:
+                known_series_keys = set()
         if is_chapter_only(rel.title):
-            return (False, "CHAPTER_ONLY", [], None, None)
+            try:
+                from app.parser import _parse_bare_chapter_number, extract_manga_bundle_and_volumes
+                bare_chapter = _parse_bare_chapter_number(rel.title)
+                parsed_numbered = extract_manga_bundle_and_volumes(rel.title)
+                numbered_title = (parsed_numbered.get("numbered_series_name")
+                                  or parsed_numbered.get("series_name") or "")
+            except Exception:
+                bare_chapter = None
+                numbered_title = ""
+            # Only a REAL numbered series name ("Mob Psycho 100") is protected from
+            # the bare-number chapter rule; explicit Ch./Chapter markers must discard.
+            full_title_known = normalize_text(rel.title) in known_series_keys
+            if not (bare_chapter and (full_title_known or (
+                numbered_title and normalize_text(numbered_title) in known_series_keys
+            ))):
+                # Keep chapter discards auditable (CHAPTER_DISCARDED) like the
+                # context-guarded path, so users can see why a release was skipped.
+                try:
+                    parsed_chapter = extract_manga_bundle_and_volumes(rel.title)
+                    chapter_series = (parsed_chapter.get("series_name") or "").strip()
+                    chapter_number = (bare_chapter or {}).get("number")
+                    series_known = bool(chapter_series) and normalize_text(chapter_series) in known_series_keys
+                    reason = (
+                        f"bare 3-digit chapter number {chapter_number:g} of "
+                        f"{'known ' if series_known else ''}series '{chapter_series}'"
+                        if chapter_number is not None else
+                        f"chapter-only release of {'known ' if series_known else ''}series '{chapter_series}'"
+                    )
+                except Exception:
+                    reason = "chapter-only release"
+                self._log_activity(
+                    "CHAPTER_DISCARDED",
+                    f"Discarded chapter release: '{rel.title}'",
+                    reason,
+                )
+                return (False, "CHAPTER_ONLY", [], None, None)
         if is_light_novel(rel.title):
             return (False, "LIGHT_NOVEL", [], None, None)
         # Context is needed for the chapter guard AND for keeping numbered series
