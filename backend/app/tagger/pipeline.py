@@ -6,12 +6,14 @@ Two-folder model:
 
 The rule is series-level (from the user, supersedes the earlier import_dir idea):
   * series NOT in Calibre (no template) -> keep all of its volumes in DOWNLOADS_DIR;
-  * series in Calibre -> tag each .cbz with ComicInfo.xml, then move it to
-    STAGING_DIR preserving its relative subpath;
+  * series in Calibre -> tag each .cbz with ComicInfo.xml, then move it to the
+    FLAT root of STAGING_DIR (``staging/<basename>``; collisions get ``(2)`` names);
   * a file that cannot be tagged never moves.
 
 Both directories are expected on the same drive, so moves prefer ``os.replace`` and
-only fall back to copy+delete when ``st_dev`` differs (with a warning).
+only fall back to copy+delete when ``st_dev`` differs (with a warning).  Downloads stay
+per-torrent; staging is deliberately flat and ``flatten_staging_dir()`` migrates any
+legacy nested staging tree.
 """
 
 import json
@@ -305,6 +307,106 @@ def prune_empty_dirs(
     return result
 
 
+def _safe_staging_basename(filename: str) -> str:
+    """Basename only; no path separators/control chars (staging is flat)."""
+    base = os.path.basename(str(filename or "").replace("\\", "/")).strip()
+    base = re.sub(r'[\x00-\x1f<>:"/\\|?*]+', "_", base).strip().strip(".")
+    return base or "file.cbz"
+
+
+def _staging_collision_path(staging_dir: str, filename: str, source_path: str) -> tuple:
+    """Resolve flat-staging destination + collision status.
+
+    Returns ``(dest_path, status)`` where status is ``new``, ``skip`` (same name and
+    same size -> already staged) or ``renamed`` (same name, different size -> ``(2)``).
+    """
+    basename = _safe_staging_basename(filename)
+    dest = os.path.join(staging_dir, basename)
+    if not os.path.exists(dest):
+        return dest, "new"
+    same_size = False
+    try:
+        same_size = os.path.getsize(source_path) == os.path.getsize(dest)
+    except OSError:
+        same_size = False
+    if same_size:
+        return dest, "skip"
+    stem, ext = os.path.splitext(basename)
+    counter = 2
+    while True:
+        candidate = os.path.join(staging_dir, f"{stem} ({counter}){ext}")
+        if not os.path.exists(candidate):
+            return candidate, "renamed"
+        counter += 1
+
+
+def _is_temp_staging_file(filename: str) -> bool:
+    lower = str(filename or "").lower()
+    return lower.endswith(".part") or lower.endswith(".mangatrax-part")
+
+
+def flatten_staging_dir(staging_dir: str, db: Any = None) -> Dict[str, Any]:
+    """Move every file in nested staging subdirs to the flat staging root.
+
+    Collisions follow the routing policy (same size -> skip, different size ->
+    ``"<stem> (2)<ext>"``). Temp files (``*.part`` / ``*.mangatrax-part``) are left
+    untouched, symlinks are never followed/removed, and emptied dirs are pruned with
+    the task-34 safe helper.
+    """
+    stats: Dict[str, Any] = {
+        "flattened": 0, "skipped_existing": 0, "conflicts_renamed": 0, "dirs_removed": 0,
+    }
+    if not staging_dir:
+        return stats
+    root = os.path.realpath(staging_dir)
+    if not os.path.isdir(root):
+        return stats
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        current = os.path.realpath(dirpath)
+        if current == root:
+            continue
+        if not current.startswith(root + os.sep):
+            continue
+        dirnames[:] = [name for name in dirnames if not os.path.islink(os.path.join(dirpath, name))]
+        for filename in sorted(filenames):
+            if _is_temp_staging_file(filename):
+                continue
+            source = os.path.join(dirpath, filename)
+            if os.path.islink(source) or not os.path.isfile(source):
+                continue
+            try:
+                dest, status = _staging_collision_path(root, filename, source)
+                if status == "skip":
+                    stats["skipped_existing"] += 1
+                    # Flat staging: the identical-size duplicate is already staged at the
+                    # root, so drop the nested copy (never overwrite the root file).
+                    try:
+                        os.remove(source)
+                    except OSError as exc:
+                        logger.debug("Flatten staging: could not remove duplicate '%s': %s", source, exc)
+                    logger.debug("Flatten staging: dropped duplicate '%s' (same size)", source)
+                    continue
+                dest_real = os.path.realpath(dest)
+                if dest_real != root and not dest_real.startswith(root + os.sep):
+                    logger.warning("Refusing flatten outside staging_dir: %s -> %s", source, dest)
+                    continue
+                _move_with_preference(source, dest)
+                stats["flattened"] += 1
+                if status == "renamed":
+                    stats["conflicts_renamed"] += 1
+                    logger.info("Flatten staging: collision, moved '%s' to '%s'", filename, os.path.basename(dest))
+            except Exception as exc:  # one bad file must not abort the flatten
+                logger.warning("Flatten staging failed for '%s': %s", source, exc)
+    pruned = prune_empty_dirs(root, db=None, busy_names=set(), label="staging", actor="user")
+    stats["dirs_removed"] = int(pruned.get("removed") or 0)
+    if stats["flattened"]:
+        logger.info(
+            "Flattened %s file(s) from staging subfolders (%s renamed, %s dirs removed).",
+            stats["flattened"], stats["conflicts_renamed"], stats["dirs_removed"],
+        )
+    return stats
+
+
 def process_downloads_to_staging(
     downloads_dir: str,
     staging_dir: str,
@@ -324,8 +426,24 @@ def process_downloads_to_staging(
         "awaiting_calibre": 0,
         "failed": 0,
         "skipped_existing": 0,
+        "conflicts_renamed": 0,
         "series_awaiting": [],
+        "flattened": 0,
+        "flatten_skipped_existing": 0,
+        "flatten_conflicts_renamed": 0,
+        "flatten_dirs_removed": 0,
     }
+
+    def _merge_flatten(stats: Dict[str, Any]) -> None:
+        result["flattened"] += int(stats.get("flattened") or 0)
+        result["flatten_skipped_existing"] += int(stats.get("skipped_existing") or 0)
+        result["flatten_conflicts_renamed"] += int(stats.get("conflicts_renamed") or 0)
+        result["flatten_dirs_removed"] += int(stats.get("dirs_removed") or 0)
+
+    # Legacy nested staging trees are flattened before and after routing (cheap:
+    # flatten exits immediately when staging is already flat).
+    if staging_dir:
+        _merge_flatten(flatten_staging_dir(staging_dir, db=db))
     if not downloads_dir or not os.path.isdir(downloads_dir):
         return result
     downloads_root = os.path.realpath(downloads_dir)
@@ -383,26 +501,27 @@ def process_downloads_to_staging(
                         failed_files.append(filename)
                         continue
 
-                relative = os.path.relpath(source_path, downloads_dir)
-                dest_path = os.path.join(staging_dir, relative)
+                # Staging is FLAT: always the sanitised basename directly in the root.
+                dest_path, collision = _staging_collision_path(staging_dir, filename, source_path)
                 dest_real = os.path.realpath(dest_path)
                 if dest_real != staging_root and not dest_real.startswith(staging_root + os.sep):
                     logger.warning("Refusing move outside staging_dir: %s -> %s", source_path, dest_path)
                     result["failed"] += 1
                     failed_files.append(filename)
                     continue
-                if os.path.exists(dest_path):
-                    same_size = False
-                    try:
-                        same_size = os.path.getsize(source_path) == os.path.getsize(dest_path)
-                    except OSError:
-                        same_size = False
-                    logger.warning(
-                        "Destination already exists, skipping '%s'%s.",
-                        filename, " (identical size)" if same_size else "",
+                if collision == "skip":
+                    logger.debug(
+                        "Staging already has '%s' with the same size; skipping.",
+                        os.path.basename(dest_path),
                     )
                     result["skipped_existing"] += 1
                     continue
+                if collision == "renamed":
+                    logger.info(
+                        "Staging collision for '%s' (different size); using '%s'.",
+                        filename, os.path.basename(dest_path),
+                    )
+                    result["conflicts_renamed"] = int(result.get("conflicts_renamed") or 0) + 1
 
                 move_kind = _move_with_preference(source_path, dest_path)
                 result["tagged_and_moved"] += 1
@@ -428,6 +547,9 @@ def process_downloads_to_staging(
                 )
                 result["failed"] += 1
                 failed_files.append(filename)
+
+    if staging_dir:
+        _merge_flatten(flatten_staging_dir(staging_dir, db=db))
 
     result["series_awaiting"] = [
         {

@@ -279,6 +279,9 @@
                 <button type="button" onclick="pruneEmptyFolders()" id="btn-prune-empty" aria-label="Prune empty folders" title="Remove empty leftover folders from the downloads directory (busy downloads are kept)" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
                     <i data-lucide="folder-x" class="w-3.5 h-3.5 text-amber-400"></i> Prune empty folders
                 </button>
+                <button type="button" onclick="flattenStaging()" id="btn-flatten-staging" aria-label="Flatten staging folder" title="Move files out of nested staging subfolders into the staging root (collisions get a (2) suffix)" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                    <i data-lucide="folders" class="w-3.5 h-3.5 text-cyan-400"></i> Flatten staging
+                </button>
                 <button type="button" onclick="tagMoveNow()" class="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5">
                     <i data-lucide="tag" class="w-3.5 h-3.5"></i> Tag & move now
                 </button>
@@ -807,6 +810,22 @@ async function refreshDownloadsNow() {
         }
     } catch (err) { /* keep last rows; retry shortly */ }
     _downloadsPollTimer = setTimeout(refreshDownloadsNow, active ? 1000 : 5000);
+}
+
+async function flattenStaging() {
+    try {
+        const res = await fetch('/api/downloads/flatten-staging', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'Flatten failed', 'error'); return; }
+        const moved = data.flattened || 0;
+        showToast(
+            moved
+                ? `Flattened ${moved} file(s)${data.conflicts_renamed ? `, ${data.conflicts_renamed} renamed` : ''}; ${data.dirs_removed || 0} folder(s) removed.`
+                : 'Staging is already flat',
+            moved ? 'success' : 'info'
+        );
+        await refreshDownloadsNow();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
 }
 
 async function pruneEmptyFolders() {

@@ -314,6 +314,26 @@ raise `torbox_download_concurrency` / `torbox_parallel_chunks` in Settings -> Do
 
 ---
 
+## Staging layout (flat)
+
+Staging is **flat**: every completed `.cbz` is moved directly to `/staging/<file>.cbz`;
+MangaTrax never creates per-torrent subfolders there. The downloads folder keeps its
+per-torrent structure (each torrent owns its directory), and both folders should live on
+the same drive so routing is an atomic rename.
+
+If two different torrents produce the same filename:
+
+- same name and same size -> treated as already staged (skipped, never overwritten);
+- same name and different size -> stored as `<stem> (2).cbz`, `(3)`, ... (never
+  overwritten).
+
+Existing deployments with nested staging folders are flattened automatically at the
+start/end of each routing pass, or on demand with **Flatten staging** on the Downloads
+page (`POST /api/downloads/flatten-staging`). Temporary `.part` / `.mangatrax-part`
+files are left alone and emptied folders are pruned safely.
+
+---
+
 ## Log rotation & activity retention
 
 MangaTrax logs in two places:

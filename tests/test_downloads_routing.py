@@ -121,10 +121,12 @@ def test_series_known_tags_and_moves():
         result = ctx.run(templates=KNOWN_TEMPLATE)
         assert result == {
             "scanned": 1, "tagged_and_moved": 1, "awaiting_calibre": 0,
-            "failed": 0, "skipped_existing": 0, "series_awaiting": [],
+            "failed": 0, "skipped_existing": 0, "conflicts_renamed": 0,
+            "series_awaiting": [], "flattened": 0, "flatten_skipped_existing": 0,
+            "flatten_conflicts_renamed": 0, "flatten_dirs_removed": 0,
             "removed": 1, "pruned_count": 1, "pruned_dirs": ["nested"], "skipped_busy": 0,
         }, result
-        destination = os.path.join(ctx.staging, "nested", "Known Series Vol. 02.cbz")
+        destination = os.path.join(ctx.staging, "Known Series Vol. 02.cbz")
         assert os.path.isfile(destination), destination
         assert not os.path.exists(source), "source must be removed after the move"
         fields = cbz_tagger.read_comicinfo(destination)
@@ -193,16 +195,22 @@ def test_no_overwrite_skips_existing():
     ctx = Ctx()
     try:
         source = os.path.join(ctx.downloads, "Known Series Vol. 05.cbz")
-        destination = os.path.join(ctx.staging, "Known Series Vol. 05.cbz")
         _make_cbz(source)
-        _make_cbz(destination, entries={"existing.jpg": b"existing"})
+        first = ctx.run(templates=KNOWN_TEMPLATE)
+        assert first["tagged_and_moved"] == 1, first
+        destination = os.path.join(ctx.staging, "Known Series Vol. 05.cbz")
+        assert os.path.isfile(destination)
         before = open(destination, "rb").read()
+        # Same filename + same size in downloads (already-tagged copy) -> skip, no overwrite.
+        duplicate = os.path.join(ctx.downloads, "another-dir", "Known Series Vol. 05.cbz")
+        os.makedirs(os.path.dirname(duplicate), exist_ok=True)
+        shutil.copyfile(destination, duplicate)
         result = ctx.run(templates=KNOWN_TEMPLATE)
         assert result["skipped_existing"] == 1, result
         assert result["tagged_and_moved"] == 0, result
-        assert os.path.isfile(source), "skipped source is left in downloads"
+        assert os.path.isfile(duplicate), "skipped source is left in downloads"
         assert open(destination, "rb").read() == before, "destination must never be overwritten"
-        print("    [PASSED] existing destination skipped; source kept; destination bytes untouched.")
+        print("    [PASSED] identical-size staging duplicate skipped; source kept; bytes untouched.")
     finally:
         ctx.close()
 
@@ -388,7 +396,9 @@ def test_idempotent_and_staging_untouched():
         second = ctx.run(templates=KNOWN_TEMPLATE)
         assert second == {
             "scanned": 0, "tagged_and_moved": 0, "awaiting_calibre": 0,
-            "failed": 0, "skipped_existing": 0, "series_awaiting": [],
+            "failed": 0, "skipped_existing": 0, "conflicts_renamed": 0,
+            "series_awaiting": [], "flattened": 0, "flatten_skipped_existing": 0,
+            "flatten_conflicts_renamed": 0, "flatten_dirs_removed": 0,
             "removed": 0, "pruned_count": 0, "pruned_dirs": [], "skipped_busy": 0,
         }, second
         assert os.path.isfile(legacy), "files already in staging must be untouched by the routing pass"

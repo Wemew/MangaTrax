@@ -55,7 +55,7 @@ def test_routing_prunes_emptied_dir():
         _make_cbz(os.path.join(source_dir, "Known Series v01.cbz"))
         result = ctx.run(templates=KNOWN_TEMPLATE)
         assert result["tagged_and_moved"] == 1, result
-        assert os.path.isfile(os.path.join(ctx.staging, "Known Series Vol. 01", "Known Series v01.cbz")), os.listdir(ctx.staging)
+        assert os.path.isfile(os.path.join(ctx.staging, "Known Series v01.cbz")), os.listdir(ctx.staging)
         assert not os.path.exists(source_dir), "emptied torrent dir must be pruned"
         assert result["removed"] == 1, result
         assert result["pruned_dirs"] == ["Known Series Vol. 01"], result

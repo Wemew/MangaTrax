@@ -1652,6 +1652,15 @@ async def api_downloads_prune_empty(payload: Optional[Dict[str, Any]] = None):
     return JSONResponse({"status": "success", **result})
 
 
+@app.post("/api/downloads/flatten-staging")
+async def api_downloads_flatten_staging():
+    """Move every file in nested staging folders into the flat staging root."""
+    result = await asyncio.to_thread(
+        downloads_pipeline.flatten_staging_dir, _staging_dir_setting(), db,
+    )
+    return JSONResponse({"status": "success", **result})
+
+
 @app.post("/api/downloads/scan")
 async def api_downloads_scan():
     """Rescan the raw downloads folder and return the fresh inventory."""
