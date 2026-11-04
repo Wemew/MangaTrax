@@ -334,6 +334,38 @@ files are left alone and emptied folders are pruned safely.
 
 ---
 
+## Long-running actions (progress convention)
+
+Every button that can take more than ~2 seconds must start a **persisted background
+task** instead of blocking the request, so progress survives page reloads:
+
+```python
+from app import background_tasks
+
+def worker(report):
+    report(done=0, total=len(files), message="Starting…", force=True)
+    for index, item in enumerate(files, 1):
+        process(item)
+        report(done=index, total=len(files), message=f"Processing {item.name}")
+
+info = background_tasks.run_in_background(
+    db, "kind:action", "Human title", worker, actor="user", scope="optional-scope",
+)
+# return {"status": "started", "task_id": info["task_id"], "task": info["task"]}
+```
+
+- Tasks are rows in `background_tasks` (`GET /api/tasks?active=1`,
+  `GET /api/tasks/{id}`, `POST /api/tasks/{id}/cancel` for cancellable tasks).
+- In JS call `MangaTasks.bindButton(button, "kind:action", scope)` (or mark the button
+  with `data-task-kind`/`data-task-scope`); the global Tasks panel polls every 1.5 s,
+  disables/reattaches matching buttons after reload, shows percent/message/elapsed and
+  toasts completion. Do **not** use `location.reload()` for progress UI.
+- Quick actions may use the foreground recorded-task helper so they still show up in the
+  panel; long network work must use the threaded runner. Never delete files or rows as
+  part of progress reporting.
+
+---
+
 ## Log rotation & activity retention
 
 MangaTrax logs in two places:
