@@ -435,11 +435,53 @@ def _parse_bare_volume_range(title: str) -> Optional[Dict[str, Any]]:
         return None
     if not (0 < start <= 300) or not (start <= end <= 300) or (end - start) > 100:
         return None
+    # task-44: three-digit bounds are chapter-scale in manga feeds; explicit
+    # volume markers ("v01-28", "Vol. 205-215") are handled by earlier patterns.
+    if start >= 100 or end >= 100:
+        return None
+    if re.search(r"(?i)\b(?:chapters?|color\s+chapter|ch\.?|c\.?)\b|#\s*\d", title):
+        return None
     return {
         "series": series,
         "start": start,
         "end": end,
         "volumes": _expand_volume_span(start, end),
+    }
+
+
+def _parse_bare_chapter_range(title: str) -> Optional[Dict[str, Any]]:
+    """Recognise a bare numeric range that is CHAPTER data, not a volume bundle.
+
+    Covers three-digit bounds ("205-215"), chapter-context words, and zero-padded
+    ranges (which the volume parser deliberately ignores).
+    """
+    if not title:
+        return None
+    cleaned = clean_manga_title(title)
+    match = _TRAILING_CHAPTER_RANGE_RE.match(cleaned.strip())
+    if not match:
+        return None
+    try:
+        start = float(match.group("start"))
+        end = float(match.group("end"))
+    except (TypeError, ValueError):
+        return None
+    if start > end:
+        start, end = end, start
+    raw = str(title or "")
+    start_text = match.group("start")
+    end_text = match.group("end")
+    padded = bool(re.match(r"^0\d", start_text) or re.match(r"^0\d", end_text))
+    chapter_context = bool(
+        re.search(r"(?i)\b(?:chapters?|color\s+chapter|ch\.?|c\.?)\b|#\s*\d", raw)
+    )
+    if not (start >= 100 or end >= 100 or padded or chapter_context):
+        return None
+    return {
+        "series": match.group("series").strip(" -–—:,|."),
+        "start": start,
+        "end": end,
+        "chapter_ranges": [[start, end]],
     }
 
 

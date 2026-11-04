@@ -1917,6 +1917,30 @@ async def api_match_awaiting_series(payload: Optional[Dict[str, Any]] = None):
     return JSONResponse(result)
 
 
+@app.get("/api/maintenance/suspicious-volume-ranges")
+async def api_suspicious_volume_ranges():
+    result = await asyncio.to_thread(db.audit_suspicious_volume_ranges)
+    return JSONResponse(result)
+
+
+@app.post("/api/maintenance/repair-volume-ranges")
+async def api_repair_volume_ranges(payload: Optional[Dict[str, Any]] = None):
+    body = payload or {}
+    ids = body.get("release_ids") or []
+    if not isinstance(ids, list):
+        raise HTTPException(status_code=400, detail="release_ids must be a list")
+    cleaned = []
+    for value in ids[:200]:
+        try:
+            cleaned.append(int(value))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="release_ids must be integers")
+    result = await asyncio.to_thread(
+        db.repair_suspicious_volume_ranges, cleaned, auth_module.get_current_actor(),
+    )
+    return JSONResponse(result)
+
+
 @app.get("/api/maintenance/series-aliases")
 async def api_series_aliases():
     return JSONResponse({"status": "success", "aliases": db.get_series_alias_overrides()})

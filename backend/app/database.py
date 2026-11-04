@@ -1180,6 +1180,100 @@ class MangaDatabase:
             logger.debug("Could not read activity log stats: %s", exc)
         return stats
 
+    # --- Suspicious volume-range repair (task-44) ---
+    def audit_suspicious_volume_ranges(self) -> Dict[str, Any]:
+        """Read-only audit: stored high/chapter-range volumes that should be chapters."""
+        from app.parser import extract_manga_bundle_and_volumes
+
+        records: List[Dict[str, Any]] = []
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, title, series_name, volumes_json, missing_vols_json, "
+                "volume_start, volume_end, status FROM releases ORDER BY id ASC;"
+            ).fetchall()
+        for row in rows:
+            try:
+                stored = json.loads(row["volumes_json"] or "[]")
+            except (TypeError, ValueError):
+                stored = []
+            stored_volumes = []
+            for value in stored or []:
+                try:
+                    stored_volumes.append(float(value))
+                except (TypeError, ValueError):
+                    continue
+            if not stored_volumes:
+                continue
+            try:
+                parsed = extract_manga_bundle_and_volumes(row["title"] or "")
+            except Exception:
+                parsed = {}
+            parsed_volumes = [float(v) for v in (parsed.get("volumes") or [])]
+            # Explicit volume markers are authoritative at any magnitude.
+            explicit_marker = bool(re.search(
+                r"(?i)\b(?:volumes?|vols?|vol|v)\.?\s*\d", row["title"] or "",
+            )) and "Chapter" not in (row["title"] or "") and "Ch." not in (row["title"] or "")
+            if explicit_marker and parsed_volumes:
+                continue
+            chapter_only = bool(parsed.get("is_chapter")) and not parsed_volumes
+            high_volumes = all(value >= 100 for value in stored_volumes)
+            chapter_title = bool(parsed.get("chapter_ranges")) and not parsed_volumes
+            if not (high_volumes or chapter_only or chapter_title):
+                continue
+            suggested = parsed_volumes if parsed_volumes else None
+            records.append({
+                "id": int(row["id"]),
+                "title": row["title"] or "",
+                "series_name": row["series_name"] or "",
+                "current_volumes": stored_volumes,
+                "suggested_volumes": suggested,
+                "suggestion": "chapter-only" if suggested is None else f"volumes {suggested[0]:g}-{suggested[-1]:g}",
+                "reason": (
+                    "stored volumes are all >= 100 (chapter-scale)"
+                    if high_volumes else
+                    "title re-parses as chapter-only under the new rules"
+                ),
+                "safe_to_repair": suggested is None,
+            })
+        return {
+            "status": "success",
+            "summary": {
+                "scanned": len(rows),
+                "repairable": sum(1 for item in records if item["safe_to_repair"]),
+                "reported": len(records),
+            },
+            "files": records,
+        }
+
+    def repair_suspicious_volume_ranges(self, release_ids: List[int], actor: str = "user") -> Dict[str, Any]:
+        audit = self.audit_suspicious_volume_ranges()
+        by_id = {item["id"]: item for item in audit.get("files") or []}
+        repaired = 0
+        skipped = 0
+        with self.get_connection() as conn:
+            for release_id in release_ids or []:
+                item = by_id.get(int(release_id))
+                if not item or not item.get("safe_to_repair"):
+                    skipped += 1
+                    continue
+                conn.execute(
+                    "UPDATE releases SET volumes_json='[]', missing_vols_json='[]', "
+                    "volume_start=NULL, volume_end=NULL, is_bundle=0, status='IGNORED', "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?;",
+                    (int(release_id),),
+                )
+                repaired += 1
+            conn.commit()
+        if repaired:
+            self._invalidate_grouped_cache()
+            self.log_activity(
+                "CHAPTER_RANGE_REPAIRED",
+                f"Reclassified {repaired} chapter-range release(s) as chapter-only (IGNORED)",
+                json.dumps({"repaired": repaired, "skipped": skipped}),
+                actor=actor,
+            )
+        return {"status": "success", "repaired": repaired, "skipped": skipped}
+
     # --- Series alias overrides (manual Awaiting-Calibre match, task-42) ---
     def get_series_alias_overrides(self) -> List[Dict[str, Any]]:
         with self.get_connection() as conn:

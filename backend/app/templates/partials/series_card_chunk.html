@@ -169,7 +169,11 @@
                         {% endif %}
                         {% endif %}
 
-                        {% if r.is_complete %}
+                        {% if (r.is_complete or r.is_bundle) and (r.volumes|length == 0) and r.volume_start is not none and r.volume_end is not none %}
+                        <span class="px-2 py-0.5 rounded bg-teal-500/15 border border-teal-500/30 text-teal-300 text-[10px] font-bold flex items-center gap-1">
+                            <i data-lucide="check-check" class="w-2.5 h-2.5"></i> Complete series (v{{ "%02d"|format(r.volume_start|int) }}-{{ "%02d"|format(r.volume_end|int) }})
+                        </span>
+                        {% elif r.is_complete %}
                         <span class="px-2 py-0.5 rounded bg-teal-500/15 border border-teal-500/30 text-teal-300 text-[10px] font-bold flex items-center gap-1">
                             <i data-lucide="check-check" class="w-2.5 h-2.5"></i> Complete ({{ r.volumes|length }} Vols{% if r.volume_start and r.volume_end %}: Vol {{ r.volume_start|int }}-{{ r.volume_end|int }}{% endif %})
                         </span>
