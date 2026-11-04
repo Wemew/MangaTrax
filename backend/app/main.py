@@ -633,7 +633,7 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
     state = "failed" if db_status == "FAILED" else str(
         info.get("state") or ("failed" if db_status == "FAILED" else "queued")
     )
-    if local_phase in ("fetching", "routing") and db_status != "FAILED":
+    if local_phase in ("fetching", "routing", "processing") and db_status != "FAILED":
         state = local_phase
     files = info.get("files") or []
     saved = release.get("downloader_id") or ""
@@ -744,7 +744,7 @@ def _torbox_release_view(release: Dict[str, Any], info: Optional[Dict[str, Any]]
         "ratio": 0.0,
         "seeds": int(info.get("seeds") or 0),
         "is_active": (not failed) and (
-            state in ("queued", "queued_slot", "downloading", "stalled", "fetching", "routing")
+            state in ("queued", "queued_slot", "downloading", "stalled", "fetching", "routing", "processing")
             or local_phase in ("ready", "fetching", "routing")
         ),
         "queued": state == "queued_slot",

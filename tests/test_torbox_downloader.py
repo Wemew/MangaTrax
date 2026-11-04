@@ -1183,7 +1183,8 @@ def test_queued_getqueued_and_promotion():
     api3 = FakeApi()
     api3.add("/torrents/getqueued", data=[])
     api3.add("/torrents/mylist", data=[{"id": 556, "hash": HASH, "download_state": "completed",
-                                        "download_finished": True, "progress": 1.0, "files": []}])
+                                        "download_finished": True, "download_present": True,
+                                        "progress": 1.0, "files": []}])
     with patch("app.downloader.torbox.urllib.request.urlopen", side_effect=api3):
         promoted2 = downloader.status({"engine": "torbox", "queued_id": 91, "hash": HASH})
     assert promoted2["promoted_torrent_id"] == 556, promoted2

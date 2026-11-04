@@ -66,7 +66,11 @@ TORBOX_MAX_REDIRECTS = 5
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 # Torbox torrent states -> normalised engine states.
-_READY_STATES = {"completed", "cached", "uploading", "download finished"}
+# "completed"/"cached" mean the files are servable.  "uploading"/"download
+# finished" and download_finished=True without download_present mean Torbox is still
+# preparing the files: requestdl can 404 during this window, so poll but never fetch.
+_READY_STATES = {"completed", "cached"}
+_PROCESSING_STATES = {"uploading", "download finished"}
 _DOWNLOADING_STATES = {"downloading", "metadl", "checkingresumedata", "checking"}
 _STALLED_STATES = {"stalled (no seeds)", "stalled", "paused", "queued", "metadl waiting"}
 _FAILED_STATES = {"error", "failed", "missingfiles", "dead"}
@@ -154,6 +158,20 @@ def _filesystem_error(action: str, path: str, exc: OSError) -> DownloaderFileErr
     return DownloaderFileError(
         f"Cannot {action} '{path}': {detail}{suffix}{_disk_free_text(os.path.dirname(path) or path)}"
     )
+
+
+_RANGE_FALLBACK_STATUS_CODES = (403, 404, 405, 416, 429)
+_RETRYABLE_FETCH_STATUS_CODES = (403, 404, 410, 416)
+
+
+def _is_range_fallback_status(exc: BaseException) -> bool:
+    text = str(exc)
+    return any(f"HTTP {code}" in text for code in _RANGE_FALLBACK_STATUS_CODES)
+
+
+def _is_retryable_fetch_status(exc: BaseException) -> bool:
+    text = str(exc)
+    return any(f"HTTP {code}" in text for code in _RETRYABLE_FETCH_STATUS_CODES)
 
 
 class _RangeUnsupported(Exception):
@@ -599,12 +617,19 @@ class TorboxDownloader:
     @staticmethod
     def _normalise_state(raw_state: str, row: Dict[str, Any]) -> str:
         state = str(raw_state or "").strip().lower()
-        if row.get("download_finished") or row.get("download_present"):
-            return "ready"
-        if state in _READY_STATES:
+        present = row.get("download_present")
+        # Ready only when Torbox explicitly reports the files as present.  A finished
+        # torrent that is still uploading/preparing (or download_finished without
+        # download_present) yields "processing": the poller keeps polling but must not
+        # call requestdl yet (that was the 404-after-1.3s regression).
+        if present is True:
             return "ready"
         if state in _FAILED_STATES:
             return "failed"
+        if state in _PROCESSING_STATES or row.get("download_finished") or present is False:
+            return "processing"
+        if state in _READY_STATES:
+            return "ready"
         if state in _STALLED_STATES:
             return "stalled"
         if state in _DOWNLOADING_STATES:
@@ -916,7 +941,12 @@ class TorboxDownloader:
             return 0
 
     def _probe_range_total(self, url: str) -> int:
-        response = self._open_range(url, 0, 0)
+        try:
+            response = self._open_range(url, 0, 0)
+        except DownloaderFileError as exc:
+            if _is_range_fallback_status(exc):
+                raise _RangeUnsupported() from exc
+            raise
         try:
             status = getattr(response, "status", None) or 200
             if status == 206:
@@ -931,7 +961,12 @@ class TorboxDownloader:
                 pass
 
     def _stream_range_to_file(self, url: str, path: str, start: int, end: int) -> int:
-        response = self._open_range(url, start, end)
+        try:
+            response = self._open_range(url, start, end)
+        except DownloaderFileError as exc:
+            if _is_range_fallback_status(exc):
+                raise _RangeUnsupported() from exc
+            raise
         try:
             status = getattr(response, "status", None) or 200
             if status == 200:
@@ -1206,6 +1241,7 @@ class TorboxDownloader:
             reported = 0
         if reported > self.max_file_bytes:
             raise self._size_cap_error(name or "file", reported)
+        url = ""
         try:
             url = self._requestdl(int(torrent_id), file_id=int(file_id))
             entry = self._download_to(
@@ -1213,9 +1249,10 @@ class TorboxDownloader:
             )
         except DownloaderFileError as exc:
             text = str(exc)
+            host = urllib.parse.urlsplit(str(url or "")).netloc or "unknown"
             if name and name not in text:
-                raise DownloaderFileError(f"Torbox fetch failed for '{name}': {text}") from exc
-            raise
+                raise DownloaderFileError(f"Torbox fetch failed for '{name}' (host {host}): {text}") from exc
+            raise DownloaderFileError(f"{text} (host {host})") from exc
         size = int(entry.get("size") or 0)
         seconds = float(entry.get("seconds") or 0.0)
         conns = int(entry.get("connections") or 1)
@@ -1227,20 +1264,35 @@ class TorboxDownloader:
         return entry
 
     def _download_item_with_retry(self, torrent_id: int, item: Dict[str, Any], dest_dir: str, progress_cb=None) -> Dict[str, Any]:
+        """Fresh-requestdl retries for transient not-ready/throttle responses.
+
+        HTTP 403/404/410/416 (files not servable yet) and 429/503 get 3 attempts with
+        1/2/4 s backoff; each attempt re-requests the requestdl link (Torbox tokens
+        rotate/expire).  Persistent failure reports the attempt count.
+        """
+        name = str((item or {}).get("name") or (item or {}).get("short_name") or "file")
         last_error: Optional[DownloaderFileError] = None
+        backoff = {1: 1.0, 2: 2.0, 3: 4.0}
         for attempt in (1, 2, 3):
             try:
                 return self._download_item(torrent_id, item, dest_dir, progress_cb=progress_cb)
             except DownloaderFileError as exc:
                 last_error = exc
-                if attempt < 3 and self._is_throttle_error(exc):
-                    self._throttle_events += 1
+                retryable = self._is_throttle_error(exc) or _is_retryable_fetch_status(exc)
+                if attempt < 3 and retryable:
+                    if self._is_throttle_error(exc):
+                        self._throttle_events += 1
+                    delay = backoff.get(attempt, 4.0)
                     logger.warning(
-                        "Torbox throttled (attempt %s/3): %s; backing off %.1fs.",
-                        attempt, exc, 0.5 * attempt,
+                        "Torbox fetch retry for '%s' (attempt %s/3, %.1fs backoff): %s",
+                        name, attempt, delay, exc,
                     )
-                    time.sleep(0.5 * attempt)
+                    time.sleep(delay)
                     continue
+                if retryable:
+                    raise DownloaderFileError(
+                        f"Torbox fetch failed for '{name}' after {attempt} attempts: {exc}"
+                    ) from exc
                 raise
         raise last_error or DownloaderFileError("Torbox download failed.")
 

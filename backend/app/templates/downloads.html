@@ -184,6 +184,8 @@
                                 <div class="torbox-progress-text text-[11px] text-amber-300">Ready — fetch queued</div>
                                 {% elif t.phase == 'routing' %}
                                 <div class="torbox-progress-text text-[11px] text-teal-300">Processing/routing…</div>
+                                {% elif t.phase == 'processing' %}
+                                <div class="torbox-progress-text text-[11px] text-amber-300">Processing on Torbox…</div>
                                 {% else %}
                                 <div class="flex items-center justify-between text-[11px] text-slate-400 mb-1">
                                     <span>{{ ((t.progress or 0) * 100)|round(1) }}%</span>
@@ -212,7 +214,7 @@
                                 {% endif %}
                                 {% else %}
                                 <span class="torbox-state {% if t.phase == 'fetching' %}text-cyan-300{% elif t.phase == 'ready' %}text-amber-300{% elif t.phase == 'routing' %}text-teal-300{% endif %}">
-                                    {% if t.phase == 'routing' %}Processing/routing…{% else %}{{ t.state }}{% endif %}
+                                    {% if t.phase == 'routing' %}Processing/routing…{% elif t.phase == 'processing' %}Processing on Torbox…{% else %}{{ t.state }}{% endif %}
                                 </span>
                                 {% endif %}
                             </td>
@@ -649,6 +651,7 @@ function _torboxProgressHtml(t) {
     }
     if (t.phase === 'ready') return '<div class="torbox-progress-text text-[11px] text-amber-300">Ready — fetch queued</div>';
     if (t.phase === 'routing') return '<div class="torbox-progress-text text-[11px] text-teal-300">Processing/routing…</div>';
+    if (t.phase === 'processing') return '<div class="torbox-progress-text text-[11px] text-amber-300">Processing on Torbox…</div>';
     const pct = Number(t.progress || 0) * 100;
     return `<div class="flex items-center justify-between text-[11px] text-slate-400 mb-1"><span>${pct.toFixed(1)}%</span><span>ETA: ${Math.floor((t.eta || 0) / 60)}m</span></div>` +
         `<div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden"><div class="torbox-bar-fill bg-cyan-500 h-1.5 rounded-full" style="width: ${pct}%"></div></div>`;
@@ -668,6 +671,7 @@ function _stateLabel(t) {
     if (t.phase === 'fetching') return 'Fetching';
     if (t.phase === 'ready') return 'Ready — fetch queued';
     if (t.phase === 'routing') return 'Processing/routing…';
+    if (t.phase === 'processing') return 'Processing on Torbox…';
     return t.state || 'queued';
 }
 

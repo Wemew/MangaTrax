@@ -2108,6 +2108,21 @@ class MangaScheduler:
                         title,
                     )
                     continue
+                if state == "processing":
+                    # Torrent finished but Torbox has not published the files yet:
+                    # poll/keep waiting (timeout still applies) but never requestdl.
+                    try:
+                        self.db.update_torbox_progress(release_id, phase="processing")
+                    except Exception as exc:
+                        logger.debug("Could not persist processing phase: %s", exc)
+                    self._torbox_surface_once(
+                        release_id,
+                        "Torbox is still finalizing the download; files are not ready yet "
+                        "(waiting before fetching).",
+                        title,
+                        event_type="TORBOX_PROCESSING",
+                    )
+                    continue
                 if state != "ready":
                     continue
 
