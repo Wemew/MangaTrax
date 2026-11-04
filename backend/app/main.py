@@ -1136,7 +1136,17 @@ async def series_view(request: Request):
 
 @app.get("/releases", response_class=HTMLResponse)
 async def releases_view(request: Request, status: Optional[str] = None, view: str = Query("series")):
-    # Instant page response: page shell renders in <10ms and lazy loads series dynamically
+    # Instant page response: page shell renders in <10ms and lazy loads series dynamically.
+    # The total is rendered up front so the Load More control exists from first paint
+    # (disabled while the first batch loads) instead of appearing after a round-trip.
+    try:
+        initial_total = (
+            db.count_releases(status=status)
+            if view == "flat"
+            else db.count_releases_grouped_by_series(status=status)
+        )
+    except Exception:
+        initial_total = 0
     return templates.TemplateResponse(
         request=request,
         name="releases.html",
@@ -1145,13 +1155,22 @@ async def releases_view(request: Request, status: Optional[str] = None, view: st
             "releases": [],
             "grouped_series": [],
             "current_status": status,
-            "current_view": view
+            "current_view": view,
+            "initial_total": initial_total,
         }
     )
 
 @app.get("/prioritized", response_class=HTMLResponse)
 async def prioritized_view(request: Request, status: Optional[str] = None, view: str = Query("series")):
     prioritized_groups = db.get_prioritized_groups()
+    try:
+        initial_total = (
+            db.count_releases_grouped_by_series(status=status, prioritized_only=(view != "flat"))
+            if view != "flat"
+            else 0
+        )
+    except Exception:
+        initial_total = 0
     return templates.TemplateResponse(
         request=request,
         name="prioritized.html",
@@ -1161,7 +1180,8 @@ async def prioritized_view(request: Request, status: Optional[str] = None, view:
             "releases": [],
             "grouped_series": [],
             "current_status": status,
-            "current_view": view
+            "current_view": view,
+            "initial_total": initial_total,
         }
     )
 

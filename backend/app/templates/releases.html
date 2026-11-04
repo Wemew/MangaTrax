@@ -108,14 +108,15 @@
         {% endif %}
     </div>
 
-    <div id="load-more-series-container" class="text-center py-6" style="display: none;">
-        <div id="series-loading-spinner" class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-400 font-medium shadow-sm">
+    <div id="load-more-series-container" class="text-center py-6">
+        <div id="series-loading-spinner" class="hidden inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-400 font-medium shadow-sm">
             <i data-lucide="loader-2" class="w-4 h-4 animate-spin text-brand-400"></i>
             <span id="series-loading-text">Loading more series...</span>
         </div>
-        <button onclick="loadMoreSeries()" id="btn-load-more-series" class="hidden px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
+        <button onclick="loadMoreSeries()" id="btn-load-more-series" disabled class="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95 disabled:opacity-60 disabled:cursor-wait">
             <i data-lucide="chevrons-down" class="w-4 h-4 text-brand-400"></i>
-            <span>Load More Series (<span id="deferred-series-count">0</span> remaining)</span>
+            <span id="load-more-series-label">Load More Series</span>
+            <span class="text-slate-500">(<span id="deferred-series-count">0</span> remaining)</span>
         </button>
         <span id="series-showing-counter" class="block text-[11px] text-slate-500 mt-2">Showing 0 of 0 series</span>
     </div>
@@ -154,14 +155,24 @@
             </table>
         </div>
         <div id="load-more-flat-container" class="text-center py-4 bg-slate-900/60 border-t border-slate-800">
-            <button onclick="loadMoreFlat()" id="btn-load-more-flat" class="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
+            <button onclick="loadMoreFlat()" id="btn-load-more-flat" disabled class="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95 disabled:opacity-60 disabled:cursor-wait">
                 <i data-lucide="chevrons-down" class="w-4 h-4 text-brand-400"></i>
-                <span>Load More Releases (<span id="deferred-flat-count">{{ releases|length - 50 }}</span> remaining)</span>
+                <span id="load-more-flat-label">Load More Releases</span>
+                <span class="text-slate-500">(<span id="deferred-flat-count">0</span> remaining)</span>
             </button>
             <span id="flat-showing-counter" class="block text-[11px] text-slate-500 mt-2">Showing 0 of 0 releases</span>
         </div>
     </div>
     {% endif %}
+
+    <!-- Always-reachable Load More control: appears as soon as more items exist and
+         stays visible while scrolling, so it is never lost below long series cards. -->
+    <div id="sticky-load-more" class="fixed bottom-5 right-5 z-40 hidden">
+        <button id="sticky-load-more-btn" type="button" onclick="clickStickyLoadMore()" disabled class="px-4 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold shadow-lg shadow-brand-600/30 disabled:opacity-60 disabled:cursor-wait flex items-center gap-2">
+            <i data-lucide="chevrons-down" class="w-4 h-4"></i>
+            <span id="sticky-load-more-text">Loading…</span>
+        </button>
+    </div>
 
 </div>
 
@@ -171,6 +182,62 @@ const currentView = "{{ current_view or 'series' }}";
 let currentSearch = "";
 let _releaseSearchTimer = null;
 
+// Server-rendered totals: the Load More control is present from first paint and only
+// enabled once the first batch has been fetched. Kept in sync with each API response.
+let seriesTotal = {{ initial_total if current_view != 'flat' else 0 }};
+let flatTotal = {{ initial_total if current_view == 'flat' else 0 }};
+let seriesLoadError = false;
+let flatLoadError = false;
+
+function _currentPager() {
+    const flat = currentView === 'flat';
+    return {
+        flat,
+        offset: flat ? flatOffset : seriesOffset,
+        total: flat ? flatTotal : seriesTotal,
+        hasMore: flat ? hasMoreFlat : hasMoreSeries,
+        loading: flat ? isLoadingFlat : isLoadingSeries,
+        error: flat ? flatLoadError : seriesLoadError,
+        btn: document.getElementById(flat ? 'btn-load-more-flat' : 'btn-load-more-series'),
+        label: document.getElementById(flat ? 'load-more-flat-label' : 'load-more-series-label'),
+        countSpan: document.getElementById(flat ? 'deferred-flat-count' : 'deferred-series-count'),
+        counter: document.getElementById(flat ? 'flat-showing-counter' : 'series-showing-counter'),
+        sticky: document.getElementById('sticky-load-more'),
+        stickyBtn: document.getElementById('sticky-load-more-btn'),
+        stickyText: document.getElementById('sticky-load-more-text'),
+    };
+}
+
+function updateLoadMoreUi() {
+    const p = _currentPager();
+    if (!p.btn) return;
+    const noun = p.flat ? 'releases' : 'series';
+    const remaining = Math.max(0, (p.total || 0) - p.offset);
+    p.btn.classList.remove('hidden');
+    p.btn.disabled = Boolean(p.loading);
+    p.btn.style.display = '';
+    if (p.label) {
+        p.label.textContent = p.error ? 'Retry loading' : (p.loading ? 'Loading…' : (p.flat ? 'Load More Releases' : 'Load More Series'));
+    }
+    if (p.countSpan) p.countSpan.textContent = String(remaining);
+    if (p.counter) p.counter.textContent = `Showing ${p.offset} of ${p.total || p.offset} ${noun}`;
+    const moreAvailable = p.hasMore || p.loading || p.error;
+    if (p.sticky) p.sticky.classList.toggle('hidden', !moreAvailable);
+    if (p.stickyBtn) p.stickyBtn.disabled = Boolean(p.loading);
+    if (p.stickyText) {
+        p.stickyText.textContent = p.error ? 'Retry loading more' : (p.loading ? 'Loading…' : (p.flat ? `Load More Releases (${remaining} left)` : `Load More Series (${remaining} left)`));
+    }
+    if (!p.hasMore && !p.loading && !p.error) {
+        p.btn.classList.add('hidden');
+        if (p.sticky) p.sticky.classList.add('hidden');
+    }
+}
+
+function clickStickyLoadMore() {
+    if (currentView === 'flat') loadMoreFlat();
+    else loadMoreSeries();
+}
+
 function resetReleasePagination() {
     seriesOffset = 0;
     flatOffset = 0;
@@ -178,14 +245,13 @@ function resetReleasePagination() {
     hasMoreFlat = true;
     isFirstSeriesBatch = true;
     isFirstFlatBatch = true;
+    seriesLoadError = false;
+    flatLoadError = false;
     const seriesContainer = document.getElementById('seriesGroupContainer');
     const flatBody = document.getElementById('flatTableBody');
     if (seriesContainer) seriesContainer.innerHTML = '';
     if (flatBody) flatBody.innerHTML = '';
-    const sBtn = document.getElementById('btn-load-more-series');
-    const fBtn = document.getElementById('btn-load-more-flat');
-    if (sBtn) { sBtn.classList.add('hidden'); sBtn.disabled = false; }
-    if (fBtn) { fBtn.classList.add('hidden'); fBtn.disabled = false; }
+    updateLoadMoreUi();
 }
 
 function handleReleaseSearch() {
@@ -251,8 +317,8 @@ async function fetchNextSeriesBatch() {
     if (isLoadingSeries || !hasMoreSeries) return;
     isLoadingSeries = true;
 
-    const spinner = document.getElementById('load-more-series-container');
-    if (spinner && !isFirstSeriesBatch) spinner.style.display = 'block';
+    seriesLoadError = false;
+    updateLoadMoreUi();
 
     try {
         const url = `/api/releases/cards?status=${encodeURIComponent(currentStatus)}&offset=${seriesOffset}&limit=${seriesLimit}&search=${encodeURIComponent(currentSearch)}`;
@@ -275,7 +341,8 @@ async function fetchNextSeriesBatch() {
                 </div>
             `;
             hasMoreSeries = false;
-            if (spinner) spinner.style.display = 'none';
+            seriesTotal = 0;
+            updateLoadMoreUi();
             if (window.lucide) lucide.createIcons();
             return;
         }
@@ -288,35 +355,26 @@ async function fetchNextSeriesBatch() {
         hasMoreSeries = data.has_more;
         isFirstSeriesBatch = false;
 
-        const remaining = Math.max(0, data.total - seriesOffset);
-        const countEl = document.getElementById('deferred-series-count');
-        if (countEl) countEl.innerText = remaining;
-
+        seriesTotal = Number(data.total || seriesOffset);
         if (window.lucide) lucide.createIcons();
-        updateAllCardSummaries();
+        try {
+            updateAllCardSummaries();
+        } catch (e) {
+            // Card summaries are cosmetic; never let them block the Load More control.
+        }
 
         const query = (document.getElementById('releaseSearchInput')?.value || '').trim();
         if (query) {
-            filterReleases();
+            try { filterReleases(); } catch (e) { /* cosmetic */ }
         }
 
-        const seriesMore = document.getElementById('load-more-series-container');
-        if (seriesMore) seriesMore.style.display = 'block';
-        const btn = document.getElementById('btn-load-more-series');
-        if (btn) {
-            btn.classList.toggle('hidden', !hasMoreSeries);
-            btn.disabled = false;
-        }
-        const counter = document.getElementById('series-showing-counter');
-        if (counter) counter.textContent = `Showing ${seriesOffset} of ${data.total || seriesOffset} series`;
-        if (spinner) spinner.style.display = 'none';
-        if (!hasMoreSeries && btn) btn.classList.add('hidden');
+        updateLoadMoreUi();
     } catch (err) {
         console.error("Error loading series cards:", err);
-        const btn = document.getElementById('btn-load-more-series');
-        if (btn) btn.classList.remove('hidden');
+        seriesLoadError = true;
     } finally {
         isLoadingSeries = false;
+        updateLoadMoreUi();
     }
 }
 
@@ -333,8 +391,8 @@ async function fetchNextFlatBatch() {
     if (isLoadingFlat || !hasMoreFlat) return;
     isLoadingFlat = true;
 
-    const spinner = document.getElementById('load-more-flat-container');
-    if (spinner && !isFirstFlatBatch) spinner.style.display = 'block';
+    flatLoadError = false;
+    updateLoadMoreUi();
 
     try {
         const url = `/api/releases/flat_rows?status=${encodeURIComponent(currentStatus)}&offset=${flatOffset}&limit=${flatLimit}&search=${encodeURIComponent(currentSearch)}`;
@@ -354,7 +412,8 @@ async function fetchNextFlatBatch() {
                 </tr>
             `;
             hasMoreFlat = false;
-            if (spinner) spinner.style.display = 'none';
+            flatTotal = 0;
+            updateLoadMoreUi();
             return;
         }
 
@@ -366,34 +425,26 @@ async function fetchNextFlatBatch() {
         hasMoreFlat = data.has_more;
         isFirstFlatBatch = false;
 
-        const countEl = document.getElementById('deferred-flat-count');
-        if (countEl) countEl.innerText = flatOffset;
-
+        flatTotal = Number(data.total || flatOffset);
         if (window.lucide) lucide.createIcons();
-        updateAllCardSummaries();
+        try {
+            updateAllCardSummaries();
+        } catch (e) {
+            // Cosmetic; never block the Load More control.
+        }
 
         const query = (document.getElementById('releaseSearchInput')?.value || '').trim();
         if (query) {
-            filterReleases();
+            try { filterReleases(); } catch (e) { /* cosmetic */ }
         }
 
-        const flatMore = document.getElementById('load-more-flat-container');
-        if (flatMore) flatMore.style.display = 'block';
-        const btn = document.getElementById('btn-load-more-flat');
-        if (btn) {
-            btn.classList.toggle('hidden', !hasMoreFlat);
-            btn.disabled = false;
-        }
-        const counter = document.getElementById('flat-showing-counter');
-        if (counter) counter.textContent = `Showing ${flatOffset} of ${data.total || flatOffset} releases`;
-        if (spinner) spinner.style.display = 'none';
-        if (!hasMoreFlat && btn) btn.classList.add('hidden');
+        updateLoadMoreUi();
     } catch (err) {
         console.error("Error loading flat releases:", err);
-        const btn = document.getElementById('btn-load-more-flat');
-        if (btn) btn.classList.remove('hidden');
+        flatLoadError = true;
     } finally {
         isLoadingFlat = false;
+        updateLoadMoreUi();
     }
 }
 
@@ -419,16 +470,8 @@ function filterReleases() {
     const flatRows = document.querySelectorAll('.release-row');
     let visible = 0;
 
-    const seriesMore = document.getElementById('load-more-series-container');
-    const flatMore = document.getElementById('load-more-flat-container');
-
-    if (query) {
-        if (seriesMore) seriesMore.style.display = 'none';
-        if (flatMore) flatMore.style.display = 'none';
-    } else {
-        if (seriesMore) seriesMore.style.display = '';
-        if (flatMore) flatMore.style.display = '';
-    }
+    // Load More stays available during client-side filtering: search is paged
+    // server-side, so hiding the control would strand results beyond the current batch.
 
     if (seriesCards.length > 0) {
         seriesCards.forEach(card => {

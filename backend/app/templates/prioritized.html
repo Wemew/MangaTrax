@@ -144,17 +144,19 @@
 
     <!-- Infinite Scroll / Progressive Load More Sentinel for Series -->
     <div id="load-more-series-container" class="text-center py-6">
-        <div id="series-spinner" class="inline-flex items-center gap-2.5 px-4 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-amber-300">
+        <div id="series-spinner" class="hidden inline-flex items-center gap-2.5 px-4 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-amber-300">
             <svg class="animate-spin w-4 h-4 text-amber-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
             </svg>
             <span id="series-loading-text">Loading prioritized series...</span>
         </div>
-        <button onclick="loadMoreSeries()" id="btn-load-more-series" class="hidden px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
+        <button onclick="loadMoreSeries()" id="btn-load-more-series" disabled class="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95 disabled:opacity-60 disabled:cursor-wait">
             <i data-lucide="chevrons-down" class="w-4 h-4 text-amber-400"></i>
-            <span>Load More Series (<span id="deferred-series-count">0</span> remaining)</span>
+            <span id="load-more-series-label">Load More Series</span>
+            <span class="text-slate-500">(<span id="deferred-series-count">0</span> remaining)</span>
         </button>
+        <span id="prioritized-series-showing" class="block text-[11px] text-slate-500 mt-2">Showing 0 of 0 series</span>
     </div>
 
     {% else %}
@@ -191,19 +193,81 @@
             </table>
         </div>
         <div id="load-more-flat-container" class="text-center py-4 bg-slate-900/60 border-t border-slate-800">
-            <button onclick="loadMoreFlat()" id="btn-load-more-flat" class="hidden px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95">
+            <button onclick="loadMoreFlat()" id="btn-load-more-flat" disabled class="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95 disabled:opacity-60 disabled:cursor-wait">
                 <i data-lucide="chevrons-down" class="w-4 h-4 text-amber-400"></i>
-                <span>Load More Releases (<span id="deferred-flat-count">0</span> remaining)</span>
+                <span id="load-more-flat-label">Load More Releases</span>
+                <span class="text-slate-500">(<span id="deferred-flat-count">0</span> remaining)</span>
             </button>
+            <span id="prioritized-flat-showing" class="block text-[11px] text-slate-500 mt-2">Showing 0 of 0 releases</span>
         </div>
     </div>
     {% endif %}
+
+    <div id="sticky-load-more" class="fixed bottom-5 right-5 z-40 hidden">
+        <button id="sticky-load-more-btn" type="button" onclick="clickStickyLoadMore()" disabled class="px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold shadow-lg shadow-amber-600/30 disabled:opacity-60 disabled:cursor-wait flex items-center gap-2">
+            <i data-lucide="chevrons-down" class="w-4 h-4"></i>
+            <span id="sticky-load-more-text">Loading…</span>
+        </button>
+    </div>
 
 </div>
 
 <script>
 const currentStatus = "{{ current_status or '' }}";
 const currentView = "{{ current_view or 'series' }}";
+
+// Server-provided total (may be 0 for the flat view until the first response).
+let seriesTotal = {{ initial_total if current_view != 'flat' else 0 }};
+let flatTotal = {{ initial_total if current_view == 'flat' else 0 }};
+let seriesLoadError = false;
+let flatLoadError = false;
+
+function _currentPager() {
+    const flat = currentView === 'flat';
+    return {
+        flat,
+        offset: flat ? flatOffset : seriesOffset,
+        total: flat ? flatTotal : seriesTotal,
+        hasMore: flat ? hasMoreFlat : hasMoreSeries,
+        loading: flat ? isLoadingFlat : isLoadingSeries,
+        error: flat ? flatLoadError : seriesLoadError,
+        btn: document.getElementById(flat ? 'btn-load-more-flat' : 'btn-load-more-series'),
+        label: document.getElementById(flat ? 'load-more-flat-label' : 'load-more-series-label'),
+        countSpan: document.getElementById(flat ? 'deferred-flat-count' : 'deferred-series-count'),
+        counter: document.getElementById(flat ? 'prioritized-flat-showing' : 'prioritized-series-showing'),
+        sticky: document.getElementById('sticky-load-more'),
+        stickyBtn: document.getElementById('sticky-load-more-btn'),
+        stickyText: document.getElementById('sticky-load-more-text'),
+    };
+}
+
+function updateLoadMoreUi() {
+    const p = _currentPager();
+    if (!p.btn) return;
+    const noun = p.flat ? 'releases' : 'series';
+    const remaining = Math.max(0, (p.total || 0) - p.offset);
+    p.btn.classList.remove('hidden');
+    p.btn.disabled = Boolean(p.loading);
+    p.btn.style.display = '';
+    if (p.label) p.label.textContent = p.error ? 'Retry loading' : (p.loading ? 'Loading…' : (p.flat ? 'Load More Releases' : 'Load More Series'));
+    if (p.countSpan) p.countSpan.textContent = String(remaining);
+    if (p.counter) p.counter.textContent = `Showing ${p.offset} of ${p.total || p.offset} ${noun}`;
+    const moreAvailable = p.hasMore || p.loading || p.error;
+    if (p.sticky) p.sticky.classList.toggle('hidden', !moreAvailable);
+    if (p.stickyBtn) p.stickyBtn.disabled = Boolean(p.loading);
+    if (p.stickyText) {
+        p.stickyText.textContent = p.error ? 'Retry loading more' : (p.loading ? 'Loading…' : (p.flat ? `Load More Releases (${remaining} left)` : `Load More Series (${remaining} left)`));
+    }
+    if (!p.hasMore && !p.loading && !p.error) {
+        p.btn.classList.add('hidden');
+        if (p.sticky) p.sticky.classList.add('hidden');
+    }
+}
+
+function clickStickyLoadMore() {
+    if (currentView === 'flat') loadMoreFlat();
+    else loadMoreSeries();
+}
 
 // Empty-state helper: reset the status query parameter and the client-side search.
 function clearPrioritizedFilters() {
@@ -236,8 +300,8 @@ async function fetchNextSeriesBatch() {
     if (isLoadingSeries || !hasMoreSeries) return;
     isLoadingSeries = true;
 
-    const spinner = document.getElementById('load-more-series-container');
-    if (spinner && !isFirstSeriesBatch) spinner.style.display = 'block';
+    seriesLoadError = false;
+    updateLoadMoreUi();
 
     try {
         const url = `/api/prioritized/cards?status=${encodeURIComponent(currentStatus)}&offset=${seriesOffset}&limit=${seriesLimit}`;
@@ -260,7 +324,8 @@ async function fetchNextSeriesBatch() {
                 </div>
             `;
             hasMoreSeries = false;
-            if (spinner) spinner.style.display = 'none';
+            seriesTotal = 0;
+            updateLoadMoreUi();
             if (window.lucide) lucide.createIcons();
             return;
         }
@@ -273,28 +338,21 @@ async function fetchNextSeriesBatch() {
         hasMoreSeries = data.has_more;
         isFirstSeriesBatch = false;
 
-        const remaining = Math.max(0, data.total - seriesOffset);
-        const countEl = document.getElementById('deferred-series-count');
-        if (countEl) countEl.innerText = remaining;
-
+        seriesTotal = Number(data.total || seriesOffset);
         if (window.lucide) lucide.createIcons();
 
         const query = (document.getElementById('prioritizedSearchInput')?.value || '').trim();
         if (query) {
-            filterPrioritized();
+            try { filterPrioritized(); } catch (e) { /* cosmetic */ }
         }
 
-        const btn = document.getElementById('btn-load-more-series');
-        if (btn) { btn.classList.toggle('hidden', !hasMoreSeries); btn.disabled = false; }
-        const counter = document.getElementById('prioritized-series-showing');
-        if (counter) counter.textContent = `Showing ${seriesOffset} of ${data.total || seriesOffset} series`;
-        if (spinner) spinner.style.display = 'none';
+        updateLoadMoreUi();
     } catch (err) {
         console.error("Error loading prioritized cards:", err);
-        const btn = document.getElementById('btn-load-more-series');
-        if (btn) btn.classList.remove('hidden');
+        seriesLoadError = true;
     } finally {
         isLoadingSeries = false;
+        updateLoadMoreUi();
     }
 }
 
@@ -311,8 +369,8 @@ async function fetchNextFlatBatch() {
     if (isLoadingFlat || !hasMoreFlat) return;
     isLoadingFlat = true;
 
-    const spinner = document.getElementById('load-more-flat-container');
-    if (spinner && !isFirstFlatBatch) spinner.style.display = 'block';
+    flatLoadError = false;
+    updateLoadMoreUi();
 
     try {
         const url = `/api/prioritized/flat_rows?status=${encodeURIComponent(currentStatus)}&offset=${flatOffset}&limit=${flatLimit}`;
@@ -332,7 +390,8 @@ async function fetchNextFlatBatch() {
                 </tr>
             `;
             hasMoreFlat = false;
-            if (spinner) spinner.style.display = 'none';
+            flatTotal = 0;
+            updateLoadMoreUi();
             return;
         }
 
@@ -344,27 +403,21 @@ async function fetchNextFlatBatch() {
         hasMoreFlat = data.has_more;
         isFirstFlatBatch = false;
 
-        const countEl = document.getElementById('deferred-flat-count');
-        if (countEl) countEl.innerText = flatOffset;
-
+        flatTotal = Number(data.total || flatOffset);
         if (window.lucide) lucide.createIcons();
 
         const query = (document.getElementById('prioritizedSearchInput')?.value || '').trim();
         if (query) {
-            filterPrioritized();
+            try { filterPrioritized(); } catch (e) { /* cosmetic */ }
         }
 
-        const btn = document.getElementById('btn-load-more-flat');
-        if (btn) { btn.classList.toggle('hidden', !hasMoreFlat); btn.disabled = false; }
-        const counter = document.getElementById('prioritized-flat-showing');
-        if (counter) counter.textContent = `Showing ${flatOffset} of ${data.total || flatOffset} releases`;
-        if (spinner) spinner.style.display = 'none';
+        updateLoadMoreUi();
     } catch (err) {
         console.error("Error loading flat prioritized releases:", err);
-        const btn = document.getElementById('btn-load-more-flat');
-        if (btn) btn.classList.remove('hidden');
+        flatLoadError = true;
     } finally {
         isLoadingFlat = false;
+        updateLoadMoreUi();
     }
 }
 
@@ -390,16 +443,7 @@ function filterPrioritized() {
     const flatRows = document.querySelectorAll('.release-row');
     let visible = 0;
 
-    const seriesMore = document.getElementById('load-more-series-container');
-    const flatMore = document.getElementById('load-more-flat-container');
-
-    if (query) {
-        if (seriesMore) seriesMore.style.display = 'none';
-        if (flatMore) flatMore.style.display = 'none';
-    } else {
-        if (seriesMore && hasMoreSeries) seriesMore.style.display = '';
-        if (flatMore && hasMoreFlat) flatMore.style.display = '';
-    }
+    // Keep Load More available while filtering: the search is paged server-side.
 
     if (seriesCards.length > 0) {
         seriesCards.forEach(card => {
