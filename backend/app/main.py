@@ -3608,6 +3608,93 @@ async def api_update_series_link(series_id: int, payload: Dict[str, Any]):
     db.update_series_link(series_id, model.website_url)
     return JSONResponse({"status": "success", "website_url": model.website_url})
 
+@app.post("/api/series/{series_id}/match-calibre")
+async def api_match_series_to_calibre(series_id: int, payload: Dict[str, Any]):
+    """Manually link a tracked series to an existing Calibre series (task-62)."""
+    try:
+        calibre_id = int(payload.get("calibre_series_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="calibre_series_id is required")
+    trackers = await asyncio.to_thread(db.get_all_series)
+    tracker = next((row for row in trackers if int(row.get("id") or 0) == series_id), None)
+    if not tracker:
+        raise HTTPException(status_code=404, detail="Tracked series not found")
+    snapshot = await asyncio.to_thread(_calibre_series_snapshot)
+    if not snapshot:
+        snapshot = await asyncio.to_thread(db.get_all_series)
+    target = next(
+        (row for row in snapshot or []
+         if int(row.get("series_id") or row.get("id") or row.get("calibre_series_id") or 0) == calibre_id),
+        None,
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Calibre series not found")
+    try:
+        result = await asyncio.to_thread(
+            db.link_tracked_series, str(tracker.get("name") or ""), target,
+            auth_module.get_current_actor(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Refresh cached grouped views/series rows in place.
+    try:
+        db._invalidate_grouped_cache()
+    except Exception:
+        pass
+    return JSONResponse(result)
+
+
+@app.get("/api/series/link-audit")
+async def api_series_link_audit():
+    """Read-only preview of tracked series that can be linked/merged to Calibre."""
+    snapshot = await asyncio.to_thread(_calibre_series_snapshot)
+    if not snapshot:
+        snapshot = await asyncio.to_thread(db.get_all_series)
+    trackers = await asyncio.to_thread(db.get_all_series)
+    proposed = []
+    for tracker in trackers:
+        if tracker.get("calibre_series_id") is not None:
+            continue
+        from app.parser import match_manga_series_in_calibre
+        matched = None
+        try:
+            matched = match_manga_series_in_calibre(str(tracker.get("name") or ""), snapshot or [], threshold=0.90)
+        except Exception:
+            matched = None
+        if matched:
+            proposed.append({
+                "series_id": tracker.get("id"), "source": tracker.get("name"),
+                "target": matched.get("series_name") or matched.get("name"),
+                "calibre_series_id": matched.get("series_id") or matched.get("id"),
+                "book_count": matched.get("book_count") or 0,
+                "confidence": "fuzzy_or_candidate",
+            })
+    return JSONResponse({"status": "success", "proposed": proposed, "count": len(proposed)})
+
+
+@app.post("/api/series/link-repair")
+async def api_series_link_repair(payload: Optional[Dict[str, Any]] = None):
+    """Merge/link tracked series to Calibre (previewable, idempotent, task-62)."""
+    body = payload or {}
+    dry_run = body.get("dry_run") is True or body.get("confirm") is not True
+    snapshot = await asyncio.to_thread(_calibre_series_snapshot)
+    if not snapshot:
+        snapshot = await asyncio.to_thread(db.get_all_series)
+    if dry_run:
+        audit_response = await api_series_link_audit()
+        try:
+            audit_payload = json.loads(getattr(audit_response, "body", b"{}") or b"{}")
+        except (TypeError, ValueError):
+            audit_payload = {}
+        return JSONResponse({"status": "success", "dry_run": True, **audit_payload})
+    results = await asyncio.to_thread(db.auto_link_tracked_series, snapshot, None, auth_module.get_current_actor())
+    try:
+        db._invalidate_grouped_cache()
+    except Exception:
+        pass
+    return JSONResponse({"status": "success", "dry_run": False, "linked": results, "count": len(results)})
+
+
 def _start_backfill_task(series_name: str, max_pages: int) -> tuple:
     """Start the scheduler backfill with a persisted reporter (task-50 counters)."""
     import threading

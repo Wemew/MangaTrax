@@ -1789,6 +1789,21 @@ class CalibreSeriesIndex:
             for part in parts:
                 if part not in candidate_parts:
                     candidate_parts.append(part)
+        # Subtitles after a colon are a common Calibre-vs-AniList difference:
+        # "Failure Frame: I Became the Strongest..." vs Calibre "Failure Frame".
+        # Try the prefix candidates without weakening the strict whole-title rules.
+        try:
+            colon_parts = [part.strip() for part in re.split(r"\s*[:：]\s*", str(extracted_series)) if part.strip()]
+        except Exception:
+            colon_parts = []
+        if len(colon_parts) > 1:
+            for part in colon_parts:
+                if part not in candidate_parts:
+                    candidate_parts.append(part)
+            for length in range(2, len(colon_parts)):
+                prefix = ": ".join(colon_parts[:length])
+                if prefix not in candidate_parts:
+                    candidate_parts.append(prefix)
         norm_parts: List[str] = []
         for cand in candidate_parts:
             norm_cand = normalize_text(cand)
@@ -2152,6 +2167,9 @@ def series_name_candidates(raw_title_or_filename: str) -> List[str]:
     if primary:
         values.append(_clean_series_display(primary))
         values.append(primary.strip("_").strip())
+        for part in re.split(r"\s*[:：]\s*", primary):
+            if part.strip():
+                values.append(part.strip())
     try:
         values.append(clean_series_for_matching(primary or raw))
     except Exception:

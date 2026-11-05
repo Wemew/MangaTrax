@@ -29,7 +29,11 @@
         {{ s.authors or 'Unknown' }}
     </td>
     <td class="py-3 px-4 text-center font-bold text-slate-200">
+        {% if s.calibre_series_id %}
         {{ s.book_count }}
+        {% else %}
+        <button type="button" onclick="openSeriesCalibreMatch({{ s.id }}, {{ s.name|tojson }}, this)" class="text-[10px] font-semibold text-amber-300 hover:text-amber-200" title="Match this tracked series to an existing Calibre series">Not linked — Match to Calibre series</button>
+        {% endif %}
     </td>
     <td class="py-3 px-4 text-center font-semibold text-brand-400">
         Vol. {{ s.latest_index|int if s.latest_index == s.latest_index|int else s.latest_index }}

@@ -1828,7 +1828,226 @@ class MangaDatabase:
             conn.commit()
         if updated_count > 0:
             self._invalidate_grouped_cache()
+            try:
+                self.auto_link_tracked_series(calibre_series_list, volumes_map=volumes_map, actor="scheduler")
+            except Exception as exc:
+                logger.debug("Tracked-series auto-link on sync failed: %s", exc)
         return updated_count
+
+    def link_tracked_series(self, source_name: str, calibre_series: Dict[str, Any],
+                           actor: str = "user", owned_volumes: Optional[List[float]] = None) -> Dict[str, Any]:
+        """Link/merge one tracked series to a Calibre series (task-62).
+
+        Re-keys releases to the Calibre stable name, keeps a single tracker, merges
+        monitored/owned metadata, registers an alias override for the old name and
+        invalidates grouped caches.  Release statuses/user vetoes are never changed.
+        """
+        from app.parser import normalize_text, series_name_candidates
+
+        target_name = str(calibre_series.get("series_name") or calibre_series.get("name") or "").strip()
+        if not target_name:
+            raise ValueError("Calibre series name is required")
+        source = str(source_name or "").strip()
+        if not source:
+            raise ValueError("source series name is required")
+        calibre_id = calibre_series.get("series_id") or calibre_series.get("id") or calibre_series.get("calibre_series_id")
+        try:
+            book_count = int(calibre_series.get("book_count") or 0)
+        except (TypeError, ValueError):
+            book_count = 0
+        try:
+            latest_index = float(calibre_series.get("latest_index") or 0.0)
+        except (TypeError, ValueError):
+            latest_index = 0.0
+        volumes = set()
+        for value in owned_volumes or []:
+            try:
+                volumes.add(float(value))
+            except (TypeError, ValueError):
+                continue
+        if not volumes:
+            try:
+                volumes = {float(value) for value in json.loads(calibre_series.get("owned_volumes_json") or "[]")}
+            except (TypeError, ValueError):
+                volumes = set()
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM series_tracking WHERE lower(trim(name)) = lower(trim(?));", (source,))
+            source_row = cur.fetchone()
+            cur.execute("SELECT * FROM series_tracking WHERE lower(trim(name)) = lower(trim(?));", (target_name,))
+            target_row = cur.fetchone()
+            if source_row is None and target_row is None:
+                raise ValueError(f"Tracked series '{source}' not found")
+            rekeyed = 0
+            merged = False
+            if source_row is not None and target_row is not None and source_row["id"] != target_row["id"]:
+                merged = True
+                target_vols = set()
+                try:
+                    target_vols = {float(v) for v in json.loads(target_row["owned_volumes_json"] or "[]")}
+                except (TypeError, ValueError):
+                    pass
+                combined = sorted(target_vols | volumes)
+                cur.execute(
+                    "UPDATE series_tracking SET calibre_series_id = COALESCE(?, calibre_series_id), "
+                    "book_count = MAX(COALESCE(book_count, 0), ?), latest_index = MAX(COALESCE(latest_index, 0), ?), "
+                    "is_monitored = MAX(COALESCE(is_monitored, 0), ?), "
+                    "authors = CASE WHEN COALESCE(authors,'') = '' THEN ? ELSE authors END, "
+                    "publisher = CASE WHEN COALESCE(publisher,'') = '' THEN ? ELSE publisher END, "
+                    "tags = CASE WHEN COALESCE(tags,'') = '' THEN ? ELSE tags END, "
+                    "owned_volumes_json = ?, last_sync = CURRENT_TIMESTAMP WHERE id = ?;",
+                    (calibre_id, book_count, latest_index, int(source_row["is_monitored"] or 0),
+                     str(source_row["authors"] or ""), str(source_row["publisher"] or ""),
+                     str(source_row["tags"] or ""), json.dumps(combined), int(target_row["id"])),
+                )
+                cur.execute(
+                    "UPDATE releases SET series_name = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE lower(trim(series_name)) = lower(trim(?));",
+                    (str(target_row["name"]), source),
+                )
+                rekeyed = max(0, int(cur.rowcount or 0))
+                cur.execute("DELETE FROM series_tracking WHERE id = ?;", (int(source_row["id"]),))
+            elif source_row is not None:
+                cur.execute(
+                    "UPDATE series_tracking SET name = ?, calibre_series_id = ?, book_count = ?, "
+                    "latest_index = ?, owned_volumes_json = ?, last_sync = CURRENT_TIMESTAMP WHERE id = ?;",
+                    (target_name, calibre_id, book_count, latest_index,
+                     json.dumps(sorted(volumes)), int(source_row["id"])),
+                )
+                cur.execute(
+                    "UPDATE releases SET series_name = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE lower(trim(series_name)) = lower(trim(?));",
+                    (target_name, source),
+                )
+                rekeyed = max(0, int(cur.rowcount or 0))
+            else:
+                cur.execute(
+                    "UPDATE series_tracking SET calibre_series_id = COALESCE(?, calibre_series_id), "
+                    "book_count = MAX(COALESCE(book_count, 0), ?), latest_index = MAX(COALESCE(latest_index, 0), ?), "
+                    "owned_volumes_json = ? WHERE id = ?;",
+                    (calibre_id, book_count, latest_index, json.dumps(sorted(volumes)), int(target_row["id"])),
+                )
+            # Merge any additional duplicate trackers that represent the same Calibre
+            # series (e.g. a long subtitle row alongside the canonical row).
+            keep_row = target_row if target_row is not None else source_row
+            if keep_row is not None:
+                keep_id = int(keep_row["id"])
+                target_norm = normalize_text(target_name)
+                source_norm = normalize_text(source)
+                cur.execute("SELECT * FROM series_tracking WHERE id != ?;", (keep_id,))
+                for dupe_row in cur.fetchall():
+                    dupe_name = str(dupe_row["name"] or "")
+                    dupe_norm = normalize_text(dupe_name)
+                    candidates = {normalize_text(value) for value in series_name_candidates(dupe_name)}
+                    same_target = (
+                        dupe_norm == source_norm
+                        or dupe_norm == target_norm
+                        or target_norm in candidates
+                    )
+                    if not same_target:
+                        continue
+                    dupe_vols = set()
+                    try:
+                        dupe_vols = {float(v) for v in json.loads(dupe_row["owned_volumes_json"] or "[]")}
+                    except (TypeError, ValueError):
+                        pass
+                    keep_vols = set()
+                    try:
+                        keep_vols = {float(v) for v in json.loads(keep_row["owned_volumes_json"] or "[]")}
+                    except (TypeError, ValueError):
+                        pass
+                    cur.execute(
+                        "UPDATE series_tracking SET is_monitored = MAX(COALESCE(is_monitored,0), ?), "
+                        "owned_volumes_json = ? WHERE id = ?;",
+                        (int(dupe_row["is_monitored"] or 0), json.dumps(sorted(keep_vols | dupe_vols | volumes)), keep_id),
+                    )
+                    cur.execute(
+                        "UPDATE releases SET series_name = ?, updated_at = CURRENT_TIMESTAMP "
+                        "WHERE lower(trim(series_name)) = lower(trim(?));",
+                        (target_name, dupe_name),
+                    )
+                    rekeyed += max(0, int(cur.rowcount or 0))
+                    cur.execute("DELETE FROM series_tracking WHERE id = ?;", (int(dupe_row["id"]),))
+                    merged = True
+            conn.commit()
+        if normalize_text(source) != normalize_text(target_name):
+            try:
+                self.add_series_alias_override(source, target_name, calibre_id, actor=actor)
+            except Exception:
+                pass
+        self._invalidate_grouped_cache()
+        return {
+            "status": "success", "source": source, "target": target_name,
+            "calibre_series_id": calibre_id, "merged": merged, "rekeyed_releases": rekeyed,
+            "owned_volumes": sorted(volumes), "book_count": book_count,
+        }
+
+    def auto_link_tracked_series(self, calibre_series_list: List[Dict[str, Any]],
+                                 volumes_map: Optional[Dict[str, Any]] = None,
+                                 actor: str = "scheduler") -> List[Dict[str, Any]]:
+        """Link existing trackers to Calibre via exact/subtitle/confident-fuzzy matches."""
+        from app.parser import (
+            CalibreSeriesIndex, normalize_text, series_name_candidates, split_series_candidate_parts,
+        )
+        results: List[Dict[str, Any]] = []
+        if not calibre_series_list:
+            return results
+        index = CalibreSeriesIndex(calibre_series_list)
+        with self.get_connection() as conn:
+            trackers = [dict(row) for row in conn.execute("SELECT * FROM series_tracking;").fetchall()]
+        for tracker in trackers:
+            name = str(tracker.get("name") or "").strip()
+            if not name:
+                continue
+            # Already linked to a real Calibre id? keep (metadata sync handles updates).
+            if tracker.get("calibre_series_id") is not None:
+                continue
+            candidates = []
+            for value in series_name_candidates(name):
+                candidates.append(value)
+            for part in split_series_candidate_parts(name):
+                candidates.append(part)
+            for part in str(name).split(":"):
+                if part.strip():
+                    candidates.append(part.strip())
+            exact_targets = []
+            for candidate in candidates:
+                norm = normalize_text(candidate)
+                if not norm:
+                    continue
+                for calibre in calibre_series_list:
+                    cal_name = str(calibre.get("series_name") or calibre.get("name") or "").strip()
+                    if cal_name and normalize_text(cal_name) == norm:
+                        exact_targets.append(calibre)
+            unique_targets = {id(item): item for item in exact_targets}
+            matched = None
+            if len(unique_targets) == 1:
+                matched = next(iter(unique_targets.values()))
+            elif len(unique_targets) > 1:
+                continue  # genuinely ambiguous: leave for manual match
+            else:
+                fuzzy = index.match(name, threshold=0.90)
+                if fuzzy:
+                    matched = fuzzy
+            if not matched:
+                continue
+            target_name = str(matched.get("series_name") or matched.get("name") or "").strip()
+            if not target_name:
+                continue
+            cal_id = matched.get("series_id") or matched.get("id") or matched.get("calibre_series_id")
+            owned = set()
+            if volumes_map:
+                for key in (str(cal_id), cal_id, target_name.lower(), normalize_text(target_name)):
+                    if key in volumes_map:
+                        owned.update(volumes_map[key])
+            try:
+                result = self.link_tracked_series(
+                    name, matched, actor=actor, owned_volumes=sorted(owned),
+                )
+                results.append(result)
+            except Exception as exc:
+                logger.debug("Could not auto-link tracked series '%s': %s", name, exc)
+        return results
 
     def get_all_series(
         self,
