@@ -22,7 +22,7 @@ from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
-from app import background_tasks, download_failures, downloads_inventory, downloads_reconcile, network_diagnostics, staging_duplicates, storage_health
+from app import background_tasks, download_failures, downloads_inventory, downloads_inventory_cleanup, downloads_reconcile, network_diagnostics, staging_duplicates, storage_health
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
 from app.downloader.base import DownloaderError, parse_queued_handle_id
 from app.downloader.torbox import TorboxDownloader
@@ -2819,6 +2819,69 @@ def _failure_file_path(row: Dict[str, Any], root: str) -> str:
     if not os.path.isfile(safe_path):
         raise HTTPException(status_code=404, detail="the failed file no longer exists")
     return safe_path
+
+
+@app.post("/api/downloads/inventory/audit")
+async def api_inventory_cleanup_audit():
+    """Read-only preview of duplicate / already-present raw inventory entries."""
+    result = await asyncio.to_thread(
+        downloads_inventory_cleanup.audit_inventory_cleanup,
+        db, scheduler.get_downloads_dir(create=False), _staging_dir_setting(), _calibre_series_snapshot(),
+    )
+    return JSONResponse(result)
+
+
+@app.post("/api/downloads/inventory/clear")
+async def api_inventory_cleanup_clear(payload: Optional[Dict[str, Any]] = None):
+    body = payload or {}
+    if body.get("confirm") is not True:
+        raise HTTPException(status_code=400, detail="confirm must be true to clear raw inventory entries")
+    mode = str(body.get("mode") or "").strip().lower()
+    if mode not in ("duplicates", "already_present", "all"):
+        raise HTTPException(status_code=400, detail="mode must be duplicates, already_present or all")
+    relatives = body.get("relatives")
+    if relatives is not None and not isinstance(relatives, list):
+        raise HTTPException(status_code=400, detail="relatives must be a list")
+    root = scheduler.get_downloads_dir(create=False)
+    staging = _staging_dir_setting()
+    calibre = _calibre_series_snapshot()
+    actor = auth_module.get_current_actor()
+
+    def _worker(reporter):
+        reporter.report(0, len(relatives or []), "Revalidating raw inventory candidates…", force=True)
+        return downloads_inventory_cleanup.clear_inventory(
+            db, root, staging, mode, relatives=[str(value) for value in (relatives or [])],
+            calibre_series=calibre, report=reporter.report,
+        )
+
+    info = background_tasks.run_in_background(
+        db, "downloads:inventory-clear", f"Clear raw inventory ({mode})", _worker,
+        actor=actor, scope="downloads",
+    )
+    return JSONResponse({"status": "started", **info})
+
+
+@app.post("/api/downloads/inventory/delete")
+async def api_inventory_cleanup_delete(payload: Dict[str, Any]):
+    if payload.get("confirm") is not True:
+        raise HTTPException(status_code=400, detail="confirm must be true to delete a raw inventory entry")
+    relative = str(payload.get("relative") or "").strip()
+    if not relative:
+        raise HTTPException(status_code=400, detail="relative is required")
+    try:
+        result = await asyncio.to_thread(
+            downloads_inventory_cleanup.delete_inventory_entry,
+            db, scheduler.get_downloads_dir(create=False), relative,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status = 404 if "not in the current" in message or "no longer exists" in message else 400
+        raise HTTPException(status_code=status, detail=message) from exc
+    try:
+        downloads_inventory.refresh_inventory(db, scheduler.get_downloads_dir(create=False))
+    except Exception as exc:
+        logger.debug("Inventory refresh after raw delete failed: %s", exc)
+    return JSONResponse(result)
 
 
 @app.get("/api/downloads/failures")

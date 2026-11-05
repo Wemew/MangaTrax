@@ -343,6 +343,9 @@
                 </p>
             </div>
             <div class="flex items-center gap-2">
+                <button type="button" onclick="openRawCleanupPreview()" class="px-3 py-1.5 rounded-lg bg-amber-900/40 hover:bg-amber-900/60 border border-amber-700/50 text-amber-200 text-xs font-semibold flex items-center gap-1.5">
+                    <i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Clean up raw duplicates
+                </button>
                 <button type="button" onclick="rescanDownloads()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
                     <i data-lucide="search" class="w-3.5 h-3.5 text-cyan-400"></i> Rescan
                 </button>
@@ -357,6 +360,22 @@
                 </button>
             </div>
         </div>
+        <div id="raw-cleanup-panel" class="hidden border-b border-slate-800 bg-slate-950/40 px-6 py-4 space-y-2">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                    <p class="text-xs font-bold text-white">Raw cleanup preview</p>
+                    <p id="raw-cleanup-summary" class="text-[11px] text-slate-400">Auditing…</p>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button type="button" onclick="confirmRawCleanup('duplicates')" id="btn-clear-raw-duplicates" class="hidden px-3 py-1.5 rounded-lg bg-rose-900/50 border border-rose-500/40 text-rose-200 text-xs font-semibold">Delete duplicates</button>
+                    <button type="button" onclick="confirmRawCleanup('already_present')" id="btn-clear-raw-present" class="hidden px-3 py-1.5 rounded-lg bg-rose-900/50 border border-rose-500/40 text-rose-200 text-xs font-semibold">Delete already-present copies</button>
+                    <button type="button" onclick="closeRawCleanupPreview()" class="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold">Close</button>
+                </div>
+            </div>
+            <div id="raw-cleanup-confirm" class="hidden bg-rose-500/10 border border-rose-500/40 rounded-xl p-3 text-xs text-rose-200"></div>
+            <div id="raw-cleanup-list" class="max-h-64 overflow-y-auto space-y-2"></div>
+        </div>
+
         {% if downloads_inventory and downloads_inventory.entries %}
         <div class="overflow-x-auto">
             <table class="w-full text-left border-collapse text-xs">
@@ -374,7 +393,7 @@
                 </thead>
                 <tbody id="inventory-body" class="divide-y divide-slate-800/60">
                     {% for e in downloads_inventory.entries %}
-                    <tr class="hover:bg-slate-850/50 transition-colors">
+                    <tr class="hover:bg-slate-850/50 transition-colors" data-relative="{{ e.relative }}">
                         <td class="py-3 px-4 font-semibold text-white max-w-xs truncate break-words-anywhere" title="{{ e.relative }}">{{ e.name }}</td>
                         <td class="py-3 px-4 text-slate-300">{{ e.file_count }}{% if e.cbz_count %} ({{ e.cbz_count }} cbz){% endif %}</td>
                         <td class="py-3 px-4 text-slate-300">{{ (e.size_bytes / 1024 / 1024)|round(1) }} MB</td>
@@ -397,11 +416,12 @@
                             {% if e.release %}{{ e.release.title }} <span class="text-slate-500">({{ e.release.download_status }})</span>{% else %}-{% endif %}
                         </td>
                         <td class="py-3 px-4 text-right">
-                            {% if e.state == 'ready' %}
-                            <button type="button" onclick="tagMoveNow()" class="px-2 py-1 rounded bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-[10px] font-bold" title="Tag and move this entry to staging">Tag & move now</button>
-                            {% elif e.state == 'awaiting_calibre' and e.series_name %}
-                            <button type="button" data-series="{{ e.series_name|e }}" onclick="openManualMatch(this.dataset.series)" aria-label="Manual match {{ e.series_name|e }}" class="px-2 py-1 rounded bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Manual match</button>
-                            {% else %}<span class="text-[10px] text-slate-600">-</span>{% endif %}
+                            <div class="inline-flex items-center gap-1">
+                                {% if e.state == 'awaiting_calibre' and e.series_name %}
+                                <button type="button" data-series="{{ e.series_name|e }}" onclick="openManualMatch(this.dataset.series)" aria-label="Manual match {{ e.series_name|e }}" class="px-2 py-1 rounded bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Manual match</button>
+                                {% endif %}
+                                <button type="button" data-relative="{{ e.relative }}" onclick="deleteRawInventoryEntry(this, this.dataset.relative)" class="raw-delete-btn px-2 py-1 rounded bg-rose-900/30 hover:bg-rose-900/50 border border-rose-700/40 text-rose-300 text-[10px] font-bold" title="Delete this raw entry permanently">Delete</button>
+                            </div>
                         </td>
                     </tr>
                     {% endfor %}
@@ -988,7 +1008,7 @@ function renderInventory(inventory, lastScannedAt) {
                 `<td class="py-3 px-4 text-slate-300">${series}</td>` +
                 `<td class="py-3 px-4">${_inventoryStateHtml(e)}</td>` +
                 `<td class="py-3 px-4 text-slate-400 max-w-xs truncate">${release}</td>` +
-                `<td class="py-3 px-4 text-right">${e.state === 'ready' ? '<button onclick="tagMoveNow()" class="px-2 py-1 rounded bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-[10px] font-bold">Tag & move now</button>' : (e.state === 'awaiting_calibre' && e.series_name ? `<button data-series="${escapeHtml(e.series_name)}" onclick="openManualMatch(this.dataset.series)" class="px-2 py-1 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Manual match</button>` : '<span class="text-[10px] text-slate-600">-</span>')}</td>`;
+                `<td class="py-3 px-4 text-right"><div class="inline-flex items-center gap-1">${e.state === 'awaiting_calibre' && e.series_name ? `<button data-series="${escapeHtml(e.series_name)}" onclick="openManualMatch(this.dataset.series)" class="px-2 py-1 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Manual match</button>` : ''}<button data-relative="${escapeHtml(e.relative || e.name || '')}" onclick="deleteRawInventoryEntry(this, this.dataset.relative)" class="px-2 py-1 rounded bg-rose-900/30 border border-rose-700/40 text-rose-300 text-[10px] font-bold" title="Delete this raw entry permanently">Delete</button></div></td>`;
         }
         const seen = new Set(entries.map(e => e.relative || e.name || ''));
         for (const row of Array.from(tbody.querySelectorAll('tr[data-relative]'))) {
@@ -1770,6 +1790,143 @@ async function executeDeleteAllFailures() {
     } catch (err) { showToast('Bulk delete failed: ' + err, 'error'); }
 }
 document.addEventListener('DOMContentLoaded', loadFailedDocuments);
+
+// --- Raw inventory cleanup (task-59) ---
+let _rawCleanupCandidates = [];
+let _rawCleanupArmed = null;
+const _rawDeleteTimers = new Map();
+function rawCleanupEsc(value) {
+    const div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+}
+async function openRawCleanupPreview() {
+    const panel = document.getElementById('raw-cleanup-panel');
+    const summary = document.getElementById('raw-cleanup-summary');
+    const list = document.getElementById('raw-cleanup-list');
+    const duplicatesBtn = document.getElementById('btn-clear-raw-duplicates');
+    const presentBtn = document.getElementById('btn-clear-raw-present');
+    if (!panel) return;
+    panel.classList.remove('hidden');
+    if (summary) summary.textContent = 'Auditing raw inventory (read-only)…';
+    if (list) list.innerHTML = '';
+    _rawCleanupArmed = null;
+    try {
+        const res = await fetch('/api/downloads/inventory/audit', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) { if (summary) summary.textContent = data.detail || 'Audit failed'; return; }
+        _rawCleanupCandidates = data.candidates || [];
+        const dup = data.duplicates || {};
+        const present = data.already_present || {};
+        if (summary) summary.textContent = `${dup.count || 0} duplicate(s), ${formatBytes(dup.bytes || 0)} · ${present.count || 0} already-present cop(ies), ${formatBytes(present.bytes || 0)}`;
+        if (duplicatesBtn) duplicatesBtn.classList.toggle('hidden', !(dup.count > 0));
+        if (presentBtn) presentBtn.classList.toggle('hidden', !(present.count > 0));
+        if (list) {
+            list.innerHTML = _rawCleanupCandidates.length ? _rawCleanupCandidates.map(function (item) {
+                const detail = item.reason === 'duplicate' ? `Duplicate of ${rawCleanupEsc(item.alternate || '')}`
+                    : rawCleanupEsc(item.detail || item.reason);
+                return `<div class="bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-2 text-[11px] flex items-center justify-between gap-3">
+                    <div class="min-w-0"><span class="font-semibold text-slate-200">${rawCleanupEsc(item.name)}</span> <span class="text-slate-500">(${formatBytes(item.size_bytes || 0)})</span><div class="text-slate-400">${detail}</div></div>
+                    <span class="shrink-0 px-1.5 py-0.5 rounded bg-rose-900/30 border border-rose-700/40 text-rose-300 text-[10px] uppercase">${rawCleanupEsc(item.reason)}</span>
+                </div>`;
+            }).join('') : '<p class="text-xs text-slate-500">No duplicate or already-present raw entries found.</p>';
+        }
+    } catch (err) { if (summary) summary.textContent = 'Audit failed: ' + err; }
+}
+function closeRawCleanupPreview() {
+    const panel = document.getElementById('raw-cleanup-panel');
+    if (panel) panel.classList.add('hidden');
+    const box = document.getElementById('raw-cleanup-confirm');
+    if (box) box.classList.add('hidden');
+    _rawCleanupArmed = null;
+}
+function confirmRawCleanup(mode) {
+    const box = document.getElementById('raw-cleanup-confirm');
+    if (!box) return;
+    const candidates = _rawCleanupCandidates.filter(function (item) {
+        return mode === 'duplicates' ? item.reason === 'duplicate'
+            : item.reason === 'in_staging' || item.reason === 'in_calibre';
+    });
+    if (!candidates.length) return;
+    const bytes = candidates.reduce(function (sum, item) { return sum + (item.size_bytes || 0); }, 0);
+    _rawCleanupArmed = mode;
+    box.classList.remove('hidden');
+    box.innerHTML = `<strong>Confirm:</strong> delete ${candidates.length} raw entr(ies) (${formatBytes(bytes)}) from the downloads folder. Staging and Calibre are not touched. ` +
+        `<button type="button" onclick="executeRawCleanup()" class="ml-2 px-2 py-0.5 rounded bg-rose-600 text-white font-semibold">Yes, delete</button>` +
+        `<button type="button" onclick="cancelRawCleanup()" class="ml-1 px-2 py-0.5 rounded bg-slate-800 border border-slate-700">Cancel</button>`;
+    setTimeout(function () { if (_rawCleanupArmed === mode) cancelRawCleanup(); }, 6000);
+}
+function cancelRawCleanup() {
+    _rawCleanupArmed = null;
+    const box = document.getElementById('raw-cleanup-confirm');
+    if (box) box.classList.add('hidden');
+}
+async function executeRawCleanup() {
+    const mode = _rawCleanupArmed;
+    if (!mode) return;
+    const candidates = _rawCleanupCandidates.filter(function (item) {
+        return mode === 'duplicates' ? item.reason === 'duplicate'
+            : item.reason === 'in_staging' || item.reason === 'in_calibre';
+    });
+    cancelRawCleanup();
+    try {
+        const res = await fetch('/api/downloads/inventory/clear', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: mode, relatives: candidates.map(function (item) { return item.relative; }), confirm: true }),
+        });
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok) { showToast(data.detail || 'Raw cleanup failed', 'error'); return; }
+        if (window.MangaTasks && data.task_id) MangaTasks.watch(data.task_id, function (task) {
+            if (task.status === 'success') {
+                const result = task.result || {};
+                showToast(`Cleared ${result.deleted || 0} raw entr(ies) · ${formatBytes(result.bytes_freed || 0)} freed`, 'success');
+                candidates.forEach(function (item) {
+                    const row = document.querySelector(`#inventory-body tr[data-relative="${CSS.escape(item.relative)}"]`);
+                    if (row) row.remove();
+                });
+                openRawCleanupPreview();
+                if (window.refreshDownloadsNow) refreshDownloadsNow();
+            } else {
+                showToast(task.error || 'Raw cleanup failed', 'error');
+            }
+            MangaTasks.poll();
+        });
+    } catch (err) { showToast('Raw cleanup failed: ' + err, 'error'); }
+}
+function deleteRawInventoryEntry(button, relative) {
+    if (!button || !relative) return;
+    const key = 'raw:' + relative;
+    if (button.dataset.armed !== '1') {
+        button.dataset.armed = '1';
+        button.dataset.originalText = button.innerHTML;
+        button.innerHTML = '<i data-lucide="alert-triangle" class="w-3 h-3"></i> Confirm delete';
+        button.classList.add('bg-rose-700/60');
+        showToast('Click Delete again within 4s to permanently remove this raw entry', 'warning');
+        const timer = setTimeout(function () {
+            button.dataset.armed = '';
+            if (button.dataset.originalText) button.innerHTML = button.dataset.originalText;
+            button.classList.remove('bg-rose-700/60');
+            _rawDeleteTimers.delete(key);
+        }, 4000);
+        _rawDeleteTimers.set(key, timer);
+        return;
+    }
+    clearTimeout(_rawDeleteTimers.get(key));
+    _rawDeleteTimers.delete(key);
+    button.disabled = true;
+    fetch('/api/downloads/inventory/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ relative: relative, confirm: true }),
+    }).then(async function (res) {
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok) { showToast(data.detail || 'Delete failed', 'error'); return; }
+        const row = button.closest('tr');
+        if (row) row.remove();
+        showToast(`Deleted raw entry · ${formatBytes(data.bytes_freed || 0)} freed`, 'success');
+        if (window.refreshDownloadsNow) refreshDownloadsNow();
+    }).catch(function (err) { showToast('Delete failed: ' + err, 'error'); })
+      .finally(function () { button.disabled = false; });
+}
 </script>
 
 <!-- Manual series match modal (task-42) -->
