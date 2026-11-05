@@ -1335,6 +1335,8 @@ def release_download_state(release: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         state = "failed"
     elif release_status == "IN_CALIBRE":
         state = "in_calibre"
+    elif release_status == "IN_STAGING":
+        state = "in_staging"
     elif download_status == "COMPLETED" and release.get("routed_at"):
         state = "in_staging"
     elif download_status in ("DOWNLOADING", "QUEUED"):
@@ -3053,6 +3055,12 @@ async def api_downloads_file_delete(payload: Dict[str, Any]):
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Could not delete file: {exc}") from exc
     _prune_empty_parents(path, root)
+    if area == "staging":
+        try:
+            from app.staged_ownership import invalidate_staged_ownership_cache
+            invalidate_staged_ownership_cache()
+        except Exception as exc:
+            logger.debug("Could not invalidate staged ownership cache: %s", exc)
     try:
         db.log_activity(
             "DOWNLOAD_FILE_DELETED",
@@ -3375,6 +3383,11 @@ async def api_torbox_retry(release_id: int):
     target = db.get_release_by_id(release_id)
     if not target:
         raise HTTPException(status_code=404, detail="Release not found")
+    if str(target.get("status") or "").upper() == "IN_STAGING":
+        raise HTTPException(
+            status_code=409,
+            detail="Volumes are already staged and waiting for Calibre import; not downloading again",
+        )
     if resolve_downloader_engine(db) != "torbox":
         raise HTTPException(status_code=409, detail="Torbox is not the active downloader engine")
     now = time.time()
@@ -3500,6 +3513,11 @@ async def api_release_download(release_id: int):
     target = db.get_release_by_id(release_id)
     if not target:
         raise HTTPException(status_code=404, detail="Release not found")
+    if str(target.get("status") or "").upper() == "IN_STAGING":
+        raise HTTPException(
+            status_code=409,
+            detail="Volumes are already staged and waiting for Calibre import; not downloading again",
+        )
 
     download_url = target.get("download_url") or target.get("link")
     downloads_dir = scheduler.get_downloads_dir()

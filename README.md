@@ -383,6 +383,24 @@ selected file and to the selected total.
 
 ---
 
+## Staging counts as owned (`IN_STAGING`)
+
+A volume that has been downloaded, tagged and moved into staging is treated as **owned**
+for wanted/missing decisions exactly like a Calibre-owned volume — it is not re-requested,
+not auto-downloaded again, not shown in discovery/wanted lists, and not reported missing.
+It remains visually distinct as **In staging** (teal), not In Calibre.
+
+- Ownership = Calibre volumes ∪ staged volumes. The staged map is built from the actual
+  staging scan (flat + nested, parsed filenames; temp/hidden/symlink entries skipped) with
+  a fallback from `COMPLETED`+`routed_at` release rows for unparseable names, cached ~60 s
+  and invalidated after deletions.
+- Status precedence: `IN_STAGING` is sticky above REQUESTED/DISCOVERY/NEW and below
+  IN_CALIBRE; Calibre import upgrades it to IN_CALIBRE, and it never downgrades while the
+  volume is only staged. Manual download/retry of an IN_STAGING release returns 409.
+- Partial releases request only the still-missing volumes. If a staged file is removed
+  externally, ownership drops after the cache/reconcile refresh and the volume becomes
+  wanted again.
+
 ## Long-running actions (progress convention)
 
 Every button that can take more than ~2 seconds must start a **persisted background

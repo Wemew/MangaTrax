@@ -8,10 +8,12 @@ from app.parser import (
 )
 
 class MangaCalibreMatcher:
-    def __init__(self, calibre_series: List[Dict[str, Any]], volumes_map: Dict[str, Set[float]], metadata_cache: Optional[Dict[str, Dict[str, Any]]] = None):
+    def __init__(self, calibre_series: List[Dict[str, Any]], volumes_map: Dict[str, Set[float]], metadata_cache: Optional[Dict[str, Dict[str, Any]]] = None, staged_volumes_map: Optional[Dict[str, Set[float]]] = None):
         self.calibre_series = calibre_series
         self.volumes_map = volumes_map
         self.metadata_cache = metadata_cache or {}
+        # task-61: volumes present in staging count as owned for wanted/missing.
+        self.staged_volumes_map = staged_volumes_map or {}
         # Build the normalised lookup index ONCE per matcher (i.e. once per Calibre
         # sync / feed poll) instead of re-normalising the whole library for every
         # release.  Without this the reconcile loop benchmarked at ~40-120 ms per
@@ -102,6 +104,32 @@ class MangaCalibreMatcher:
 
         return owned
 
+    def get_staged_volumes(self, matched_series: Dict[str, Any], alt_names: Optional[List[str]] = None) -> Set[float]:
+        """Staged volumes for a matched series (alias/normalised keys), never Calibre-only."""
+        if not self.staged_volumes_map:
+            return set()
+        names = []
+        s_name = matched_series.get("series_name") or matched_series.get("name") or ""
+        if s_name:
+            names.append(s_name)
+            names.extend(split_series_candidate_parts(s_name))
+        for alt in alt_names or []:
+            if alt:
+                names.append(alt)
+                names.extend(split_series_candidate_parts(alt))
+        volumes: Set[float] = set()
+        for name in names:
+            clean = normalize_text(name)
+            if clean:
+                volumes.update(self.staged_volumes_map.get(clean, set()))
+        return volumes
+
+    def get_combined_owned_volumes(self, matched_series: Dict[str, Any], alt_names: Optional[List[str]] = None) -> Set[float]:
+        """Calibre-owned ∪ staged-owned volumes (acquisition semantics)."""
+        return set(self.get_owned_volumes(matched_series, alt_names=alt_names)) | set(
+            self.get_staged_volumes(matched_series, alt_names=alt_names)
+        )
+
     def check_release(self, release: Dict[str, Any], auto_request_monitored: bool = True, alt_series_names: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Evaluates a single manga volume or multi-volume bundle against Calibre.
@@ -119,22 +147,41 @@ class MangaCalibreMatcher:
             matched_name = matched_series.get("series_name") or matched_series.get("name", "")
             matched_series["series_name"] = matched_name
             owned = self.get_owned_volumes(matched_series, alt_names=alt_series_names)
+            staged = self.get_staged_volumes(matched_series, alt_names=alt_series_names)
+            combined = set(owned) | set(staged)
 
             if volumes:
-                missing = [v for v in volumes if round(float(v), 2) not in owned]
+                missing = [v for v in volumes if round(float(v), 2) not in combined]
                 if not missing:
+                    all_in_calibre = all(round(float(v), 2) in owned for v in volumes)
+                    if all_in_calibre:
+                        return {
+                            "status": "IN_CALIBRE",
+                            "matched_series": matched_series,
+                            "missing_volumes": [],
+                            "reason": f"All volumes in bundle ({volumes}) already in Calibre library"
+                        }
                     return {
-                        "status": "IN_CALIBRE",
+                        "status": "IN_STAGING",
                         "matched_series": matched_series,
                         "missing_volumes": [],
-                        "reason": f"All volumes in bundle ({volumes}) already in Calibre library"
+                        "reason": (
+                            f"All volumes in bundle ({volumes}) already staged, waiting for "
+                            "Calibre import"
+                        )
                     }
                 else:
+                    staged_missing = [v for v in missing if round(float(v), 2) in staged]
+                    reason = f"Bundle provides missing volumes: {missing}"
+                    if owned:
+                        reason += f" (Owned in Calibre: {len(owned)} volumes)"
+                    if staged_missing:
+                        reason += f" (staged/awaiting import: {staged_missing})"
                     return {
                         "status": "REQUESTED" if auto_request_monitored else "NEW",
                         "matched_series": matched_series,
                         "missing_volumes": missing,
-                        "reason": f"Bundle provides missing volumes: {missing} (Owned in Calibre: {len(owned)} volumes)"
+                        "reason": reason
                     }
             else:
                 return {
@@ -171,11 +218,12 @@ class MangaCalibreMatcher:
         resolved = []
         for req in pending_requests:
             res = self.check_release(req, auto_request_monitored=True)
-            if res["status"] == "IN_CALIBRE":
+            if res["status"] in ("IN_CALIBRE", "IN_STAGING"):
                 resolved.append({
                     "release_id": req["id"],
                     "title": req["title"],
                     "series_name": req.get("series_name"),
+                    "status": res["status"],
                     "reason": res["reason"]
                 })
         return resolved

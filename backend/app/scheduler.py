@@ -217,11 +217,23 @@ class MangaScheduler:
             series_list = self.db.get_all_series()
             volumes_map = {}
         matcher = MangaCalibreMatcher(
-            series_list, volumes_map, self.db.get_all_manga_metadata_cache()
+            series_list, volumes_map, self.db.get_all_manga_metadata_cache(),
+            staged_volumes_map=self._staged_volumes_map(),
         )
         return series_list, matcher
 
     # --- Marker-less chapter guard ---------------------------------------
+    def _staged_volumes_map(self) -> Dict[str, set]:
+        """Cached staged series→volumes ownership map (task-61)."""
+        try:
+            from app.staged_ownership import get_staged_volumes_map
+            return get_staged_volumes_map(
+                self.db, self.db.get_setting("staging_dir", "/staging"),
+            )
+        except Exception as exc:
+            logger.debug("Could not build staged ownership map: %s", exc)
+            return {}
+
     def _known_series_keys(self, matcher: Optional[MangaCalibreMatcher] = None) -> Set[str]:
         """Normalized names of every series MangaTrax can already name.
 
@@ -3102,7 +3114,7 @@ class MangaScheduler:
 
                 # Build matcher
                 meta_cache = self.db.get_all_manga_metadata_cache()
-                matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
+                matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache, staged_volumes_map=self._staged_volumes_map())
 
                 # Check pending requests against Calibre
                 pending = self.db.get_pending_requests()
@@ -3111,19 +3123,21 @@ class MangaScheduler:
                 notifier = self.get_notifier()
                 for item in resolved:
                     # Automated write: the precedence model decides (promotion to
-                    # IN_CALIBRE is allowed, a downgrade is not).
-                    self.db.update_release_status(item["release_id"], "IN_CALIBRE", enforce_precedence=True)
+                    # IN_CALIBRE/IN_STAGING is allowed, a downgrade is not).
+                    target_status = "IN_CALIBRE" if item.get("status") == "IN_CALIBRE" else "IN_STAGING"
+                    self.db.update_release_status(item["release_id"], target_status, enforce_precedence=True)
                     self._log_activity(
                         "REQUEST_RESOLVED",
                         f"Resolved: '{item['title']}' is now available in your Calibre library.",
                         item["reason"]
                     )
-                    try:
-                        rel_row = self.db.get_release_by_id(item["release_id"])
-                        if rel_row:
-                            notifier.notify_acquired(rel_row)
-                    except Exception as e:
-                        logger.debug(f"Webhook notification failed for acquired release: {e}")
+                    if target_status == "IN_CALIBRE":
+                        try:
+                            rel_row = self.db.get_release_by_id(item["release_id"])
+                            if rel_row:
+                                notifier.notify_acquired(rel_row)
+                        except Exception as e:
+                            logger.debug(f"Webhook notification failed for acquired release: {e}")
 
                 # Reconcile active releases against Calibre: updates missing_volumes
                 # and statuses.  Incremental + bounded (see the method) so a large
@@ -3389,7 +3403,7 @@ class MangaScheduler:
         series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
         volumes_map = scanner.get_series_volumes_map() if scanner.is_available() else {}
         meta_cache = self.db.get_all_manga_metadata_cache()
-        matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
+        matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache, staged_volumes_map=self._staged_volumes_map())
 
         # Marker-less chapter guard + numbered-series context: loaded once per
         # feed-poll pass.  The guard discards a chapter only when its clean series
@@ -4148,7 +4162,7 @@ class MangaScheduler:
         series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
         volumes_map = scanner.get_series_volumes_map() if scanner.is_available() else {}
         meta_cache = self.db.get_all_manga_metadata_cache()
-        return MangaCalibreMatcher(series_list, volumes_map, meta_cache)
+        return MangaCalibreMatcher(series_list, volumes_map, meta_cache, staged_volumes_map=self._staged_volumes_map())
 
     def refresh_series_provider_metadata(self, series_name: str, actor: str = "scheduler") -> Dict[str, Any]:
         """Phase 1: force-refresh AniList (MangaUpdates fallback) enrichment data.
@@ -4752,7 +4766,7 @@ class MangaScheduler:
             series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
             volumes_map = scanner.get_series_volumes_map() if scanner.is_available() else {}
             meta_cache = self.db.get_all_manga_metadata_cache()
-            matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
+            matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache, staged_volumes_map=self._staged_volumes_map())
 
             # Context for the whole backfill run: the chapter guard and the
             # numbered-series key protection both need the known-series set.
@@ -4989,7 +5003,7 @@ class MangaScheduler:
             series_list = scanner.get_all_series() if scanner.is_available() else self.db.get_all_series()
             volumes_map = scanner.get_series_volumes_map() if scanner.is_available() else {}
             meta_cache = self.db.get_all_manga_metadata_cache()
-            matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache)
+            matcher = MangaCalibreMatcher(series_list, volumes_map, meta_cache, staged_volumes_map=self._staged_volumes_map())
 
         expanded_count = 0
         for r in unexpanded:

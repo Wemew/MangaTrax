@@ -204,6 +204,11 @@ def purge_staging_duplicates(db, staging_dir: str, filenames: Optional[List[str]
         if report:
             report(index, total, f"Processed {item['filename']}")
     _update_release_bookkeeping(db, purged_files, verified, root)
+    try:
+        from app.staged_ownership import invalidate_staged_ownership_cache
+        invalidate_staged_ownership_cache()
+    except Exception:
+        pass
     return {
         "status": "success", "purged": purged, "bytes_freed": bytes_freed,
         "skipped": skipped, "failed": failed, "purged_files": [item["filename"] for item in purged_files],

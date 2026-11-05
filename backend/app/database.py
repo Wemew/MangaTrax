@@ -244,7 +244,7 @@ def prioritized_release_clause(alias: str = "") -> str:
 # call ``MangaDatabase.update_release_status()`` without ``enforce_precedence``
 # so a user can always override a sticky state (e.g. IGNORED -> REQUESTED via
 # POST /api/releases/{id}/status or /unignore).
-STICKY_STATUSES = frozenset({"REQUESTED", "IGNORED", "BLACKLISTED", "IN_CALIBRE"})
+STICKY_STATUSES = frozenset({"REQUESTED", "IN_STAGING", "IGNORED", "BLACKLISTED", "IN_CALIBRE"})
 RECOMPUTABLE_STATUSES = frozenset({"DISCOVERY", "NEW"})
 USER_VETO_STATUSES = frozenset({"IGNORED", "BLACKLISTED"})
 
@@ -254,6 +254,7 @@ _STATUS_RANK = {
     "DISCOVERY": 0,
     "NEW": 0,
     "REQUESTED": 1,
+    "IN_STAGING": 1.5,
     "IN_CALIBRE": 1,
     "IGNORED": 2,
     "BLACKLISTED": 2,
@@ -295,6 +296,12 @@ def resolve_status(existing: Optional[str], incoming: Optional[str]) -> Optional
         return new
     if old in USER_VETO_STATUSES:
         return old
+    # IN_CALIBRE is the acquisition terminal: importing staged volumes upgrades
+    # IN_STAGING -> IN_CALIBRE, and a staged classification never downgrades it.
+    if new == "IN_CALIBRE":
+        return "IN_CALIBRE"
+    if old == "IN_CALIBRE" and new == "IN_STAGING":
+        return "IN_CALIBRE"
     if _STATUS_RANK.get(new, 0) >= _STATUS_RANK.get(old, 0):
         return new
     return old
@@ -2805,7 +2812,7 @@ class MangaDatabase:
                            ) as rn
                     FROM releases r
                     WHERE (r.volume_start = 1.0 OR r.volume_start IS NULL)
-                      AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED')
+                      AND r.status NOT IN ('IN_CALIBRE', 'IN_STAGING', 'BLACKLISTED', 'IGNORED')
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1))
                       AND {tracked_media_clause('r')}
@@ -2868,7 +2875,7 @@ class MangaDatabase:
                            ) as rn
                     FROM releases r
                     WHERE (r.volume_start = 1.0 OR r.volume_start IS NULL)
-                      AND r.status NOT IN ('IN_CALIBRE', 'BLACKLISTED', 'IGNORED')
+                      AND r.status NOT IN ('IN_CALIBRE', 'IN_STAGING', 'BLACKLISTED', 'IGNORED')
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1))
                       AND {tracked_media_clause('r')}
@@ -3684,6 +3691,14 @@ class MangaDatabase:
         persist: bool = False
     ) -> Tuple[List[Dict[str, Any]], int]:
         from app.parser import normalize_text, split_series_candidate_parts
+        try:
+            from app.staged_ownership import get_staged_volumes_map, staged_volumes_for
+            staged_map = get_staged_volumes_map(
+                self, self.get_setting("staging_dir", "/staging"),
+            )
+        except Exception:
+            staged_map = {}
+            staged_volumes_for = None
 
         cache_key = f"{status}_{prioritized_only}"
         now = time.time()
@@ -3824,6 +3839,13 @@ class MangaDatabase:
 
             groups_dict: Dict[str, Dict[str, Any]] = {}
 
+            def _staged_for_release(rel):
+                if not staged_map or staged_volumes_for is None:
+                    return set()
+                names = [rel.get("series_name") or ""]
+                names.extend(split_series_candidate_parts(rel.get("series_name") or ""))
+                return staged_volumes_for(staged_map, names)
+
             for rel in raw_releases:
                 s_name = (rel.get("series_name") or "Uncategorized").strip()
                 s_norm = normalize_text(s_name) or "uncategorized"
@@ -3952,6 +3974,7 @@ class MangaDatabase:
                         "has_wanted": False,
                         "has_discovery": False,
                         "has_in_calibre": False,
+                        "has_in_staging": False,
                         "has_prioritized": False,
                         # Highest configured priority among any release's group set.
                         "prioritized_priority": 0
@@ -3996,13 +4019,19 @@ class MangaDatabase:
 
                             owned_vols_raw = calibre_match.get("owned_volumes_json") if calibre_match else None
                             owned_vols = set(json.loads(owned_vols_raw)) if owned_vols_raw else set()
-                            if owned_vols:
-                                rel["missing_volumes"] = [v for v in rel["volumes"] if round(float(v), 2) not in owned_vols]
+                            staged_vols = _staged_for_release(rel)
+                            combined_owned = set(owned_vols) | set(staged_vols)
+                            if combined_owned:
+                                rel["missing_volumes"] = [v for v in rel["volumes"] if round(float(v), 2) not in combined_owned]
                             else:
                                 if not rel["missing_volumes"] and rel["status"] in ("REQUESTED", "DISCOVERY"):
                                     rel["missing_volumes"] = list(rel["volumes"])
 
-                            candidate_st = "IN_CALIBRE" if not rel["missing_volumes"] else ("REQUESTED" if calibre_match else rel["status"])
+                            if not rel["missing_volumes"]:
+                                all_calibre = all(round(float(v), 2) in owned_vols for v in rel["volumes"])
+                                candidate_st = "IN_CALIBRE" if all_calibre else "IN_STAGING"
+                            else:
+                                candidate_st = "REQUESTED" if calibre_match else rel["status"]
                             # Automated expansion side-effect: never downgrade a sticky status.
                             rel["status"] = resolve_status(rel["status"], candidate_st)
 
@@ -4024,11 +4053,17 @@ class MangaDatabase:
                 if calibre_match and rel.get("volumes"):
                     owned_vols_raw = calibre_match.get("owned_volumes_json")
                     owned_vols = set(json.loads(owned_vols_raw)) if owned_vols_raw else set()
-                    if owned_vols:
-                        actual_missing = [v for v in rel["volumes"] if round(float(v), 2) not in owned_vols]
+                    staged_vols = _staged_for_release(rel)
+                    combined_owned = set(owned_vols) | set(staged_vols)
+                    if combined_owned:
+                        actual_missing = [v for v in rel["volumes"] if round(float(v), 2) not in combined_owned]
                         if actual_missing != rel["missing_volumes"]:
                             rel["missing_volumes"] = actual_missing
-                            candidate_rel_st = "IN_CALIBRE" if not actual_missing else ("REQUESTED" if calibre_match.get("is_monitored", 1) else "NEW")
+                            if not actual_missing:
+                                all_calibre = all(round(float(v), 2) in owned_vols for v in rel["volumes"])
+                                candidate_rel_st = "IN_CALIBRE" if all_calibre else "IN_STAGING"
+                            else:
+                                candidate_rel_st = "REQUESTED" if calibre_match.get("is_monitored", 1) else "NEW"
                             # Automated reconcile side-effect: never downgrade a sticky status.
                             new_rel_st = resolve_status(rel["status"], candidate_rel_st)
                             rel["status"] = new_rel_st
@@ -4069,6 +4104,8 @@ class MangaDatabase:
                     group["has_discovery"] = True
                 elif rel["status"] == "IN_CALIBRE":
                     group["has_in_calibre"] = True
+                elif rel["status"] == "IN_STAGING":
+                    group["has_in_staging"] = True
 
                 if rel.get("is_prioritized"):
                     group["has_prioritized"] = True

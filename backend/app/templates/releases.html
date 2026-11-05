@@ -47,6 +47,10 @@
                    class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'IN_CALIBRE' %}bg-emerald-600 text-white{% else %}text-slate-400 hover:text-emerald-400{% endif %}">
                     In Calibre
                 </a>
+                <a href="/releases?view={{ current_view }}&status=IN_STAGING"
+                   class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'IN_STAGING' %}bg-teal-600 text-white{% else %}text-slate-400 hover:text-teal-300{% endif %}">
+                    In staging
+                </a>
                 <a href="/releases?view={{ current_view }}&status=DISCOVERY" 
                    class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if current_status == 'DISCOVERY' %}bg-amber-600 text-white{% else %}text-slate-400 hover:text-amber-400{% endif %}">
                     Discovery
