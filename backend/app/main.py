@@ -22,7 +22,7 @@ from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
-from app import background_tasks, download_failures, downloads_inventory, downloads_inventory_cleanup, downloads_reconcile, network_diagnostics, staging_duplicates, storage_health
+from app import background_tasks, download_failures, downloads_inventory, downloads_inventory_cleanup, downloads_reconcile, network_diagnostics, staging_duplicates, staging_groups, storage_health
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
 from app.downloader.base import DownloaderError, parse_queued_handle_id
 from app.downloader.torbox import TorboxDownloader
@@ -1791,7 +1791,12 @@ async def downloads_view(request: Request):
     # Check files in staging directory
     staging_dir = _staging_dir_setting()
     staging_files = []
+    staging_groups_data = []
     if os.path.isdir(staging_dir):
+        try:
+            staging_groups_data = staging_groups.build_staging_groups(staging_dir)
+        except Exception as exc:
+            logger.debug("Could not build staging groups: %s", exc)
         for entry in cbz_tagger.scan_staging_cbz_files(staging_dir):
             staging_files.append({
                 "name": entry["relative"],
@@ -1828,6 +1833,7 @@ async def downloads_view(request: Request):
             "downloads_inventory": inventory,
             "downloads_inventory_scanned_seconds": inventory_scanned_seconds,
             "staging_files": staging_files,
+            "staging_groups": staging_groups_data,
             "awaiting_series": awaiting_series,
             "awaiting_total": awaiting_total,
             "settings": db.get_all_settings(),
@@ -3017,6 +3023,56 @@ async def api_download_failures_delete_all(payload: Optional[Dict[str, Any]] = N
     except Exception as exc:
         logger.debug("Reconcile after failed-document bulk delete failed: %s", exc)
     return JSONResponse({"status": "success", **result, "remaining": len(await asyncio.to_thread(db.list_download_failures))})
+
+
+@app.get("/api/downloads/staging-groups")
+async def api_staging_groups():
+    groups = await asyncio.to_thread(staging_groups.build_staging_groups, _staging_dir_setting())
+    return JSONResponse({"status": "success", "groups": groups, "count": len(groups)})
+
+
+@app.post("/api/downloads/staging-series/match")
+async def api_staging_series_match(payload: Dict[str, Any]):
+    """Retag every staged file in a series group and link/merge the Calibre series."""
+    source = str(payload.get("source_series") or "").strip()
+    if not source:
+        raise HTTPException(status_code=400, detail="source_series is required")
+    groups = await asyncio.to_thread(staging_groups.build_staging_groups, _staging_dir_setting())
+    from app.parser import normalize_text as _normalize_text
+    if not any(_normalize_text(group.get("series") or "") == _normalize_text(source) for group in groups):
+        raise HTTPException(status_code=404, detail=f"staging series '{source}' not found")
+    target = str(payload.get("target_series") or payload.get("new_series_title") or "").strip()
+    calibre_series = None
+    if not target:
+        try:
+            calibre_id = int(payload.get("calibre_series_id"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="calibre_series_id or new_series_title is required")
+        snapshot = await asyncio.to_thread(_calibre_series_snapshot)
+        if not snapshot:
+            snapshot = await asyncio.to_thread(db.get_all_series)
+        calibre_series = next(
+            (row for row in snapshot or []
+             if int(row.get("series_id") or row.get("id") or row.get("calibre_series_id") or 0) == calibre_id),
+            None,
+        )
+        if not calibre_series:
+            raise HTTPException(status_code=404, detail="Calibre series not found")
+        target = str(calibre_series.get("series_name") or calibre_series.get("name") or "").strip()
+    actor = auth_module.get_current_actor()
+    staging_dir = _staging_dir_setting()
+
+    def _worker(reporter):
+        return staging_groups.retag_staging_group(
+            db, staging_dir, source, target, calibre_series=calibre_series,
+            actor=actor, reporter=reporter.report,
+        )
+
+    info = background_tasks.run_in_background(
+        db, "downloads:staging-series-match", f"Match staging series '{source}' → {target}",
+        _worker, actor=actor, scope=source,
+    )
+    return JSONResponse({"status": "started", "source": source, "target": target, **info})
 
 
 @app.post("/api/downloads/files/delete")
