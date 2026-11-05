@@ -135,7 +135,8 @@ def test_ui_wiring():
     for needle in ("/api/downloads/files/delete", "deleteDownloadFile", "data-relative=\"{{ f.relative }}\"",
                    "data-relative=\"{{ file.relative }}\"", "staging-file-count", "awaiting-series-list",
                    "awaiting-series-count", "awaiting-file-count", "staging-empty-row",
-                   "Click Delete again within 4s"):
+                   "Click Delete again within 4s", "Match series", "openManualMatch(this.dataset.series)",
+                   "never writes into the Calibre library"):
         assert needle in page, f"missing UI wiring: {needle}"
     section = page.split("// --- Per-file delete (task-57)")[1]
     assert "window.confirm" not in section

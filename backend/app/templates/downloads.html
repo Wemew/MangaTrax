@@ -127,14 +127,18 @@
             {% if awaiting_series %}
             <p class="text-xs text-slate-400 mb-2">
                 These raw downloads in <code class="text-slate-300">{{ downloads_dir }}</code> are kept untouched until their
-                series exists in Calibre; the next Calibre sync unlocks them (they are then tagged and moved to staging).
+                series is known. Use <strong>Match series</strong> to map one to an existing Calibre series or create a tracked
+                series — the files are then tagged and moved to staging <strong>without being deleted</strong>. Once Calibre
+                (or BookOrbit) imports them, the next Calibre sync marks them In Calibre.
             </p>
             <ul class="divide-y divide-slate-800/60" id="awaiting-series-list">
                 {% for item in awaiting_series %}
                 <li class="py-2 text-xs awaiting-series-row" data-series-key="{{ item.series|lower }}">
                     <div class="flex items-center justify-between gap-3">
                         <span class="font-semibold text-white">{{ item.series }}</span>
-                        <span class="text-slate-400"><span class="awaiting-series-file-count">{{ item.count }}</span> file(s){% if item.volumes %} · vol {{ item.volumes|join(', ') }}{% endif %}</span>
+                        <span class="flex items-center gap-2 text-slate-400"><span class="awaiting-series-file-count">{{ item.count }}</span> file(s){% if item.volumes %} · vol {{ item.volumes|join(', ') }}{% endif %}
+                            <button type="button" data-series="{{ item.series|e }}" onclick="openManualMatch(this.dataset.series)" aria-label="Match {{ item.series|e }} to a series" class="px-2 py-0.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Match series</button>
+                        </span>
                     </div>
                     <ul class="mt-1.5 space-y-1">
                         {% for file in item.files %}
@@ -393,6 +397,12 @@
                 </h2>
                 <p class="text-xs text-slate-400 mt-0.5">
                     Location: <span class="font-mono text-slate-300">{{ staging_dir }}</span>. MangaTrax tags these files with ComicInfo.xml so Calibre and BookOrbit read metadata automatically.
+                </p>
+                <p class="text-[11px] text-slate-500 mt-1">
+                    Staging is the final hand-off: MangaTrax never writes into the Calibre library. Files stay here until
+                    Calibre/BookOrbit imports them; the next Calibre sync then marks their releases In Calibre. If you already
+                    imported a file, use <strong>Delete</strong> to remove the staging copy, or audit duplicates in
+                    <strong>Staging cleanup</strong> below.
                 </p>
             </div>
             <span class="text-xs text-slate-500"><span id="staging-file-count">{{ staging_files|length }}</span> CBZ file(s)</span>
