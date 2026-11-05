@@ -22,7 +22,7 @@ from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
-from app import background_tasks, downloads_inventory, downloads_reconcile, network_diagnostics, staging_duplicates, storage_health
+from app import background_tasks, download_failures, downloads_inventory, downloads_reconcile, network_diagnostics, staging_duplicates, storage_health
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
 from app.downloader.base import DownloaderError, parse_queued_handle_id
 from app.downloader.torbox import TorboxDownloader
@@ -2802,6 +2802,155 @@ def _prune_empty_parents(path: str, root: str) -> None:
             parent = os.path.dirname(parent)
     except (OSError, ValueError):
         return
+
+
+def _failure_file_path(row: Dict[str, Any], root: str) -> str:
+    relative = str(row.get("file_relative") or "").replace("\\", "/")
+    parts = [part for part in relative.split("/") if part]
+    if not parts or any(part == ".." for part in parts) or relative.startswith("/") or (len(relative) > 1 and relative[1] == ":"):
+        raise HTTPException(status_code=400, detail="recorded failure path is not downloads-relative")
+    path = os.path.join(root, relative.replace("/", os.sep))
+    if os.path.islink(path):
+        raise HTTPException(status_code=403, detail="symlinked files are not accepted")
+    try:
+        safe_path = security.ensure_path_within_roots(path, [root])
+    except security.UnsafePathError as exc:
+        raise HTTPException(status_code=403, detail=f"Rejected downloads path: {exc}") from exc
+    if not os.path.isfile(safe_path):
+        raise HTTPException(status_code=404, detail="the failed file no longer exists")
+    return safe_path
+
+
+@app.get("/api/downloads/failures")
+async def api_download_failures():
+    root = scheduler.get_downloads_dir(create=False)
+    rows = await asyncio.to_thread(download_failures.list_failures, db, root)
+    return JSONResponse({"status": "success", "failures": rows, "count": len(rows)})
+
+
+@app.post("/api/downloads/failures/scan")
+async def api_download_failures_scan():
+    root = scheduler.get_downloads_dir(create=False)
+
+    def _worker(reporter):
+        reporter.report(0, 0, "Scanning downloads for unreadable archives…", force=True)
+        stats = download_failures.scan_failures(db, root)
+        rows = download_failures.list_failures(db, root)
+        reporter.report(stats.get("checked", 0), stats.get("checked", 0),
+                        f"Checked {stats.get('checked', 0)} file(s); {stats.get('failed', 0)} failed",
+                        progress_pct=100.0, force=True)
+        return {"scan": stats, "failures": rows}
+
+    result, task = await asyncio.to_thread(
+        _recorded_task, "downloads:failures-scan", "Scan failed documents", _worker,
+        auth_module.get_current_actor(), None,
+    )
+    return JSONResponse({"status": "success", **result, "task_id": task["id"], "task": task})
+
+
+@app.post("/api/downloads/failures/{failure_id}/retry")
+async def api_download_failure_retry(failure_id: int):
+    row = await asyncio.to_thread(db.get_download_failure, failure_id)
+    if not row or str(row.get("status")) != "failed":
+        raise HTTPException(status_code=404, detail="Failed document not found")
+    root = scheduler.get_downloads_dir(create=False)
+    info = await asyncio.to_thread(download_failures.serialize_failure, db, row, root)
+    if not info.get("release_id"):
+        raise HTTPException(status_code=409, detail="No matching release for this file; correct the series/volume mapping first")
+    if not info.get("can_retry"):
+        raise HTTPException(status_code=409, detail=info.get("retry_reason") or "Matched release cannot be retried")
+    response = await api_release_download(int(info["release_id"]))
+    try:
+        body = json.loads(response.body) if hasattr(response, "body") else {}
+    except (TypeError, ValueError):
+        body = {}
+    if getattr(response, "status_code", 200) >= 400:
+        raise HTTPException(
+            status_code=409,
+            detail=body.get("message") or "Downloader rejected the retry",
+        )
+    db.mark_download_failure(failure_id, "retried", increments_attempt=True)
+    db.log_activity(
+        "DOWNLOAD_FAILURE_RETRIED",
+        f"Retried failed document '{info['file_relative']}' via release #{info['release_id']}",
+        json.dumps({"failure_id": failure_id, "release_id": info["release_id"], "engine": body.get("engine")}),
+    )
+    return JSONResponse({"status": "success", "failure_id": failure_id, "release_id": info["release_id"],
+                         "download": body, "state": release_download_state(db.get_release_by_id(int(info["release_id"])))})
+
+
+def _delete_failure_rows(rows: List[Dict[str, Any]], root: str) -> Dict[str, Any]:
+    deleted = skipped = failed = bytes_freed = 0
+    deleted_ids: List[int] = []
+    for row in rows:
+        failure_id = int(row.get("id") or 0)
+        try:
+            path = _failure_file_path(row, root)
+        except HTTPException as exc:
+            skipped += 1
+            if exc.status_code == 404:
+                try:
+                    db.mark_download_failure(failure_id, "deleted")
+                except Exception:
+                    pass
+            continue
+        try:
+            size = os.path.getsize(path)
+            os.remove(path)
+            deleted += 1
+            bytes_freed += size
+            deleted_ids.append(failure_id)
+            db.mark_download_failure(failure_id, "deleted")
+            db.log_activity(
+                "DOWNLOAD_FAILURE_DELETED",
+                f"Deleted failed document '{row.get('file_relative')}'",
+                json.dumps({"failure_id": failure_id, "relative": row.get("file_relative"), "size": size}),
+            )
+            _prune_empty_parents(path, root)
+        except OSError as exc:
+            failed += 1
+            logger.warning("Could not delete failed document %s: %s", path, exc)
+    return {"deleted": deleted, "skipped": skipped, "failed": failed, "bytes_freed": bytes_freed,
+            "deleted_ids": deleted_ids}
+
+
+@app.post("/api/downloads/failures/{failure_id}/delete")
+async def api_download_failure_delete(failure_id: int):
+    row = await asyncio.to_thread(db.get_download_failure, failure_id)
+    if not row or str(row.get("status")) != "failed":
+        raise HTTPException(status_code=404, detail="Failed document not found")
+    root = scheduler.get_downloads_dir(create=False)
+    # A single delete validates the recorded path and surfaces the error (traversal/
+    # symlink/vanished) instead of silently skipping it.
+    _failure_file_path(row, root)
+    result = await asyncio.to_thread(_delete_failure_rows, [row], root)
+    try:
+        await asyncio.to_thread(
+            downloads_reconcile.reconcile_missing_release_files,
+            db, root, _staging_dir_setting(), _calibre_series_snapshot(),
+        )
+    except Exception as exc:
+        logger.debug("Reconcile after failed-document delete failed: %s", exc)
+    remaining = len(await asyncio.to_thread(db.list_download_failures))
+    return JSONResponse({"status": "success", **result, "remaining": remaining})
+
+
+@app.post("/api/downloads/failures/delete-all")
+async def api_download_failures_delete_all(payload: Optional[Dict[str, Any]] = None):
+    body = payload or {}
+    if body.get("confirm") is not True:
+        raise HTTPException(status_code=400, detail="confirm must be true to delete all failed documents")
+    root = scheduler.get_downloads_dir(create=False)
+    rows = await asyncio.to_thread(db.list_download_failures)
+    result = await asyncio.to_thread(_delete_failure_rows, rows, root)
+    try:
+        await asyncio.to_thread(
+            downloads_reconcile.reconcile_missing_release_files,
+            db, root, _staging_dir_setting(), _calibre_series_snapshot(),
+        )
+    except Exception as exc:
+        logger.debug("Reconcile after failed-document bulk delete failed: %s", exc)
+    return JSONResponse({"status": "success", **result, "remaining": len(await asyncio.to_thread(db.list_download_failures))})
 
 
 @app.post("/api/downloads/files/delete")

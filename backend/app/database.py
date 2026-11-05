@@ -913,6 +913,26 @@ class MangaDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_torbox_pickups_status_created "
                 "ON torbox_manual_pickups(status, created_at);"
             )
+            # task-58: files that failed archive/tag/move processing.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS download_failures (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_relative TEXT NOT NULL UNIQUE,
+                    reason TEXT DEFAULT '',
+                    detected_type TEXT DEFAULT '',
+                    release_id INTEGER,
+                    series_name TEXT DEFAULT '',
+                    volumes_json TEXT DEFAULT '[]',
+                    attempts INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'failed',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_download_failures_status "
+                "ON download_failures(status, created_at);"
+            )
             # task-49: provider tags (AniList) for display + filtering.
             for table, column, ddl in (
                 ("manga_metadata_cache", "genres_json", "TEXT DEFAULT '[]'"),
@@ -1341,6 +1361,56 @@ class MangaDatabase:
             return (match, -item["count"], -item["rank"], norm)
         items.sort(key=sort_key)
         return items[:max(1, min(int(limit), 50))]
+
+    # --- Failed documents (task-58) ---
+    def record_download_failure(self, file_relative: str, reason: str, detected_type: str = "",
+                                series_name: str = "", volumes: Optional[List[float]] = None,
+                                release_id: Optional[int] = None) -> int:
+        with self.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO download_failures (file_relative, reason, detected_type, release_id, "
+                "series_name, volumes_json, attempts, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, 'failed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(file_relative) DO UPDATE SET reason = excluded.reason, "
+                "detected_type = excluded.detected_type, release_id = excluded.release_id, "
+                "series_name = excluded.series_name, volumes_json = excluded.volumes_json, "
+                "attempts = download_failures.attempts + 1, status = 'failed', "
+                "updated_at = CURRENT_TIMESTAMP;",
+                (str(file_relative), str(reason or "")[:2000], str(detected_type or ""),
+                 int(release_id) if release_id else None, str(series_name or ""),
+                 json.dumps(volumes or [])),
+            )
+            conn.commit()
+            row = conn.execute("SELECT id FROM download_failures WHERE file_relative = ?;", (str(file_relative),)).fetchone()
+            return int(row["id"]) if row else 0
+
+    def clear_download_failure(self, file_relative: str) -> None:
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM download_failures WHERE file_relative = ? AND status = 'failed';", (str(file_relative),))
+            conn.commit()
+
+    def mark_download_failure(self, failure_id: int, status: str,
+                              increments_attempt: bool = False) -> None:
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE download_failures SET status = ?, attempts = attempts + ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (str(status), 1 if increments_attempt else 0, int(failure_id)),
+            )
+            conn.commit()
+
+    def get_download_failure(self, failure_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM download_failures WHERE id = ?;", (int(failure_id),)).fetchone()
+        return dict(row) if row else None
+
+    def list_download_failures(self, status: str = "failed") -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM download_failures WHERE status = ? ORDER BY created_at ASC, id ASC;",
+                (str(status or "failed"),),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     # --- Torbox manual pickups (task-52) ---
     def create_torbox_manual_pickup(self, release_id: int, torrent_id: str, title: str,

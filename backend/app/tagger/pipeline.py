@@ -534,6 +534,14 @@ def process_downloads_to_staging(
     awaiting: Dict[str, Dict[str, Any]] = {}
     failed_files: List[str] = []
 
+    from app import download_failures as failure_records
+
+    def _record_failure(path: str, reason: str) -> None:
+        failure_records.record_pipeline_failure(db, downloads_root, path, reason)
+
+    def _clear_failure(path: str) -> None:
+        failure_records.clear_pipeline_success(db, downloads_root, path)
+
     for root, dirs, files in os.walk(downloads_dir):
         dirs.sort()
         for filename in sorted(files):
@@ -548,6 +556,7 @@ def process_downloads_to_staging(
                     logger.warning("Skipping symlinked downloads file: %s", source_path)
                     result["failed"] += 1
                     failed_files.append(filename)
+                    _record_failure(source_path, "symlinked downloads file")
                     continue
                 parsed = extract_manga_bundle_and_volumes(filename)
                 series_name = str(parsed.get("series_name") or "").strip()
@@ -570,10 +579,12 @@ def process_downloads_to_staging(
                 # "successful" tag on garbage bytes).
                 try:
                     existing_xml = cbz_tagger.read_comicinfo_xml(source_path)
+                    _clear_failure(source_path)
                 except cbz_tagger.UnreadableArchiveError as exc:
                     logger.warning("Unreadable archive '%s': %s", filename, exc)
                     result["failed"] += 1
                     failed_files.append(filename)
+                    _record_failure(source_path, str(exc))
                     continue
                 if existing_xml is None:
                     tagged = cbz_tagger.inject_comicinfo(source_path, metadata)
@@ -581,6 +592,7 @@ def process_downloads_to_staging(
                         logger.warning("Tagging failed; leaving '%s' in downloads.", filename)
                         result["failed"] += 1
                         failed_files.append(filename)
+                        _record_failure(source_path, "ComicInfo tagging failed")
                         continue
 
                 # Staging is FLAT: always the sanitised basename directly in the root.
@@ -607,6 +619,7 @@ def process_downloads_to_staging(
 
                 move_kind = _move_with_preference(source_path, dest_path)
                 result["tagged_and_moved"] += 1
+                _clear_failure(source_path)
                 try:
                     db.log_activity(
                         "TAGGED_AND_MOVED_TO_STAGING",
@@ -629,6 +642,7 @@ def process_downloads_to_staging(
                 )
                 result["failed"] += 1
                 failed_files.append(filename)
+                _record_failure(source_path, f"{type(exc).__name__}: {exc}")
 
     if staging_dir:
         _merge_flatten(flatten_staging_dir(staging_dir, db=db))
