@@ -59,6 +59,12 @@
                         <option value="include">Include</option>
                         <option value="exclude">Exclude</option>
                     </select>
+                    <select id="discovery-sort" onchange="changeDiscoverySort(this.value)" aria-label="Sort discovery" class="bg-slate-900 border border-slate-700 rounded-xl px-2 py-2 text-xs text-slate-200">
+                        <option value="post_date" {% if tag_sort == 'post_date' %}selected{% endif %}>Latest post</option>
+                        <option value="relevance" {% if tag_sort == 'relevance' %}selected{% endif %}>Relevance</option>
+                        <option value="newest" {% if tag_sort == 'newest' %}selected{% endif %}>Newest updated</option>
+                        <option value="series" {% if tag_sort == 'series' %}selected{% endif %}>Series A–Z</option>
+                    </select>
                     <button type="button" onclick="TagPicker.apply()" class="px-3 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold">Apply</button>
                     <button type="button" onclick="TagPicker.clear()" class="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold">Clear</button>
                 </div>
@@ -558,6 +564,12 @@
 </script>
 
 <script>
+function changeDiscoverySort(value) {
+    const params = new URLSearchParams(window.location.search);
+    params.set('sort', value || 'newest');
+    window.location.href = '/discovery?' + params.toString();
+}
+
 const TagPicker = (function () {
     let selected = { include: {{ include_tags|tojson }}, exclude: {{ exclude_tags|tojson }} };
     let suggestions = [];

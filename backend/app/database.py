@@ -530,6 +530,9 @@ class MangaDatabase:
             # timestamps so the UI can show real local progress.
             if "torbox_progress_json" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN torbox_progress_json TEXT DEFAULT '{}';")
+            # task-65: provider post date (latest release post sorting).
+            if "published_at" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN published_at TEXT DEFAULT '';")
             # Downloaded-file tracking (task-30): files fetched by an engine, when they
             # arrived, and when routing moved them out of the raw downloads folder.
             if "download_files_json" not in r_cols:
@@ -901,6 +904,13 @@ class MangaDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_background_tasks_status_started "
                 "ON background_tasks(status, started_at);"
             )
+            try:
+                cur.execute(
+                    "UPDATE releases SET published_at = created_at "
+                    "WHERE published_at IS NULL OR trim(published_at) = '';"
+                )
+            except Exception:
+                pass
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS torbox_manual_pickups (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2358,8 +2368,46 @@ class MangaDatabase:
             return cur.fetchone() is not None
 
     # --- Releases & Bundles ---
+    @staticmethod
+    def normalize_published_at(value: Any) -> str:
+        """Normalise provider post dates (Nyaa/RSS/ISO) to ISO-8601 UTC; '' if absent."""
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        from datetime import datetime, timezone
+        from email.utils import parsedate_to_datetime
+        import re as _re
+        try:
+            parsed = parsedate_to_datetime(text)
+            if parsed is not None:
+                return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            pass
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%d %b %Y %H:%M:%S"):
+            try:
+                parsed = datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+                return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+            except Exception:
+                continue
+        match = _re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", text)
+        if match:
+            try:
+                parsed = datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)), tzinfo=timezone.utc)
+                return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+            except Exception:
+                pass
+        return ""
+
     def upsert_release(self, rel: Dict[str, Any]) -> Tuple[bool, int]:
         guid = rel["guid"]
+        published_at = self.normalize_published_at(rel.get("published_at") or rel.get("pub_date"))
         vols_json = json.dumps(rel.get("volumes") or [])
         missing_json = json.dumps(rel.get("missing_volumes") or [])
         from app.parser import is_complete_series_release
@@ -2412,6 +2460,7 @@ class MangaDatabase:
                         revision = CASE WHEN COALESCE(?, 0) > COALESCE(revision, 0) THEN ? ELSE revision END,
                         publisher = CASE WHEN ? != '' THEN ? ELSE publisher END,
                         inferred_volumes = CASE WHEN ? = 1 THEN 1 ELSE inferred_volumes END,
+                        published_at = CASE WHEN ? != '' THEN ? ELSE published_at END,
                         status = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?;
@@ -2441,6 +2490,8 @@ class MangaDatabase:
                     publisher,
                     publisher,
                     inferred_val,
+                    published_at,
+                    published_at,
                     resolved_status,
                     rel_id
                 ))
@@ -2453,8 +2504,8 @@ class MangaDatabase:
                         guid, title, series_name, release_group, release_groups_json, description, mangaupdates_url,
                         is_bundle, is_complete, volume_start, volume_end, volumes_json, missing_vols_json,
                         download_url, link, cover_url, source_feed_name, status, download_status, torrent_hash,
-                        revision, publisher, inferred_volumes
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        revision, publisher, inferred_volumes, published_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     guid,
                     rel["title"],
@@ -2479,6 +2530,7 @@ class MangaDatabase:
                     revision,
                     publisher,
                     inferred_val,
+                    published_at or None,
                 ))
                 rel_id = cur.lastrowid
                 conn.commit()
@@ -2806,8 +2858,16 @@ class MangaDatabase:
         }
 
     def get_releases(self, status: Optional[str] = None, limit: int = 500, offset: int = 0,
-                     search: Optional[str] = None) -> List[Dict[str, Any]]:
+                     search: Optional[str] = None, sort: str = "updated") -> List[Dict[str, Any]]:
         media_guard = tracked_media_clause()
+        if sort == "post_date":
+            order_clause = ("COALESCE(NULLIF(trim(published_at), ''), created_at, updated_at) DESC, "
+                            "updated_at DESC, id DESC")
+        elif sort == "series":
+            order_clause = "lower(COALESCE(NULLIF(series_name, ''), title)) ASC, updated_at DESC, id DESC"
+        else:
+            order_clause = ("CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 "
+                            "WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END, updated_at DESC, id DESC")
         search_clause = ""
         search_params: List[Any] = []
         if search and str(search).strip():
@@ -2829,12 +2889,12 @@ class MangaDatabase:
                       AND status NOT IN ('BLACKLISTED', 'IGNORED')
                       AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                       AND {media_guard}{search_clause}
-                    ORDER BY updated_at DESC LIMIT ? OFFSET ?;
+                    ORDER BY {order_clause} LIMIT ? OFFSET ?;
                 """, (*search_params, limit, offset))
             elif status:
                 cur.execute(
                     f"SELECT * FROM releases WHERE status = ? AND {media_guard}{search_clause} "
-                    "ORDER BY updated_at DESC LIMIT ? OFFSET ?;",
+                    f"ORDER BY {order_clause} LIMIT ? OFFSET ?;",
                     (status, *search_params, limit, offset),
                 )
             else:
@@ -2843,9 +2903,7 @@ class MangaDatabase:
                     WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
                       AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                       AND {media_guard}{search_clause}
-                    ORDER BY 
-                        CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
-                        updated_at DESC 
+                    ORDER BY {order_clause}
                     LIMIT ? OFFSET ?;
                 """, (*search_params, limit, offset))
             rows = [dict(r) for r in cur.fetchall()]
@@ -3077,6 +3135,9 @@ class MangaDatabase:
                 order_clause = "ORDER BY tag_match_count DESC, updated_at DESC, id DESC"
             elif sort == "series":
                 order_clause = "ORDER BY lower(coalesce(series_name, title)) ASC, updated_at DESC, id DESC"
+            elif sort == "post_date":
+                order_clause = ("ORDER BY COALESCE(NULLIF(trim(published_at), ''), created_at, "
+                                "updated_at) DESC, id DESC")
             else:
                 order_clause = "ORDER BY updated_at DESC, id DESC"
 
@@ -3862,7 +3923,8 @@ class MangaDatabase:
         prioritized_only: bool = False,
         limit: Optional[int] = None,
         offset: int = 0,
-        search: Optional[str] = None
+        search: Optional[str] = None,
+        sort: str = "updated"
     ) -> List[Dict[str, Any]]:
         """
         Groups releases under canonical series, aggregating all bundle volumes,
@@ -3876,7 +3938,7 @@ class MangaDatabase:
         maintenance entry point :meth:`reconcile_release_volume_state`.
         """
         groups, _persisted = self._build_grouped_releases(
-            status=status,
+            status=status, sort=sort,
             prioritized_only=prioritized_only,
             limit=limit,
             offset=offset,
@@ -3907,7 +3969,8 @@ class MangaDatabase:
         limit: Optional[int] = None,
         offset: int = 0,
         search: Optional[str] = None,
-        persist: bool = False
+        persist: bool = False,
+        sort: str = "updated"
     ) -> Tuple[List[Dict[str, Any]], int]:
         from app.parser import normalize_text, split_series_candidate_parts
         try:
@@ -3919,7 +3982,7 @@ class MangaDatabase:
             staged_map = {}
             staged_volumes_for = None
 
-        cache_key = f"{status}_{prioritized_only}"
+        cache_key = f"{status}_{prioritized_only}_{sort}"
         now = time.time()
         if not persist and not search and cache_key in self._grouped_cache:
             cached_time, cached_data = self._grouped_cache[cache_key]
@@ -4398,6 +4461,21 @@ class MangaDatabase:
                 return (priority, -(g.get("prioritized_priority") or 0), g["series_name"].lower())
 
             result_groups.sort(key=sort_key)
+            if sort == "post_date":
+                def _group_post(g):
+                    values = [
+                        str(r.get("published_at") or r.get("created_at") or r.get("updated_at") or "")
+                        for r in (g.get("releases") or [])
+                    ]
+                    return max(values) if values else ""
+                result_groups.sort(key=_group_post, reverse=True)
+                for group in result_groups:
+                    group["releases"].sort(
+                        key=lambda r: str(r.get("published_at") or r.get("created_at") or r.get("updated_at") or ""),
+                        reverse=True,
+                    )
+            elif sort == "series":
+                result_groups.sort(key=lambda g: g["series_name"].lower())
 
             if not persist and not search:
                 self._grouped_cache[cache_key] = (now, list(result_groups))

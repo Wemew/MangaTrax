@@ -72,6 +72,11 @@
         <i data-lucide="search" class="w-4 h-4 text-slate-400"></i>
         <input type="text" id="releaseSearchInput" oninput="handleReleaseSearch()" placeholder="Search series, title, or release group..." 
                class="bg-transparent border-0 text-sm text-slate-100 placeholder-slate-500 focus:outline-none w-full">
+        <select id="release-sort-select" onchange="changeReleaseSort(this.value)" aria-label="Sort releases" title="Sort releases" class="bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-brand-500">
+            <option value="updated" {% if (sort or 'updated') == 'updated' %}selected{% endif %}>Recently updated</option>
+            <option value="post_date" {% if sort == 'post_date' %}selected{% endif %}>Latest release post</option>
+            <option value="series" {% if sort == 'series' %}selected{% endif %}>Series A–Z</option>
+        </select>
         <span id="matchCounter" class="text-xs text-slate-500 font-mono whitespace-nowrap"></span>
     </div>
 
@@ -184,6 +189,7 @@
 const currentStatus = "{{ current_status or '' }}";
 const currentView = "{{ current_view or 'series' }}";
 let currentSearch = "";
+let currentSort = "{{ sort if sort in ('post_date', 'updated', 'series') else 'updated' }}";
 let _releaseSearchTimer = null;
 
 // Server-rendered totals: the Load More control is present from first paint and only
@@ -268,6 +274,20 @@ function handleReleaseSearch() {
     }, 300);
 }
 
+function changeReleaseSort(value) {
+    currentSort = (value === 'post_date' || value === 'series') ? value : 'updated';
+    const url = new URL(window.location.href);
+    url.searchParams.set('sort', currentSort);
+    window.history.replaceState({}, '', url);
+    resetReleasePagination();
+    const seriesContainer = document.getElementById('seriesGroupContainer');
+    const flatBody = document.getElementById('flatTableBody');
+    if (seriesContainer) seriesContainer.innerHTML = '';
+    if (flatBody) flatBody.innerHTML = '';
+    if (currentView === 'flat') fetchNextFlatBatch();
+    else fetchNextSeriesBatch();
+}
+
 async function showAllSeriesReleases(button) {
     const seriesKey = button.dataset.seriesKey;
     const total = parseInt(button.dataset.total || '0', 10);
@@ -325,7 +345,7 @@ async function fetchNextSeriesBatch() {
     updateLoadMoreUi();
 
     try {
-        const url = `/api/releases/cards?status=${encodeURIComponent(currentStatus)}&offset=${seriesOffset}&limit=${seriesLimit}&search=${encodeURIComponent(currentSearch)}`;
+        const url = `/api/releases/cards?status=${encodeURIComponent(currentStatus)}&offset=${seriesOffset}&limit=${seriesLimit}&search=${encodeURIComponent(currentSearch)}&sort=${encodeURIComponent(currentSort)}`;
         const res = await fetch(url);
         const data = await res.json();
 
@@ -399,7 +419,7 @@ async function fetchNextFlatBatch() {
     updateLoadMoreUi();
 
     try {
-        const url = `/api/releases/flat_rows?status=${encodeURIComponent(currentStatus)}&offset=${flatOffset}&limit=${flatLimit}&search=${encodeURIComponent(currentSearch)}`;
+        const url = `/api/releases/flat_rows?status=${encodeURIComponent(currentStatus)}&offset=${flatOffset}&limit=${flatLimit}&search=${encodeURIComponent(currentSearch)}&sort=${encodeURIComponent(currentSort)}`;
         const res = await fetch(url);
         const data = await res.json();
 

@@ -1180,7 +1180,7 @@ async def series_view(request: Request):
     )
 
 @app.get("/releases", response_class=HTMLResponse)
-async def releases_view(request: Request, status: Optional[str] = None, view: str = Query("series")):
+async def releases_view(request: Request, status: Optional[str] = None, view: str = Query("series"), sort: str = Query("updated")):
     # Instant page response: page shell renders in <10ms and lazy loads series dynamically.
     # The total is rendered up front so the Load More control exists from first paint
     # (disabled while the first batch loads) instead of appearing after a round-trip.
@@ -1202,6 +1202,7 @@ async def releases_view(request: Request, status: Optional[str] = None, view: st
             "current_status": status,
             "current_view": view,
             "initial_total": initial_total,
+            "sort": sort if sort in ("post_date", "updated", "series") else "updated",
         }
     )
 
@@ -1380,11 +1381,13 @@ async def api_releases_cards(
     status: Optional[str] = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(8, ge=1, le=50),
-    search: Optional[str] = Query(None)
+    search: Optional[str] = Query(None),
+    sort: str = Query("updated")
 ):
     clean_s = search.strip() if search else None
+    clean_sort = sort if sort in ("post_date", "updated", "series") else "updated"
     groups = _cap_group_releases(
-        db.get_releases_grouped_by_series(status=status, limit=limit, offset=offset, search=clean_s)
+        db.get_releases_grouped_by_series(status=status, limit=limit, offset=offset, search=clean_s, sort=clean_sort)
     )
     total = db.count_releases_grouped_by_series(status=status, search=clean_s)
     has_more = (offset + len(groups)) < total
@@ -1406,11 +1409,13 @@ async def api_prioritized_cards(
     status: Optional[str] = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(8, ge=1, le=50),
-    search: Optional[str] = Query(None)
+    search: Optional[str] = Query(None),
+    sort: str = Query("updated")
 ):
     clean_s = search.strip() if search else None
+    clean_sort = sort if sort in ("post_date", "updated", "series") else "updated"
     groups = _cap_group_releases(
-        db.get_releases_grouped_by_series(status=status, prioritized_only=True, limit=limit, offset=offset, search=clean_s)
+        db.get_releases_grouped_by_series(status=status, prioritized_only=True, limit=limit, offset=offset, search=clean_s, sort=clean_sort)
     )
     total = db.count_releases_grouped_by_series(status=status, prioritized_only=True, search=clean_s)
     has_more = (offset + len(groups)) < total
@@ -1432,10 +1437,12 @@ async def api_releases_flat_rows(
     status: Optional[str] = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
-    search: Optional[str] = Query(None)
+    search: Optional[str] = Query(None),
+    sort: str = Query("updated")
 ):
     clean_search = search.strip() if search else None
-    releases = db.get_releases(status=status, limit=limit, offset=offset, search=clean_search)
+    clean_sort = sort if sort in ("post_date", "updated", "series") else "updated"
+    releases = db.get_releases(status=status, limit=limit, offset=offset, search=clean_search, sort=clean_sort)
     total = db.count_releases(status=status, search=clean_search)
     seen_sigs = set()
     deduped = []
@@ -1576,7 +1583,7 @@ async def discovery_view(
     include_list = [item.strip() for item in (include_tags or "").split(",") if item.strip()]
     exclude_list = [item.strip() for item in (exclude_tags or "").split(",") if item.strip()]
     clean_match = tag_match if tag_match in ("any", "all") else "any"
-    clean_sort = sort if sort in ("relevance", "newest", "series") else "newest"
+    clean_sort = sort if sort in ("relevance", "newest", "series", "post_date") else "newest"
     total_count = db.count_discovery_releases(
         search=clean_q, include_tags=include_list, exclude_tags=exclude_list, tag_match=clean_match,
     )

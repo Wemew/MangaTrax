@@ -3583,6 +3583,7 @@ class MangaScheduler:
                         "description": desc,
                         "mangaupdates_url": mu_url,
                         "source_feed_name": feed_name,
+                        "published_at": getattr(rel, "pub_date", None),
                         "status": status,
                         "download_status": "IDLE"
                     }
@@ -4049,6 +4050,7 @@ class MangaScheduler:
             "description": desc,
             "mangaupdates_url": mu_url,
             "source_feed_name": feed_name,
+            "published_at": getattr(rel, "pub_date", None),
             "status": status,
             "download_status": "IDLE"
         }
