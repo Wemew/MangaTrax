@@ -510,6 +510,7 @@ def process_downloads_to_staging(
         "skipped_existing": 0,
         "conflicts_renamed": 0,
         "series_awaiting": [],
+        "processed": [],
         "flattened": 0,
         "flatten_skipped_existing": 0,
         "flatten_conflicts_renamed": 0,
@@ -619,6 +620,15 @@ def process_downloads_to_staging(
 
                 move_kind = _move_with_preference(source_path, dest_path)
                 result["tagged_and_moved"] += 1
+                result["processed"].append({
+                    "source": source_path,
+                    "destination": dest_path,
+                    "filename": filename,
+                    "series_name": metadata.get("series_name") or series_name,
+                    "volume": metadata.get("volume"),
+                    "volumes": parsed.get("volumes") or [],
+                    "move": move_kind,
+                })
                 _clear_failure(source_path)
                 try:
                     db.log_activity(

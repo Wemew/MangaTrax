@@ -92,8 +92,8 @@ def test_endpoint_source_guard():
     scheduler_source = _source(SCHEDULER_SOURCE)
     assert "def start_feed_check" in scheduler_source
     assert "def get_feed_check_status" in scheduler_source
-    wrapper_start = scheduler_source.index("    def check_all_feeds(self)")
-    wrapper = scheduler_source[wrapper_start:wrapper_start + 700]
+    wrapper_start = scheduler_source.index("    def check_all_feeds(self")
+    wrapper = scheduler_source[wrapper_start:wrapper_start + 900]
     assert "_feed_check_lock.acquire(blocking=False)" in wrapper, wrapper
     print("    [PASSED] poll runs on a daemon thread; routes only start/query it.")
 
@@ -116,7 +116,7 @@ def test_start_feed_check_is_async():
             "skipped": False,
         }
 
-        def slow_poll():
+        def slow_poll(*args, **kwargs):
             time.sleep(0.5)
             return payload
 
@@ -154,7 +154,7 @@ def test_feed_check_crash_surfaced():
     print("--> Testing background poll crash is surfaced...")
     ctx = _Ctx()
     try:
-        def broken_poll():
+        def broken_poll(*args, **kwargs):
             raise RuntimeError("nyaa exploded")
 
         ctx.scheduler.check_all_feeds = broken_poll
@@ -275,7 +275,7 @@ def test_routes_end_to_end():
 
     ctx = E2ETestContext(prefix="mangatrax_feedpoll_http_")
     try:
-        def failing_poll():
+        def failing_poll(*args, **kwargs):
             time.sleep(0.2)
             return {
                 "success": False,

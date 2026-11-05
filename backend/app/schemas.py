@@ -664,6 +664,8 @@ class SettingsUpdateRequest(BaseModel):
     backfill_delay_seconds: Optional[str] = Field(default=None, max_length=20)
     app_timezone: Optional[str] = Field(default=None, max_length=100)
     discord_webhook_url: Optional[str] = Field(default=None, max_length=security.MAX_URL_LENGTH)
+    webhook_feed_scan_notifications: Optional[str] = Field(default=None, max_length=20)
+    webhook_processed_notifications: Optional[str] = Field(default=None, max_length=20)
     apprise_url: Optional[str] = Field(default=None, max_length=security.MAX_URL_LENGTH)
     # Context-guarded discard of marker-less chapter releases (default true).
     # Previously env-var only (MANGATRAX_DISCARD_UNMARKED_CHAPTERS); exposing it

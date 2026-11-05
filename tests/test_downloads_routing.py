@@ -119,6 +119,7 @@ def test_series_known_tags_and_moves():
         source = os.path.join(ctx.downloads, "nested", "Known Series Vol. 02.cbz")
         _make_cbz(source)
         result = ctx.run(templates=KNOWN_TEMPLATE)
+        assert result.pop("processed", None) is not None, "processed list should be recorded"
         assert result == {
             "scanned": 1, "tagged_and_moved": 1, "awaiting_calibre": 0,
             "failed": 0, "skipped_existing": 0, "conflicts_renamed": 0,
@@ -394,6 +395,7 @@ def test_idempotent_and_staging_untouched():
         first = ctx.run(templates=KNOWN_TEMPLATE)
         assert first["scanned"] == 1 and first["tagged_and_moved"] == 1, first
         second = ctx.run(templates=KNOWN_TEMPLATE)
+        assert second.pop("processed", None) == []
         assert second == {
             "scanned": 0, "tagged_and_moved": 0, "awaiting_calibre": 0,
             "failed": 0, "skipped_existing": 0, "conflicts_renamed": 0,

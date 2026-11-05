@@ -416,6 +416,20 @@
                     <p class="text-[11px] text-slate-500 mt-1">Sends JSON event payloads for Gotify, Ntfy, Home Assistant, or Apprise.</p>
                 </div>
 
+                <div class="flex items-start gap-2.5">
+                    <input type="checkbox" id="setting-webhook-feed-scan" {% if settings.webhook_feed_scan_notifications != 'false' %}checked{% endif %} class="mt-0.5 rounded border-slate-700 bg-slate-900 text-brand-500 focus:ring-0">
+                    <div>
+                        <label for="setting-webhook-feed-scan" class="text-xs font-semibold text-white">Notify on automatic feed scans</label>
+                        <p class="text-[11px] text-slate-400">Sends one summary after each automatic (scheduled) feed poll: found/requested/sent, new/transitions and first provider errors. Manual Poll Feeds stays silent.</p>
+                    </div>
+                </div>
+                <div class="flex items-start gap-2.5">
+                    <input type="checkbox" id="setting-webhook-processed" {% if settings.webhook_processed_notifications != 'false' %}checked{% endif %} class="mt-0.5 rounded border-slate-700 bg-slate-900 text-brand-500 focus:ring-0">
+                    <div>
+                        <label for="setting-webhook-processed" class="text-xs font-semibold text-white">Notify when a downloaded series is processed</label>
+                        <p class="text-[11px] text-slate-400">Sends one notification per series+volume group after files are successfully tagged and moved to staging (files capped, staging destination included).</p>
+                    </div>
+                </div>
                 <div id="webhook-test-result" class="hidden p-3 rounded-xl text-xs font-mono"></div>
             </div>
         </div>
@@ -992,6 +1006,8 @@ async function saveSettings(e) {
         backfill_max_pages: document.getElementById('setting-backfill-pages').value,
         backfill_delay_seconds: document.getElementById('setting-backfill-delay').value,
         app_timezone: document.getElementById('setting-timezone').value.trim() || 'Europe/Copenhagen',
+        webhook_feed_scan_notifications: document.getElementById('setting-webhook-feed-scan').checked ? 'true' : 'false',
+        webhook_processed_notifications: document.getElementById('setting-webhook-processed').checked ? 'true' : 'false',
         discord_webhook_url: document.getElementById('setting-discord-url').value.trim(),
         apprise_url: document.getElementById('setting-apprise-url').value.trim(),
         nyaa_base_url: document.getElementById('setting-nyaa-base-url').value.trim(),

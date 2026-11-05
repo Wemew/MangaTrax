@@ -2406,6 +2406,7 @@ def _match_awaiting_series(
             actor=actor,
         )
         moved = int(route_result.get("tagged_and_moved") or 0)
+        scheduler.notify_processed_batches(route_result)
     except Exception as exc:
         logger.warning("Routing after manual series match failed for '%s': %s", source, exc)
     db.log_activity(

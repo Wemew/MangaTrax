@@ -1316,6 +1316,62 @@ class MangaScheduler:
                 logger.warning("Could not create downloads_dir '%s': %s", path, exc)
         return path
 
+    def _notify_feed_scan_result(self, result: Dict[str, Any]) -> None:
+        try:
+            if str(self.db.get_setting("webhook_feed_scan_notifications", "true")).lower() == "false":
+                return
+            from datetime import datetime as _datetime
+            self.get_notifier().notify_feed_scan(
+                result or {}, trigger="auto",
+                finished_at=_datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            )
+        except Exception as exc:
+            logger.debug("Feed scan notification failed: %s", exc)
+
+    def notify_processed_batches(self, result: Dict[str, Any]) -> None:
+        """Send one notification per series+volume group after tag/move."""
+        try:
+            if str(self.db.get_setting("webhook_processed_notifications", "true")).lower() == "false":
+                return
+            items = (result or {}).get("processed") or []
+            if not items:
+                return
+            tracked = []
+            try:
+                tracked = self.db.get_tracked_downloads(limit=500)
+            except Exception:
+                tracked = []
+            groups: Dict[Any, Dict[str, Any]] = {}
+            for item in items:
+                series = str(item.get("series_name") or "Unknown Series")
+                volumes = sorted({round(float(value), 2) for value in (item.get("volumes") or [])})
+                key = (normalize_text(series), tuple(volumes))
+                group = groups.setdefault(key, {
+                    "series_name": series, "volumes": volumes, "files": [], "destination": "",
+                    "release_id": None, "title": "",
+                })
+                if item.get("filename"):
+                    group["files"].append(str(item["filename"]))
+                group["destination"] = group["destination"] or str(item.get("destination") or "")
+                if not group["release_id"] and tracked:
+                    matched = downloads_inventory._match_release(
+                        str(item.get("source") or ""), str(item.get("filename") or ""), tracked,
+                    )
+                    if matched:
+                        for release in tracked:
+                            if str(release.get("title") or "") == str(matched.get("title") or ""):
+                                group["release_id"] = release.get("id")
+                                group["title"] = str(release.get("title") or "")
+                                break
+            notifier = self.get_notifier()
+            for group in groups.values():
+                try:
+                    notifier.notify_download_processed(group)
+                except Exception as exc:
+                    logger.debug("Processed-group notification failed: %s", exc)
+        except Exception as exc:
+            logger.debug("Processed notifications failed: %s", exc)
+
     def process_downloads_to_staging(self, actor: Optional[str] = "scheduler") -> Dict[str, Any]:
         """Tag+move downloads whose series exists in Calibre into staging.
 
@@ -1330,6 +1386,7 @@ class MangaScheduler:
             result = downloads_pipeline.process_downloads_to_staging(
                 downloads_dir, staging_dir, series_templates, self.db, actor=actor,
             )
+            self.notify_processed_batches(result)
             try:
                 self.db.set_setting("downloads_routing_summary", json.dumps(result))
             except Exception:
@@ -3244,7 +3301,7 @@ class MangaScheduler:
             "skipped": skipped,
         }
 
-    def check_all_feeds(self) -> Dict[str, Any]:
+    def check_all_feeds(self, trigger: str = "manual") -> Dict[str, Any]:
         """Poll all enabled feeds (BLOCKING; call from a worker thread, never the event loop).
 
         A concurrent call (manual "Poll Feeds" while the interval poll runs, or a
@@ -3256,7 +3313,10 @@ class MangaScheduler:
             logger.info(message)
             return self._feed_check_payload(True, message, skipped=True)
         try:
-            return self._check_all_feeds_locked()
+            result = self._check_all_feeds_locked()
+            if trigger == "auto":
+                self._notify_feed_scan_result(result)
+            return result
         finally:
             self._feed_check_lock.release()
 
@@ -3286,7 +3346,8 @@ class MangaScheduler:
         """Run the blocking poll, shield crashes, and publish the result for the UI."""
         result: Dict[str, Any]
         try:
-            result = self.check_all_feeds()
+            # Manual UI polls stay silent (notifications are for automatic scans only).
+            result = self.check_all_feeds(trigger="manual")
         except Exception as exc:  # pragma: no cover - defensive outer shield
             logger.error("Background feed check crashed: %s", exc)
             self._log_activity("FEED_ERROR", f"Background feed check crashed: {exc}")
@@ -5085,7 +5146,7 @@ class MangaScheduler:
 
                 # Check Feeds
                 if now - last_feed_check >= feed_int:
-                    self.check_all_feeds()
+                    self.check_all_feeds(trigger="auto")
                     last_feed_check = time.time()
 
                 # Check complete series volume expansion every 5 minutes

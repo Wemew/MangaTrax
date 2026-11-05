@@ -726,6 +726,8 @@ class MangaDatabase:
                     "downloads_dir": os.getenv("DOWNLOADS_DIR", "/downloads"),
                     "auto_download": "true",
                     "auto_tag": "true",
+                    "webhook_feed_scan_notifications": "true",
+                    "webhook_processed_notifications": "true",
                     # Context-guarded discard of marker-less chapter releases
                     # ("Chainsaw Man 180" as opposed to "Chainsaw Man Vol. 180").
                     # Default on; operators can turn it off without a code change.

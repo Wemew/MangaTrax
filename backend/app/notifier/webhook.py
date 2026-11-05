@@ -149,6 +149,71 @@ class NotificationService:
         )
         self._send_generic({"event": "ACQUIRED", "release": self._release_payload(release)})
 
+    def notify_feed_scan(self, result: Dict[str, Any], trigger: str = "auto",
+                         finished_at: Optional[str] = None):
+        """Notify about an automatic feed scan (manual polls stay silent at the caller)."""
+        scan = dict(result or {})
+        found = int(scan.get("releases_found") or 0)
+        requested = int(scan.get("requested") or 0)
+        sent = int(scan.get("sent_to_downloader") or 0)
+        new = int(scan.get("new_releases") or 0)
+        transitions = int(scan.get("transitions") or 0)
+        failed = int(scan.get("feeds_failed") or 0)
+        errors = scan.get("errors") or []
+        error_lines = []
+        for item in errors[:3]:
+            if isinstance(item, dict):
+                error_lines.append(f"{item.get('feed') or 'feed'}: {str(item.get('error') or '')[:200]}")
+            else:
+                error_lines.append(str(item)[:200])
+        fields = [
+            {"name": "Found", "value": str(found), "inline": True},
+            {"name": "Requested", "value": str(requested), "inline": True},
+            {"name": "Sent to downloader", "value": str(sent), "inline": True},
+            {"name": "New", "value": str(new), "inline": True},
+            {"name": "Transitions", "value": str(transitions), "inline": True},
+        ]
+        if failed:
+            fields.append({"name": "Feed failures", "value": str(failed), "inline": True})
+        if error_lines:
+            fields.append({"name": "First errors", "value": "\n".join(error_lines)[:900], "inline": False})
+        self._send_discord(
+            title=f"🔄 Feed scan complete — {found} found, {requested} requested, {sent} sent",
+            description=f"Automatic feed scan ({trigger}). " + (", ".join(error_lines) if error_lines else "No provider errors."),
+            fields=fields, color=0x3b82f6,
+        )
+        self._send_generic({
+            "event": "FEED_SCAN", "trigger": str(trigger or "auto"),
+            "finished_at": finished_at or "", "scan": scan,
+        })
+
+    def notify_download_processed(self, processed: Dict[str, Any]):
+        """Notify that a downloaded group was tagged and moved to staging."""
+        item = dict(processed or {})
+        series = str(item.get("series_name") or "Unknown Series")
+        volumes = item.get("volumes") or []
+        vol_text = ", ".join(str(value) for value in volumes) if volumes else "unknown"
+        files = [str(value) for value in (item.get("files") or [])]
+        shown = files[:10]
+        file_text = "\n".join(shown) if shown else "(no filenames recorded)"
+        if len(files) > len(shown):
+            file_text += f"\n… and {len(files) - len(shown)} more"
+        fields = [
+            {"name": "Series", "value": series, "inline": True},
+            {"name": "Volumes", "value": vol_text, "inline": True},
+        ]
+        if item.get("release_id"):
+            fields.append({"name": "Release", "value": f"#{item['release_id']} {item.get('title') or ''}"[:200], "inline": True})
+        if item.get("destination"):
+            fields.append({"name": "Staging destination", "value": str(item["destination"])[:900], "inline": False})
+        fields.append({"name": "Files", "value": file_text[:900], "inline": False})
+        self._send_discord(
+            title=f"✅ Downloaded & processed: {series} v{vol_text}",
+            description=f"{len(files)} file(s) tagged and moved to staging.",
+            fields=fields, color=0x10b981,
+        )
+        self._send_generic({"event": "DOWNLOAD_PROCESSED", "processed": item})
+
     def _send_discord(self, title: str, description: str, url: Optional[str] = None, image_url: Optional[str] = None, fields: Optional[list] = None, color: int = 0xf59e0b):
         if not self.discord_webhook:
             return
