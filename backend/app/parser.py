@@ -1,8 +1,11 @@
+import logging
 import re
 import math
 import unicodedata
 from typing import Optional, List, Dict, Any, Tuple, Iterable, Set
 from difflib import SequenceMatcher
+
+_SERIES_MATCH_LOGGER = logging.getLogger("mangatrax.series_match")
 
 def normalize_text(text: str) -> str:
     """Normalize text for consistent comparison: lowercase, unicode NFKD, strip punctuation."""
@@ -1683,6 +1686,40 @@ def _series_trigrams(norm: str) -> Set[str]:
     return {norm[index:index + 3] for index in range(len(norm) - 2)}
 
 
+_MATCH_STOPWORDS = {
+    "the", "a", "an", "of", "in", "on", "at", "to", "and", "or", "is", "are",
+    "be", "becomes", "became", "with", "for", "as", "its", "it", "this", "that",
+    "another", "world", "new", "my", "his", "her", "their", "our", "from", "by",
+}
+
+
+def _fuzzy_head_tokens(text: str, limit: int = 2) -> List[str]:
+    tokens = [token for token in normalize_text(text).split() if token]
+    meaningful = [token for token in tokens if token not in _MATCH_STOPWORDS and not token.isdigit()]
+    return meaningful[:limit]
+
+
+def _fuzzy_title_head_agrees(query: str, candidate: str) -> bool:
+    """Reject fuzzy similarity that comes only from a shared generic suffix.
+
+    A legitimate fuzzy match (typo/subtitle) shares a distinctive leading title
+    token; "The Red Ranger Becomes an Adventurer in Another World" vs
+    "Level 0 Demon King Becomes an Adventurer in Another World" shares only the
+    generic tail and must not match.
+    """
+    q_heads = _fuzzy_head_tokens(query)
+    c_heads = _fuzzy_head_tokens(candidate)
+    if not q_heads or not c_heads:
+        return False
+    for left in q_heads:
+        for right in c_heads:
+            if left == right:
+                return True
+            if SequenceMatcher(None, left, right).ratio() >= 0.80:
+                return True
+    return False
+
+
 class CalibreSeriesIndex:
     """Precomputed lookup index over a Calibre series list (built ONCE per sync).
 
@@ -1838,13 +1875,31 @@ class CalibreSeriesIndex:
         # 3. Fuzzy similarity on plausible candidates only (see _fuzzy_candidates).
         best_match = None
         best_score = threshold
+        rejected = []
         for norm_cand in norm_parts:
             for index in self._fuzzy_candidates(norm_cand, threshold):
                 score = SequenceMatcher(None, norm_cand, self._entries[index][0]).ratio()
-                if score > best_score:
-                    best_score = score
-                    best_match = self._entries[index][1]
-
+                if score <= best_score:
+                    continue
+                candidate_norm = self._entries[index][0]
+                if not _fuzzy_title_head_agrees(norm_cand, candidate_norm):
+                    rejected.append((round(score, 3), candidate_norm))
+                    continue
+                best_score = score
+                best_match = self._entries[index][1]
+        if rejected:
+            _SERIES_MATCH_LOGGER.info(
+                "Rejected fuzzy series match for '%s': shared generic suffix only "
+                "(best rejected candidate(s): %s).",
+                extracted_series, rejected[:3],
+            )
+        if best_match:
+            _SERIES_MATCH_LOGGER.info(
+                "Accepted fuzzy series match for '%s' -> '%s' (score %.3f).",
+                extracted_series,
+                best_match.get("series_name") or best_match.get("name") or "",
+                best_score,
+            )
         return best_match
 
 

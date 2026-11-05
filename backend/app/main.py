@@ -22,7 +22,7 @@ from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
-from app import background_tasks, download_failures, downloads_inventory, downloads_inventory_cleanup, downloads_reconcile, network_diagnostics, staging_duplicates, staging_groups, storage_health
+from app import background_tasks, download_failures, downloads_inventory, downloads_inventory_cleanup, downloads_reconcile, false_series_matches, network_diagnostics, staging_duplicates, staging_groups, storage_health
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
 from app.downloader.base import DownloaderError, parse_queued_handle_id
 from app.downloader.torbox import TorboxDownloader
@@ -2456,6 +2456,49 @@ async def api_suspicious_volume_ranges():
     result, task = await asyncio.to_thread(
         _recorded_task, "audit:volume-ranges", "Audit suspicious volume ranges",
         lambda reporter: db.audit_suspicious_volume_ranges(progress=reporter.report),
+        auth_module.get_current_actor(), None,
+    )
+    return JSONResponse({**result, "task_id": task["id"], "task": task})
+
+
+@app.post("/api/maintenance/false-series/audit")
+async def api_false_series_audit():
+    snapshot = await asyncio.to_thread(_calibre_series_snapshot)
+    if not snapshot:
+        snapshot = await asyncio.to_thread(db.get_all_series)
+    result = await asyncio.to_thread(
+        false_series_matches.audit_false_series_matches, db, snapshot or [],
+    )
+    return JSONResponse(result)
+
+
+@app.post("/api/maintenance/false-series/repair")
+async def api_false_series_repair(payload: Optional[Dict[str, Any]] = None):
+    body = payload or {}
+    if body.get("confirm") is not True:
+        raise HTTPException(status_code=400, detail="confirm must be true to repair false series matches")
+    raw_ids = body.get("release_ids") or []
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise HTTPException(status_code=400, detail="release_ids must be a non-empty list")
+    try:
+        ids = [int(value) for value in raw_ids[:500]]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="release_ids must be integers")
+    snapshot = await asyncio.to_thread(_calibre_series_snapshot)
+    if not snapshot:
+        snapshot = await asyncio.to_thread(db.get_all_series)
+
+    def _worker(reporter):
+        reporter.report(0, len(ids), "Repairing false series matches…", force=True)
+        result = false_series_matches.repair_false_series_matches(
+            db, ids, snapshot or [], progress=reporter.report,
+        )
+        reporter.report(len(ids), len(ids), f"Repaired {result.get('repaired', 0)} release(s)",
+                        progress_pct=100.0, force=True)
+        return result
+
+    result, task = await asyncio.to_thread(
+        _recorded_task, "repair:false-series", "Repair false series matches", _worker,
         auth_module.get_current_actor(), None,
     )
     return JSONResponse({**result, "task_id": task["id"], "task": task})

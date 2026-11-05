@@ -699,6 +699,23 @@
                 <div id="volume-range-rows" class="divide-y divide-slate-800/60 text-[11px]"></div>
             </div>
 
+            <!-- False fuzzy series matches (task-64) -->
+            <div id="false-series-card" class="mt-4 bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-2">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                    <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i data-lucide="shield-alert" class="w-4 h-4 text-rose-400"></i>
+                        False fuzzy series matches
+                    </h4>
+                    <div class="flex items-center gap-2">
+                        <button type="button" onclick="auditFalseSeriesMatches()" id="btn-audit-false-series" data-task-kind="audit:false-series" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Audit matches</button>
+                        <button type="button" onclick="repairFalseSeriesMatches()" id="btn-repair-false-series" data-task-kind="repair:false-series" disabled class="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold">Repair selected (<span id="false-series-selected">0</span>)</button>
+                    </div>
+                </div>
+                <p class="text-[11px] text-slate-400">Finds releases stored under a series that the fixed distinctive-head matcher would no longer map (e.g. “The Red Ranger…” false-matched to “Level 0 Demon King…”). Repair re-keys selected rows to their title-parsed series, preserves IGNORED/BLACKLISTED vetoes and recomputes DISCOVERY/REQUESTED.</p>
+                <div id="false-series-summary" class="text-[11px] text-slate-400"></div>
+                <div id="false-series-rows" class="divide-y divide-slate-800/60 text-[11px]"></div>
+            </div>
+
             <!-- Manual series alias overrides (task-42) -->
             <div id="series-alias-card" class="mt-4 bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-2">
                 <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
@@ -1552,5 +1569,46 @@ async function deletePrioritizedGroupSettings(id, name) {
         });
     }
 })();
+
+// --- False fuzzy series matches (task-64) ---
+let _falseSeriesCandidates = [];
+function falseSeriesEsc(value) { const d = document.createElement('div'); d.textContent = value == null ? '' : String(value); return d.innerHTML; }
+async function auditFalseSeriesMatches() {
+    const summary = document.getElementById('false-series-summary');
+    const rows = document.getElementById('false-series-rows');
+    if (summary) summary.textContent = 'Auditing releases…';
+    try {
+        const res = await fetch('/api/maintenance/false-series/audit', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) { if (summary) summary.textContent = data.detail || 'Audit failed'; return; }
+        _falseSeriesCandidates = data.candidates || [];
+        if (summary) summary.textContent = `${_falseSeriesCandidates.length} suspect release(s).`;
+        if (rows) rows.innerHTML = _falseSeriesCandidates.length ? _falseSeriesCandidates.map(function (item) {
+            return `<label class="py-2 flex items-start gap-2"><input type="checkbox" class="false-series-check" value="${item.release_id}" ${item.can_repair ? '' : 'disabled'} onchange="updateFalseSeriesSelection()"><span class="min-w-0"><span class="block font-semibold text-slate-200">${falseSeriesEsc(item.title)}</span><span class="block text-slate-400">${falseSeriesEsc(item.stored_series)} → ${falseSeriesEsc(item.suggested_series)} <span class="text-slate-500">(${falseSeriesEsc(item.status)})</span></span></span></label>`;
+        }).join('') : '<p class="py-3 text-emerald-400">No false fuzzy series matches found.</p>';
+        updateFalseSeriesSelection();
+    } catch (err) { if (summary) summary.textContent = 'Audit failed: ' + err; }
+}
+function updateFalseSeriesSelection() {
+    const selected = Array.from(document.querySelectorAll('.false-series-check:checked')).map(function (box) { return parseInt(box.value, 10); });
+    const count = document.getElementById('false-series-selected');
+    const button = document.getElementById('btn-repair-false-series');
+    if (count) count.textContent = String(selected.length);
+    if (button) button.disabled = selected.length === 0;
+}
+async function repairFalseSeriesMatches() {
+    const ids = Array.from(document.querySelectorAll('.false-series-check:checked')).map(function (box) { return parseInt(box.value, 10); });
+    if (!ids.length) return;
+    try {
+        const res = await fetch('/api/maintenance/false-series/repair', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ release_ids: ids, confirm: true }),
+        });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Repair failed', 'error'); return; }
+        showToast(`Repaired ${data.repaired || 0} release(s)`, 'success');
+        await auditFalseSeriesMatches();
+    } catch (err) { showToast('Repair failed: ' + err, 'error'); }
+}
 </script>
 {% endblock %}
