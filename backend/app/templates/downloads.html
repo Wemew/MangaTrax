@@ -1469,7 +1469,15 @@ async function refreshAutoDownloadDiagnostics() {
         if (!res.ok) { if (summary) summary.textContent = data.detail || 'Diagnostics failed'; return; }
         if (summary) {
             const last = data.last_poll || {};
-            summary.innerHTML = `Global: <strong>${data.global_enabled ? 'on' : 'off'}</strong> · Engine: <strong>${escapeHtml(data.engine || '')}</strong> ${data.engine_ready ? '✓ ready' : '✗ ' + escapeHtml(data.engine_reason || 'unavailable')} · Feeds with auto-download: <strong>${data.feeds_auto_download || 0}/${data.feeds_total || 0}</strong> · Monitored series: <strong>${data.monitored_series || 0}</strong> · Last poll: ${last.releases_found || 0} found / ${last.new_releases || 0} new / ${last.transitions || 0} transitions / ${last.sent_to_downloader || 0} sent`;
+            const pollAt = data.last_poll_at ? ` · Last poll at ${escapeHtml(data.last_poll_at)}` : '';
+            let html = `Global: <strong>${data.global_enabled ? 'on' : 'off'}</strong> · Engine: <strong>${escapeHtml(data.engine || '')}</strong> ${data.engine_ready ? '✓ ready' : '✗ ' + escapeHtml(data.engine_reason || 'unavailable')} · Feeds with auto-download: <strong>${data.feeds_auto_download || 0}/${data.feeds_total || 0}</strong> · Monitored series: <strong>${data.monitored_series || 0}</strong> · Last poll: ${last.releases_found || 0} found / ${last.new_releases || 0} new / ${last.transitions || 0} transitions / ${last.sent_to_downloader || 0} sent${pollAt}`;
+            if (data.last_poll_message) {
+                html += `<div class="mt-1 text-[11px] ${data.last_poll_success === false ? 'text-rose-300' : 'text-slate-400'}"><strong>Poll result:</strong> ${escapeHtml(data.last_poll_message)}</div>`;
+            }
+            if (data.last_poll_hint) {
+                html += `<div class="mt-1 text-[11px] text-amber-300">${escapeHtml(data.last_poll_hint)}</div>`;
+            }
+            summary.innerHTML = html;
         }
         if (checklist) {
             checklist.innerHTML = (data.checklist || []).map(function (item) {

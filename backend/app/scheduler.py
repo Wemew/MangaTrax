@@ -1124,9 +1124,10 @@ class MangaScheduler:
             engine = "qbit"
         monitored = [series for series in (self.db.get_all_series() or []) if series.get("is_monitored")]
         last_result = None
+        feed_poll_state: Dict[str, Any] = {}
         try:
-            status = self.get_feed_check_status() or {}
-            last_result = status.get("result")
+            feed_poll_state = self.get_feed_check_status() or {}
+            last_result = feed_poll_state.get("result")
         except Exception:
             last_result = None
         logs = self.db.get_logs(limit=100) or []
@@ -1164,12 +1165,46 @@ class MangaScheduler:
             {"key": "new_or_transition_releases", "ok": bool(last_result and (last_result.get("releases_found") or 0) > 0),
              "label": "The last feed poll found releases; only new/transitioning ones auto-download."},
         ]
+        last_poll_hint = ""
+        if isinstance(last_result, dict):
+            found = int(last_result.get("releases_found") or 0)
+            failed_feeds = int(last_result.get("feeds_failed") or 0)
+            if found == 0 and failed_feeds:
+                errs = [
+                    str(item.get("error") or "") for item in (last_result.get("errors") or [])[:2]
+                    if isinstance(item, dict) and item.get("error")
+                ]
+                last_poll_hint = (
+                    f"The last poll failed for {failed_feeds} feed(s)"
+                    + (f": {'; '.join(errs)}" if errs else "")
+                    + ". No releases could be seen, so nothing can auto-download; fix/retry the feed and "
+                      "check the activity log for the provider error."
+                )
+            elif found == 0:
+                last_poll_hint = (
+                    "The last poll returned no parseable manga releases: the feed may have had no items, or "
+                    "every item was filtered as a chapter/light novel. Check the Feeds page status and the "
+                    "activity log; the next poll containing a new volume release will show found/new counts here."
+                )
+        elif feed_poll_state.get("running"):
+            last_poll_hint = "A feed poll is running now; its result will appear when it finishes."
+        else:
+            last_poll_hint = (
+                "No feed poll result is available in this session yet. Run Poll Feeds (or wait for the "
+                "interval) so this card can report what the feeds returned."
+            )
         return {
             "status": "success",
             "global_enabled": global_enabled,
             "engine": engine,
             "engine_ready": engine_ready,
             "engine_reason": engine_reason,
+            "last_poll_at": feed_poll_state.get("finished_at") or feed_poll_state.get("started_at") or "",
+            "feed_poll_running": bool(feed_poll_state.get("running")),
+            "last_poll_success": last_result.get("success") if isinstance(last_result, dict) else None,
+            "last_poll_message": (last_result or {}).get("message") or "" if isinstance(last_result, dict) else "",
+            "last_poll_errors": (last_result or {}).get("errors") or [] if isinstance(last_result, dict) else [],
+            "last_poll_hint": last_poll_hint,
             "feeds": [
                 {"id": feed.get("id"), "name": feed.get("name"), "enabled": bool(feed.get("enabled")),
                  "auto_download": bool(feed.get("auto_download"))}
@@ -3192,12 +3227,16 @@ class MangaScheduler:
         feeds_failed: int = 0,
         errors: Optional[List[Dict[str, str]]] = None,
         skipped: bool = False,
+        new_releases: int = 0,
+        transitions: int = 0,
     ) -> Dict[str, Any]:
         """Uniform feed-poll result (counts + per-feed failure detail)."""
         return {
             "success": success,
             "message": message,
             "releases_found": releases_found,
+            "new_releases": new_releases,
+            "transitions": transitions,
             "requested": requested,
             "sent_to_downloader": sent_to_downloader,
             "feeds_failed": feeds_failed,
@@ -3276,6 +3315,8 @@ class MangaScheduler:
         """
         feeds = self.db.get_all_feeds()
         total_found = 0
+        total_new = 0
+        total_transitions = 0
         total_requested = 0
         total_sent_to_downloader = 0
         feeds_failed = 0
@@ -3494,6 +3535,10 @@ class MangaScheduler:
                         and prev_status in ("DISCOVERY", "NEW")
                         and prev_dl_status == "IDLE"
                     )
+                    if is_new:
+                        total_new += 1
+                    if is_transition:
+                        total_transitions += 1
 
                     # What the database ACTUALLY holds after the precedence model ran.
                     # The matcher may compute REQUESTED while a stored user veto
@@ -3633,7 +3678,11 @@ class MangaScheduler:
                 self.db.update_feed_status(feed_id, "ERROR", err_msg)
                 self._log_activity("FEED_ERROR", f"Feed error in '{feed_name}': {err_msg}")
 
-        summary = f"Feeds checked: {total_found} releases found, {total_requested} requested, {total_sent_to_downloader} sent to downloader."
+        summary = (
+            f"Feeds checked: {total_found} releases found "
+            f"({total_new} new, {total_transitions} transitions), "
+            f"{total_requested} requested, {total_sent_to_downloader} sent to downloader."
+        )
         if feeds_failed:
             # Never report a failed provider lookup as a silent success.
             detail = "; ".join(f"{item['feed']}: {item['error']}" for item in feed_errors[:5])
@@ -3655,6 +3704,8 @@ class MangaScheduler:
             success=feeds_failed == 0,
             message=summary,
             releases_found=total_found,
+            new_releases=total_new,
+            transitions=total_transitions,
             requested=total_requested,
             sent_to_downloader=total_sent_to_downloader,
             feeds_failed=feeds_failed,
