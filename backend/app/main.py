@@ -7,7 +7,7 @@ import threading
 import asyncio
 import logging
 import logging.handlers
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
