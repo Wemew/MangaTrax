@@ -55,13 +55,11 @@ def _calibre_volumes(matched: Dict[str, Any]) -> set:
                     break
             except (TypeError, ValueError):
                 continue
-    if not volumes:
-        try:
-            count = int(matched.get("book_count") or 0)
-        except (TypeError, ValueError):
-            count = 0
-        if count > 0:
-            volumes = {float(index) for index in range(1, count + 1)}
+    # NEVER infer ownership from book_count: "N books" does not mean volumes 1..N
+    # are present (gaps, omnibus bindings, part-based numbering, stale counts).
+    # Without explicit owned volumes this returns empty, and the caller then treats
+    # the file as NOT a duplicate (safe: audit shows nothing rather than purging a
+    # staging copy that Calibre does not actually own).
     return volumes
 
 

@@ -137,6 +137,14 @@ class CalibreMangaScanner:
             vols_map = self.get_series_volumes_map()
             for s in results:
                 owned = vols_map.get(s["series_name"].lower(), set())
+                if not owned:
+                    # The volumes map is keyed by both lower-case and normalized names.
+                    from app.parser import normalize_text
+                    owned = vols_map.get(normalize_text(s["series_name"]), set())
+                # CRITICAL: expose the ACTUAL owned volumes.  Consumers such as the
+                # staging-duplicate purge must never substitute book_count for this
+                # (a series with N books does not imply volumes 1..N are present).
+                s["volumes"] = sorted(float(v) for v in (owned or set()))
                 if owned:
                     max_owned = max(owned)
                     if max_owned > s["latest_index"]:
@@ -165,6 +173,7 @@ class CalibreMangaScanner:
                         "series_name": extracted_series,
                         "book_count": 1,
                         "latest_index": max(all_owned) if all_owned else 1.0,
+                        "volumes": sorted(float(v) for v in (all_owned or vols or set())),
                         "authors": b_row["authors"] or "Unknown",
                         "publisher": "",
                         "tags": ""

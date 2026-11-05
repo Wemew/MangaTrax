@@ -450,7 +450,7 @@
                     <i data-lucide="copy-slash" class="w-5 h-5 text-rose-400"></i>
                     Staging cleanup / duplicates
                 </h2>
-                <p class="text-xs text-slate-400 mt-1">Staging copies whose series and every volume are already in Calibre. Audit is read-only; purge deletes only verified staging copies and keeps the release as In Calibre.</p>
+                <p class="text-xs text-slate-400 mt-1">Only staging copies whose <strong>actual owned volume numbers</strong> are all present in Calibre are listed (matched from the Calibre library's real volume records — never by series name or book count alone). Audit is read-only; purge deletes only verified staging copies and keeps the release as In Calibre.</p>
             </div>
             <div class="flex items-center gap-2">
                 <button type="button" onclick="auditStagingDuplicates()" data-task-kind="downloads:staging-purge" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Audit staging duplicates</button>
@@ -1373,7 +1373,7 @@ function renderStagingDuplicates() {
                 <td class="py-2 pr-2 text-slate-200 break-all">${stagingDupEsc(item.filename)}</td>
                 <td class="py-2 pr-2 text-slate-300">${stagingDupEsc(item.series)} · v${(item.volumes || []).join(', ')}</td>
                 <td class="py-2 pr-2 text-slate-400">${formatBytes(item.size || 0)}</td>
-                <td class="py-2 pr-2 text-emerald-300">${stagingDupEsc(item.calibre_series)}</td>
+                <td class="py-2 pr-2 text-emerald-300">${stagingDupEsc(item.calibre_series)}${(item.calibre_volumes || []).length ? ' · owned v' + stagingDupEsc((item.calibre_volumes || []).join(', ')) : ' · owned volumes unknown'}</td>
                 <td class="py-2 text-slate-400">${item.release_id ? '#' + item.release_id + ' · ' + stagingDupEsc(item.release_title) : '-'}</td>
             </tr>`;
         }).join('');
