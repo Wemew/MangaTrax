@@ -121,7 +121,7 @@
                 <i data-lucide="library" class="w-5 h-5 text-amber-400"></i>
                 Awaiting Calibre Series
             </h2>
-            <span class="text-xs text-slate-500">{{ awaiting_series|length }} series · {{ awaiting_total }} file(s)</span>
+            <span class="text-xs text-slate-500"><span id="awaiting-series-count">{{ awaiting_series|length }}</span> series · <span id="awaiting-file-count">{{ awaiting_total }}</span> file(s)</span>
         </div>
         <div class="bg-darkcard border border-slate-800 rounded-2xl p-4 shadow-xl">
             {% if awaiting_series %}
@@ -129,13 +129,23 @@
                 These raw downloads in <code class="text-slate-300">{{ downloads_dir }}</code> are kept untouched until their
                 series exists in Calibre; the next Calibre sync unlocks them (they are then tagged and moved to staging).
             </p>
-            <ul class="divide-y divide-slate-800/60">
+            <ul class="divide-y divide-slate-800/60" id="awaiting-series-list">
                 {% for item in awaiting_series %}
-                <li class="py-2 flex items-center justify-between gap-3 text-xs">
-                    <span class="font-semibold text-white">{{ item.series }}</span>
-                    <span class="text-slate-400">
-                        {{ item.count }} file(s){% if item.volumes %} · vol {{ item.volumes|join(', ') }}{% endif %}
-                    </span>
+                <li class="py-2 text-xs awaiting-series-row" data-series-key="{{ item.series|lower }}">
+                    <div class="flex items-center justify-between gap-3">
+                        <span class="font-semibold text-white">{{ item.series }}</span>
+                        <span class="text-slate-400"><span class="awaiting-series-file-count">{{ item.count }}</span> file(s){% if item.volumes %} · vol {{ item.volumes|join(', ') }}{% endif %}</span>
+                    </div>
+                    <ul class="mt-1.5 space-y-1">
+                        {% for file in item.files %}
+                        <li class="awaiting-file-row flex items-center justify-between gap-2 pl-3" data-relative="{{ file.relative }}">
+                            <span class="font-mono text-slate-300 truncate" title="{{ file.relative }}">{{ file.name }} <span class="text-slate-500">({{ file.size_mb }} MB)</span></span>
+                            <button type="button" data-relative="{{ file.relative }}" data-series="{{ item.series|e }}" onclick="deleteDownloadFile(this, 'downloads', this.dataset.relative)" class="file-delete-btn px-2 py-1 rounded-lg bg-rose-900/30 hover:bg-rose-900/50 border border-rose-700/40 text-rose-300 text-[10px] font-semibold inline-flex items-center gap-1" title="Delete this file from raw downloads">
+                                <i data-lucide="trash-2" class="w-3 h-3"></i> Delete
+                            </button>
+                        </li>
+                        {% endfor %}
+                    </ul>
                 </li>
                 {% endfor %}
             </ul>
@@ -385,7 +395,7 @@
                     Location: <span class="font-mono text-slate-300">{{ staging_dir }}</span>. MangaTrax tags these files with ComicInfo.xml so Calibre and BookOrbit read metadata automatically.
                 </p>
             </div>
-            <span class="text-xs text-slate-500">{{ staging_files|length }} CBZ file(s)</span>
+            <span class="text-xs text-slate-500"><span id="staging-file-count">{{ staging_files|length }}</span> CBZ file(s)</span>
         </div>
 
         <div class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
@@ -400,7 +410,7 @@
                             <th class="py-3 px-4 text-right">Metadata</th>
                         </tr>
                     </thead>
-                    <tbody class="divide-y divide-slate-800/60">
+                    <tbody class="divide-y divide-slate-800/60" id="staging-files-body">
                         {% for f in staging_files %}
                         <tr class="hover:bg-slate-850/50 transition-colors">
                             <td class="py-3 px-4 font-mono text-slate-200">
@@ -424,13 +434,18 @@
                                 <span class="text-slate-400 text-[11px]">Ready for ingestion</span>
                             </td>
                             <td class="py-3 px-4 text-right">
-                                <button type="button" data-filename="{{ f.name }}" onclick="openTagModal(this.dataset.filename)" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-semibold text-cyan-300 inline-flex items-center gap-1 transition-colors">
-                                    <i data-lucide="tag" class="w-3 h-3"></i> Preview / Tag
-                                </button>
+                                <div class="inline-flex items-center gap-1.5">
+                                    <button type="button" data-filename="{{ f.name }}" onclick="openTagModal(this.dataset.filename)" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-semibold text-cyan-300 inline-flex items-center gap-1 transition-colors">
+                                        <i data-lucide="tag" class="w-3 h-3"></i> Preview / Tag
+                                    </button>
+                                    <button type="button" data-relative="{{ f.relative }}" onclick="deleteDownloadFile(this, 'staging', this.dataset.relative)" class="file-delete-btn px-2 py-1 rounded-lg bg-rose-900/30 hover:bg-rose-900/50 border border-rose-700/40 text-rose-300 text-[11px] font-semibold inline-flex items-center gap-1" title="Delete this staged file">
+                                        <i data-lucide="trash-2" class="w-3 h-3"></i> Delete
+                                    </button>
+                                </div>
                             </td>
                         </tr>
                         {% else %}
-                        <tr>
+                        <tr class="staging-empty-row">
                             <td colspan="5" class="py-10 text-center text-slate-500">
                                 Staging directory is empty. Completed downloads will appear here.
                             </td>
@@ -1494,6 +1509,89 @@ async function refreshAutoDownloadDiagnostics() {
     } catch (err) { if (summary) summary.textContent = 'Diagnostics failed: ' + err; }
 }
 document.addEventListener('DOMContentLoaded', refreshAutoDownloadDiagnostics);
+
+// --- Per-file delete (task-57): two-step inline confirm, no blocking confirm ---
+const _fileDeleteTimers = new Map();
+function _fileDeleteKey(button) {
+    return (button && button.dataset.fileDeleteKey) || '';
+}
+async function deleteDownloadFile(button, area, relative) {
+    if (!button || !relative) return;
+    const key = area + ':' + relative;
+    if (button.dataset.armed !== '1') {
+        button.dataset.armed = '1';
+        button.dataset.originalText = button.innerHTML;
+        button.innerHTML = '<i data-lucide="alert-triangle" class="w-3 h-3"></i> Confirm delete';
+        button.classList.add('bg-rose-700/60');
+        showToast('Click Delete again within 4s to confirm', 'warning');
+        const timer = setTimeout(function () {
+            button.dataset.armed = '';
+            if (button.dataset.originalText) button.innerHTML = button.dataset.originalText;
+            button.classList.remove('bg-rose-700/60');
+            _fileDeleteTimers.delete(key);
+        }, 4000);
+        _fileDeleteTimers.set(key, timer);
+        return;
+    }
+    clearTimeout(_fileDeleteTimers.get(key));
+    _fileDeleteTimers.delete(key);
+    button.dataset.armed = '';
+    button.disabled = true;
+    button.innerHTML = '<i data-lucide="loader" class="w-3 h-3 animate-spin"></i> Deleting…';
+    try {
+        const res = await fetch('/api/downloads/files/delete', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ area: area, relative: relative }),
+        });
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok) {
+            showToast(data.detail || 'Delete failed', 'error');
+            if (button.dataset.originalText) button.innerHTML = button.dataset.originalText;
+            button.disabled = false;
+            return;
+        }
+        if (area === 'staging') {
+            const row = button.closest('tr');
+            if (row) row.remove();
+            const countEl = document.getElementById('staging-file-count');
+            if (countEl) countEl.textContent = String(data.remaining_files != null ? data.remaining_files : Math.max(0, parseInt(countEl.textContent || '0', 10) - 1));
+            const remainingRows = document.querySelectorAll('#staging-files-body tr:not(.staging-empty-row)');
+            if (!remainingRows.length) {
+                const body = document.getElementById('staging-files-body');
+                if (body && !body.querySelector('.staging-empty-row')) {
+                    const empty = document.createElement('tr');
+                    empty.className = 'staging-empty-row';
+                    empty.innerHTML = '<td colspan="5" class="py-10 text-center text-slate-500">Staging directory is empty. Completed downloads will appear here.</td>';
+                    body.appendChild(empty);
+                }
+            }
+        } else {
+            const fileRow = button.closest('.awaiting-file-row');
+            if (fileRow) fileRow.remove();
+            const seriesRow = button.closest('.awaiting-series-row');
+            if (seriesRow) {
+                const countEl = seriesRow.querySelector('.awaiting-series-file-count');
+                const newCount = data.series_remaining != null ? data.series_remaining : Math.max(0, parseInt(countEl ? countEl.textContent : '1', 10) - 1);
+                if (countEl) countEl.textContent = String(newCount);
+                if (!newCount) seriesRow.remove();
+            }
+            const list = document.getElementById('awaiting-series-list');
+            const seriesCount = document.getElementById('awaiting-series-count');
+            const fileCount = document.getElementById('awaiting-file-count');
+            if (seriesCount && list) seriesCount.textContent = String(list.querySelectorAll('.awaiting-series-row').length);
+            if (fileCount && list) fileCount.textContent = String(list.querySelectorAll('.awaiting-file-row').length);
+            if (list && !list.querySelector('.awaiting-series-row')) {
+                list.insertAdjacentHTML('beforeend', '<p class="text-xs text-slate-500" id="awaiting-empty-state">Nothing waiting: every downloaded series is either known to Calibre or not downloaded yet.</p>');
+            }
+        }
+        showToast(`Deleted ${relative}`, 'success');
+        if (window.lucide) lucide.createIcons();
+    } catch (err) {
+        showToast('Delete failed: ' + err, 'error');
+        if (button.dataset.originalText) button.innerHTML = button.dataset.originalText;
+        button.disabled = false;
+    }
+}
 </script>
 
 <!-- Manual series match modal (task-42) -->

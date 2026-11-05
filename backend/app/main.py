@@ -22,7 +22,7 @@ from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
-from app import background_tasks, downloads_inventory, network_diagnostics, staging_duplicates, storage_health
+from app import background_tasks, downloads_inventory, downloads_reconcile, network_diagnostics, staging_duplicates, storage_health
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
 from app.downloader.base import DownloaderError, parse_queued_handle_id
 from app.downloader.torbox import TorboxDownloader
@@ -2741,6 +2741,142 @@ def _staging_calibre_snapshot():
         except Exception:
             snapshot = []
     return snapshot or []
+
+
+def _downloads_root() -> str:
+    return db.get_setting("downloads_dir", scheduler.get_downloads_dir(create=False))
+
+
+def _resolve_awaiting_download_file(relative: str):
+    """Resolve one client-supplied raw-download file to a verified awaiting entry."""
+    if not isinstance(relative, str) or not relative.strip():
+        raise HTTPException(status_code=400, detail="relative is required")
+    candidate = relative.strip().replace("\\", "/")
+    parts = [part for part in candidate.split("/") if part]
+    if not parts or any(part == ".." for part in parts) or candidate.startswith("/") or (len(candidate) > 1 and candidate[1] == ":"):
+        raise HTTPException(status_code=400, detail="relative must be a downloads-relative path")
+    root = _downloads_root()
+    if not root or not os.path.isdir(root):
+        raise HTTPException(status_code=400, detail="downloads_dir is not configured or does not exist")
+    entries = downloads_pipeline.scan_awaiting_series(root, db.get_series_templates_map())
+    matches = []
+    for bucket in entries:
+        for item in bucket.get("files") or []:
+            if item.get("relative") == candidate:
+                matches.append((bucket, item))
+    if not matches:
+        bare = candidate.rsplit("/", 1)[-1]
+        matches = [
+            (bucket, item) for bucket in entries for item in bucket.get("files") or []
+            if item.get("name") == bare
+        ]
+    if not matches:
+        raise HTTPException(status_code=404, detail=f"'{candidate}' is not an awaiting-Calibre file")
+    if len(matches) > 1:
+        raise HTTPException(status_code=409, detail="ambiguous filename; pass the downloads-relative path")
+    bucket, item = matches[0]
+    path = os.path.join(root, str(item["relative"]).replace("/", os.sep))
+    if os.path.islink(path):
+        raise HTTPException(status_code=403, detail="symlinked files are not accepted")
+    try:
+        safe_path = security.ensure_path_within_roots(path, [root])
+    except security.UnsafePathError as exc:
+        raise HTTPException(status_code=403, detail=f"Rejected downloads path: {exc}") from exc
+    if not os.path.isfile(safe_path):
+        raise HTTPException(status_code=404, detail="the file no longer exists")
+    return bucket, item, safe_path, root
+
+
+def _prune_empty_parents(path: str, root: str) -> None:
+    try:
+        root_real = os.path.realpath(root)
+        parent = os.path.dirname(os.path.realpath(path))
+        while parent and parent != root_real and os.path.commonpath([root_real, parent]) == root_real:
+            try:
+                os.rmdir(parent)
+            except OSError:
+                break
+            parent = os.path.dirname(parent)
+    except (OSError, ValueError):
+        return
+
+
+@app.post("/api/downloads/files/delete")
+async def api_downloads_file_delete(payload: Dict[str, Any]):
+    """Delete exactly one verified staging or awaiting-Calibre file (task-57)."""
+    area = str(payload.get("area") or "").strip().lower()
+    raw_name = payload.get("relative") or payload.get("filename")
+    if area not in ("staging", "downloads"):
+        raise HTTPException(status_code=400, detail="area must be 'staging' or 'downloads'")
+    if area == "staging":
+        entry = await asyncio.to_thread(_resolve_staging_cbz, str(raw_name or ""))
+        path = entry["path"]
+        root = _staging_dir_setting()
+        series = str((extract_manga_bundle_and_volumes(entry.get("name") or "") or {}).get("series_name") or "")
+        relative = entry.get("relative") or entry.get("name")
+        series_remaining = None
+    else:
+        bucket, item, path, root = await asyncio.to_thread(
+            _resolve_awaiting_download_file, str(raw_name or ""),
+        )
+        series = bucket.get("series") or ""
+        relative = item.get("relative") or item.get("name")
+        series_remaining = max(0, int(bucket.get("count") or 0) - 1)
+    # Re-validate immediately before removal.
+    if os.path.islink(path):
+        raise HTTPException(status_code=403, detail="symlinked files are not accepted")
+    try:
+        security.ensure_path_within_roots(path, [root])
+    except security.UnsafePathError as exc:
+        raise HTTPException(status_code=403, detail=f"Rejected path: {exc}") from exc
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="the file no longer exists")
+    try:
+        size = os.path.getsize(path)
+        os.remove(path)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not delete file: {exc}") from exc
+    _prune_empty_parents(path, root)
+    try:
+        db.log_activity(
+            "DOWNLOAD_FILE_DELETED",
+            f"Deleted {area} file '{relative}'",
+            json.dumps({"area": area, "relative": relative, "size": size, "series": series}),
+        )
+    except Exception as exc:
+        logger.debug("Could not log file deletion: %s", exc)
+    # Keep release bookkeeping accurate: a deleted staging/raw file must not leave a
+    # release stuck COMPLETED/in-staging when no copy remains.
+    try:
+        await asyncio.to_thread(
+            downloads_reconcile.reconcile_missing_release_files,
+            db, scheduler.get_downloads_dir(create=False), _staging_dir_setting(),
+            _calibre_series_snapshot(),
+        )
+    except Exception as exc:
+        logger.debug("Reconcile after file deletion failed: %s", exc)
+    if area == "downloads":
+        try:
+            await asyncio.to_thread(
+                downloads_inventory.refresh_inventory, db,
+                scheduler.get_downloads_dir(create=False),
+            )
+        except Exception as exc:
+            logger.debug("Inventory refresh after file deletion failed: %s", exc)
+        remaining = 0
+        try:
+            remaining = sum(len(bucket.get("files") or []) for bucket in
+                            downloads_pipeline.scan_awaiting_series(
+                                scheduler.get_downloads_dir(create=False), db.get_series_templates_map(),
+                            ))
+        except Exception:
+            remaining = 0
+    else:
+        remaining = len(cbz_tagger.scan_staging_cbz_files(_staging_dir_setting()))
+    return JSONResponse({
+        "status": "success", "area": area, "deleted": True, "relative": relative,
+        "remaining_files": remaining, "series": series, "series_remaining": series_remaining,
+    })
 
 
 @app.get("/api/downloads/staging-duplicates")

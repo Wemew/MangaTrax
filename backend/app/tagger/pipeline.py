@@ -207,8 +207,19 @@ def scan_awaiting_series(downloads_dir: str, series_templates: Any) -> List[Dict
             if template:
                 continue
             key = normalize_text(series_name)
-            bucket = awaiting.setdefault(key, {"series": series_name, "count": 0, "volumes": set()})
+            bucket = awaiting.setdefault(
+                key, {"series": series_name, "count": 0, "volumes": set(), "files": []},
+            )
             bucket["count"] += 1
+            try:
+                size_mb = round(os.path.getsize(os.path.join(root, filename)) / (1024 * 1024), 2)
+            except OSError:
+                size_mb = 0.0
+            bucket["files"].append({
+                "relative": os.path.relpath(os.path.join(root, filename), downloads_dir).replace(os.sep, "/"),
+                "name": filename,
+                "size_mb": size_mb,
+            })
             display = _volume_display(parsed)
             if display:
                 bucket["volumes"].add(display)
@@ -218,6 +229,7 @@ def scan_awaiting_series(downloads_dir: str, series_templates: Any) -> List[Dict
             "series": bucket["series"],
             "count": bucket["count"],
             "volumes": sorted(bucket["volumes"]),
+            "files": sorted(bucket["files"], key=lambda item: item["relative"].lower()),
         })
     return result
 
