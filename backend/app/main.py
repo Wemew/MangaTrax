@@ -1793,6 +1793,9 @@ async def downloads_view(request: Request):
         for entry in cbz_tagger.scan_staging_cbz_files(staging_dir):
             staging_files.append({
                 "name": entry["relative"],
+                # The Delete button posts this staging-relative path; without it the
+                # client-side handler has no target and silently returns.
+                "relative": entry["relative"],
                 "size_mb": entry["size_mb"],
                 "has_comicinfo": has_comicinfo(entry["path"]),
             })

@@ -143,12 +143,34 @@ def test_ui_wiring():
     print("    [PASSED] per-row staging/awaiting delete buttons, two-step confirm, in-place counts/empty state, no window.confirm.")
 
 
+def test_downloads_page_staging_delete_target():
+    """Regression: staging rows must carry the delete target (f.relative).
+
+    The page context used to expose only ``name`` for staging files, so the Delete
+    button rendered ``data-relative=""`` and the JS handler returned silently — the
+    button appeared to do nothing.  (The Calibre test harness stubs Jinja rendering,
+    so this asserts the view's context contract + the template binding it feeds.)
+    """
+    print("--> Testing /downloads context provides the staging delete target...")
+    main_src = open(os.path.join(BACKEND_DIR, "app", "main.py"), encoding="utf-8").read()
+    staging_block_start = main_src.find("for entry in cbz_tagger.scan_staging_cbz_files")
+    assert staging_block_start >= 0, "staging_files scan block missing"
+    staging_block = main_src[staging_block_start:staging_block_start + 500]
+    assert '"relative": entry["relative"]' in staging_block, (
+        "downloads_view must expose f.relative; the staging Delete button has no target otherwise"
+    )
+    page = open(os.path.join(BACKEND_DIR, "app", "templates", "downloads.html"), encoding="utf-8").read()
+    assert 'data-relative="{{ f.relative }}"' in page, "staging delete button no longer binds f.relative"
+    print("    [PASSED] staging delete button target is supplied by the view context.")
+
+
 def main():
     print("=" * 78)
     print("Running per-file delete suite (task-57)")
     print("=" * 78)
     tests = [test_awaiting_scan_shape, test_staging_delete_and_reconcile,
-             test_downloads_delete_and_cleanup, test_ui_wiring]
+             test_downloads_delete_and_cleanup, test_ui_wiring,
+             test_downloads_page_staging_delete_target]
     failures = 0
     for test in tests:
         try:
