@@ -428,7 +428,7 @@
                     <input type="checkbox" id="setting-webhook-feed-scan" {% if settings.webhook_feed_scan_notifications != 'false' %}checked{% endif %} class="mt-0.5 rounded border-slate-700 bg-slate-900 text-brand-500 focus:ring-0">
                     <div>
                         <label for="setting-webhook-feed-scan" class="text-xs font-semibold text-white">Notify on automatic feed scans</label>
-                        <p class="text-[11px] text-slate-400">Sends one summary after each automatic (scheduled) feed poll: found/requested/sent, new/transitions and first provider errors. Manual Poll Feeds stays silent.</p>
+                        <p class="text-[11px] text-slate-400">Sends one summary only when an automatic (scheduled) feed poll actually finds new releases or requests/sends/processes something: found/requested/sent, new/transitions and first provider errors. Empty/no-change scans (including provider-error-only polls) stay silent; errors remain in the app logs and feed status. Manual Poll Feeds stays silent.</p>
                     </div>
                 </div>
                 <div class="flex items-start gap-2.5">

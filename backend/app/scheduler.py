@@ -1328,9 +1328,43 @@ class MangaScheduler:
                 logger.warning("Could not create downloads_dir '%s': %s", path, exc)
         return path
 
+    @staticmethod
+    def _feed_scan_has_activity(result: Dict[str, Any]) -> bool:
+        """True only when a poll found new releases or requested/sent/processed something.
+
+        ``releases_found`` alone is not activity: a poll that only re-sees known
+        releases (or failed providers with no entries) must not notify.
+        """
+        payload = result or {}
+        for key in ("new_releases", "transitions", "requested", "sent_to_downloader"):
+            try:
+                if int(payload.get(key) or 0) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        for key in ("processed", "newly_processed"):
+            value = payload.get(key)
+            if isinstance(value, (list, tuple, set)):
+                if len(value) > 0:
+                    return True
+            else:
+                try:
+                    if int(value or 0) > 0:
+                        return True
+                except (TypeError, ValueError):
+                    continue
+        return False
+
     def _notify_feed_scan_result(self, result: Dict[str, Any]) -> None:
         try:
             if str(self.db.get_setting("webhook_feed_scan_notifications", "true")).lower() == "false":
+                return
+            if not self._feed_scan_has_activity(result):
+                logger.debug(
+                    "Suppressed automatic feed-scan notification: no new/requested/sent activity "
+                    "(found=%s, feeds_failed=%s).",
+                    (result or {}).get("releases_found"), (result or {}).get("feeds_failed"),
+                )
                 return
             from datetime import datetime as _datetime
             self.get_notifier().notify_feed_scan(
