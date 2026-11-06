@@ -533,6 +533,8 @@ def process_downloads_to_staging(
         return result
     downloads_root = os.path.realpath(downloads_dir)
     staging_root = os.path.realpath(staging_dir)
+    from app import volume_naming
+    previous_volume_index = volume_naming.build_previous_volume_index(staging_dir)
 
     awaiting: Dict[str, Dict[str, Any]] = {}
     failed_files: List[str] = []
@@ -598,7 +600,50 @@ def process_downloads_to_staging(
                     result["awaiting_calibre"] += 1
                     continue
 
+                assessment = volume_naming.assess_volume_naming(
+                    filename, parsed, "",
+                )
+                previous, inherited_filename, inherited_title = volume_naming.inherit_for_file(
+                    previous_volume_index, parsed,
+                )
+                needs_intervention = bool(assessment.get("needs_intervention"))
+                if previous and not inherited_filename and not needs_intervention:
+                    needs_intervention = True
+                    assessment["reason"] = "Previous volume template has no replaceable volume marker"
+                inherited_used = False
+                if not needs_intervention:
+                    if inherited_filename and inherited_filename != filename:
+                        filename = inherited_filename
+                        inherited_used = True
                 metadata = _build_metadata(template, parsed)
+                if not needs_intervention and inherited_title:
+                    metadata["title"] = inherited_title
+                    inherited_used = True
+                if inherited_used:
+                    try:
+                        db.log_activity(
+                            "VOLUME_NAME_INHERITED",
+                            f"Inherited previous-volume naming for '{os.path.basename(source_path)}' → '{filename}'",
+                            json.dumps({
+                                "previous": (previous or {}).get("filename") or "",
+                                "previous_volume": (previous or {}).get("volume"),
+                                "volume": assessment.get("parsed_volume"),
+                                "title": metadata.get("title") or "",
+                            }),
+                            actor=actor,
+                        )
+                    except Exception:
+                        pass
+                elif needs_intervention:
+                    try:
+                        db.log_activity(
+                            "VOLUME_NAME_INTERVENTION_REQUIRED",
+                            f"Manual naming intervention needed for '{filename}'",
+                            json.dumps({"reason": assessment.get("reason") or ""}),
+                            actor=actor,
+                        )
+                    except Exception:
+                        pass
                 # Validate readability BEFORE mutating: a corrupt .cbz must stay in
                 # downloads untagged (zipfile's append mode can otherwise fabricate a
                 # "successful" tag on garbage bytes).
@@ -651,6 +696,8 @@ def process_downloads_to_staging(
                     "series_name": metadata.get("series_name") or series_name,
                     "volume": metadata.get("volume"),
                     "volumes": parsed.get("volumes") or [],
+                    "needs_intervention": needs_intervention,
+                    "intervention_reason": assessment.get("reason") or "",
                     "move": move_kind,
                 })
                 _clear_failure(source_path)

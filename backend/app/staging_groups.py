@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from app.parser import extract_manga_bundle_and_volumes, normalize_text
 from app.tagger import cbz_tagger
+from app import volume_naming
 
 logger = logging.getLogger("mangatrax.staging_groups")
 
@@ -18,6 +19,7 @@ def build_staging_groups(staging_dir: str) -> List[Dict[str, Any]]:
     if not staging_dir or not os.path.isdir(staging_dir):
         return []
     root = os.path.realpath(staging_dir)
+    previous_index = volume_naming.build_previous_volume_index(root)
     for entry in cbz_tagger.scan_staging_cbz_files(root):
         path = entry["path"]
         series = ""
@@ -38,7 +40,13 @@ def build_staging_groups(staging_dir: str) -> List[Dict[str, Any]]:
         group = groups.setdefault(key, {
             "series": series, "source_series": series, "files": [],
             "count": 0, "tagged": 0, "untagged": 0, "volumes": set(), "size_bytes": 0,
+            "needs_intervention": 0,
         })
+        assessment = volume_naming.assess_volume_naming(entry["name"], parsed, tags.get("Title") or "")
+        previous, suggested_filename, suggested_title = volume_naming.inherit_for_file(previous_index, parsed)
+        if previous and not suggested_filename and not assessment.get("needs_intervention"):
+            assessment["needs_intervention"] = True
+            assessment["reason"] = "Previous volume template has no replaceable volume marker"
         volumes = []
         for value in (parsed.get("volumes") or tags.get("Volume") or []):
             try:
@@ -55,10 +63,19 @@ def build_staging_groups(staging_dir: str) -> List[Dict[str, Any]]:
             "tagged": bool(tags),
             "comic_series": series,
             "volumes": sorted(volumes),
+            "parsed_series": assessment.get("parsed_series") or "",
+            "parsed_volume": assessment.get("parsed_volume"),
+            "needs_intervention": bool(assessment.get("needs_intervention")),
+            "intervention_reason": assessment.get("reason") or "",
+            "suggested_volume": assessment.get("suggested_volume") or "",
+            "suggested_filename": suggested_filename or "",
+            "suggested_title": suggested_title or "",
+            "previous_filename": (previous or {}).get("filename") or "",
         })
         group["count"] += 1
         group["tagged"] += 1 if tags else 0
         group["untagged"] += 0 if tags else 1
+        group["needs_intervention"] += 1 if assessment.get("needs_intervention") else 0
         group["size_bytes"] += int(entry["size_bytes"] or 0)
     result = []
     for group in groups.values():

@@ -2735,6 +2735,42 @@ def _manual_tag_staging_cbz(entry: Dict[str, Any], model) -> Dict[str, Any]:
     if not cbz_tagger.rewrite_comicinfo(entry["path"], xml):
         raise HTTPException(status_code=500, detail="Failed to rewrite ComicInfo.xml")
 
+    renamed_from = None
+    new_filename = str(getattr(model, "new_filename", "") or "").strip()
+    if new_filename:
+        if new_filename in (".", "..") or "/" in new_filename or "\\" in new_filename:
+            raise HTTPException(status_code=400, detail="new_filename must be a plain filename")
+        if not new_filename.lower().endswith(".cbz"):
+            raise HTTPException(status_code=400, detail="new_filename must end in .cbz")
+        staging_root = os.path.realpath(_staging_dir_setting())
+        target = os.path.realpath(os.path.join(os.path.dirname(entry["path"]), new_filename))
+        if target != staging_root and not target.startswith(staging_root + os.sep):
+            raise HTTPException(status_code=403, detail="new_filename escapes the staging directory")
+        if target != os.path.realpath(entry["path"]):
+            if os.path.exists(target):
+                raise HTTPException(status_code=409, detail="A staged file with that name already exists")
+            renamed_from = entry["relative"]
+            try:
+                os.replace(entry["path"], target)
+            except OSError as exc:
+                raise HTTPException(status_code=500, detail=f"Rename failed: {exc}") from exc
+            db.log_activity(
+                "STAGING_FILE_RENAMED",
+                f"Renamed staged file '{renamed_from}' → '{new_filename}'",
+                f"series: {model.series}; volume: {model.volume or '-'}",
+            )
+            entry = dict(entry, path=target, name=new_filename,
+                         relative=os.path.relpath(target, staging_root).replace(os.sep, "/"))
+    try:
+        from app.staged_ownership import invalidate_staged_ownership_cache
+        invalidate_staged_ownership_cache()
+    except Exception:
+        pass
+    try:
+        db._invalidate_grouped_cache()
+    except Exception:
+        pass
+
     db.log_activity(
         "MANUAL_TAG_CBZ",
         f"Manually tagged '{entry['relative']}' as series '{model.series}'",
@@ -2744,6 +2780,7 @@ def _manual_tag_staging_cbz(entry: Dict[str, Any], model) -> Dict[str, Any]:
         "status": "success",
         "file": entry["relative"],
         "name": entry["name"],
+        "renamed_from": renamed_from,
         "replaced_invalid_comicinfo": via_fallback,
         "comicinfo": cbz_tagger.read_comicinfo(entry["path"]) or {},
     }

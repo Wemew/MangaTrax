@@ -1025,6 +1025,7 @@ class ManualTagRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     filename: str = Field(min_length=1, max_length=512)
+    new_filename: Optional[str] = Field(default=None, max_length=255)
     series: str = Field(min_length=1, max_length=500)
     volume: Optional[str] = Field(default=None, max_length=50)
     title: Optional[str] = Field(default=None, max_length=500)
