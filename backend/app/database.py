@@ -533,6 +533,9 @@ class MangaDatabase:
             # task-65: provider post date (latest release post sorting).
             if "published_at" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN published_at TEXT DEFAULT '';")
+            # task-70: persisted light-novel classification (legacy rows included).
+            if "is_light_novel" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN is_light_novel INTEGER DEFAULT 0;")
             # Downloaded-file tracking (task-30): files fetched by an engine, when they
             # arrived, and when routing moved them out of the raw downloads folder.
             if "download_files_json" not in r_cols:
@@ -910,6 +913,27 @@ class MangaDatabase:
                     "UPDATE releases SET published_at = created_at "
                     "WHERE published_at IS NULL OR trim(published_at) = '';"
                 )
+            except Exception:
+                pass
+            # One-time LN backfill: legacy releases ingested before publisher-only
+            # detection are classified and then hidden from normal lists.
+            try:
+                marker = cur.execute(
+                    "SELECT value FROM app_settings WHERE key = 'ln_release_backfill_done';"
+                ).fetchone()
+                if not marker:
+                    from app.parser import is_light_novel as _is_ln
+                    rows = cur.execute(
+                        "SELECT id, title FROM releases WHERE COALESCE(is_light_novel, 0) = 0;"
+                    ).fetchall()
+                    for row in rows:
+                        if _is_ln(row["title"] or ""):
+                            cur.execute("UPDATE releases SET is_light_novel = 1 WHERE id = ?;", (row["id"],))
+                    cur.execute(
+                        "INSERT INTO app_settings (key, value) VALUES ('ln_release_backfill_done', 'true') "
+                        "ON CONFLICT(key) DO UPDATE SET value = 'true';"
+                    )
+                    conn.commit()
             except Exception:
                 pass
             cur.execute("""
@@ -2409,6 +2433,11 @@ class MangaDatabase:
     def upsert_release(self, rel: Dict[str, Any]) -> Tuple[bool, int]:
         guid = rel["guid"]
         published_at = self.normalize_published_at(rel.get("published_at") or rel.get("pub_date"))
+        try:
+            from app.parser import is_light_novel as _is_ln
+            is_light_novel_value = 1 if _is_ln(str(rel.get("title") or "")) else 0
+        except Exception:
+            is_light_novel_value = 0
         vols_json = json.dumps(rel.get("volumes") or [])
         missing_json = json.dumps(rel.get("missing_volumes") or [])
         from app.parser import is_complete_series_release
@@ -2462,6 +2491,7 @@ class MangaDatabase:
                         publisher = CASE WHEN ? != '' THEN ? ELSE publisher END,
                         inferred_volumes = CASE WHEN ? = 1 THEN 1 ELSE inferred_volumes END,
                         published_at = CASE WHEN ? != '' THEN ? ELSE published_at END,
+                        is_light_novel = ?,
                         status = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?;
@@ -2493,6 +2523,7 @@ class MangaDatabase:
                     inferred_val,
                     published_at,
                     published_at,
+                    is_light_novel_value,
                     resolved_status,
                     rel_id
                 ))
@@ -2505,8 +2536,8 @@ class MangaDatabase:
                         guid, title, series_name, release_group, release_groups_json, description, mangaupdates_url,
                         is_bundle, is_complete, volume_start, volume_end, volumes_json, missing_vols_json,
                         download_url, link, cover_url, source_feed_name, status, download_status, torrent_hash,
-                        revision, publisher, inferred_volumes, published_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        revision, publisher, inferred_volumes, published_at, is_light_novel
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     guid,
                     rel["title"],
@@ -2532,6 +2563,7 @@ class MangaDatabase:
                     publisher,
                     inferred_val,
                     published_at or None,
+                    is_light_novel_value,
                 ))
                 rel_id = cur.lastrowid
                 conn.commit()
@@ -2890,12 +2922,13 @@ class MangaDatabase:
                       AND status NOT IN ('BLACKLISTED', 'IGNORED')
                       AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                       AND {media_guard}{search_clause}
+                      AND COALESCE(is_light_novel, 0) = 0
                     ORDER BY {order_clause} LIMIT ? OFFSET ?;
                 """, (*search_params, limit, offset))
             elif status:
                 cur.execute(
                     f"SELECT * FROM releases WHERE status = ? AND {media_guard}{search_clause} "
-                    f"ORDER BY {order_clause} LIMIT ? OFFSET ?;",
+                    f"AND COALESCE(is_light_novel, 0) = 0 ORDER BY {order_clause} LIMIT ? OFFSET ?;",
                     (status, *search_params, limit, offset),
                 )
             else:
@@ -2904,6 +2937,7 @@ class MangaDatabase:
                     WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
                       AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                       AND {media_guard}{search_clause}
+                      AND COALESCE(is_light_novel, 0) = 0
                     ORDER BY {order_clause}
                     LIMIT ? OFFSET ?;
                 """, (*search_params, limit, offset))
@@ -2963,6 +2997,7 @@ class MangaDatabase:
                 "OR lower(COALESCE(release_group, '')) LIKE ? ESCAPE '\\')"
             )
             params.extend([term, term, term])
+        clauses.append("COALESCE(is_light_novel, 0) = 0")
         with self.get_connection() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) AS count FROM releases WHERE " + " AND ".join(clauses) + ";", params,
@@ -2992,6 +3027,7 @@ class MangaDatabase:
                    OR EXISTS (SELECT 1 FROM json_each(COALESCE(NULLIF(release_groups_json, ''), '[]')) AS jg
                               WHERE lower(jg.value) LIKE ? ESCAPE '\\'))
                   AND {tracked_media_clause()}
+                  AND COALESCE(is_light_novel, 0) = 0
                 ORDER BY
                     CASE
                         WHEN lower(title) LIKE ? ESCAPE '\\' THEN 0
@@ -3094,6 +3130,7 @@ class MangaDatabase:
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1))
                       AND {tracked_media_clause('r')}
+                      AND COALESCE(r.is_light_novel, 0) = 0
                       {search_clause}
                 )
                 SELECT count(*) FROM ranked_discovery WHERE rn = 1;
@@ -3160,6 +3197,7 @@ class MangaDatabase:
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1))
                       AND {tracked_media_clause('r')}
+                      AND COALESCE(r.is_light_novel, 0) = 0
                       {search_clause}
                 )
                 SELECT * FROM ranked_discovery
@@ -3493,10 +3531,10 @@ class MangaDatabase:
             cur.execute("SELECT count(*) FROM series_tracking WHERE is_monitored = 1;")
             monitored_series = cur.fetchone()[0]
 
-            cur.execute(f"SELECT count(*) FROM releases WHERE status = 'REQUESTED' AND {media_guard};")
+            cur.execute(f"SELECT count(*) FROM releases WHERE status = 'REQUESTED' AND COALESCE(is_light_novel, 0) = 0 AND {media_guard};")
             pending_requests = cur.fetchone()[0]
 
-            cur.execute(f"SELECT count(*) FROM releases WHERE status = 'IN_CALIBRE' AND {media_guard};")
+            cur.execute(f"SELECT count(*) FROM releases WHERE status = 'IN_CALIBRE' AND COALESCE(is_light_novel, 0) = 0 AND {media_guard};")
             acquired_books = cur.fetchone()[0]
 
             cur.execute(f"SELECT count(*) FROM releases WHERE download_status = 'DOWNLOADING' AND {media_guard};")
@@ -4008,6 +4046,7 @@ class MangaDatabase:
                           AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                           AND {prioritized_guard}
                           AND {media_guard}
+                          AND COALESCE(is_light_novel, 0) = 0
                         ORDER BY updated_at DESC;
                     """)
                 elif status:
@@ -4015,6 +4054,7 @@ class MangaDatabase:
                         SELECT * FROM releases 
                         WHERE status = ? AND {prioritized_guard}
                           AND {media_guard}
+                          AND COALESCE(is_light_novel, 0) = 0
                         ORDER BY updated_at DESC;
                     """, (status,))
                 else:
@@ -4024,6 +4064,7 @@ class MangaDatabase:
                           AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                           AND {prioritized_guard}
                           AND {media_guard}
+                          AND COALESCE(is_light_novel, 0) = 0
                         ORDER BY 
                             CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                             updated_at DESC;
@@ -4036,11 +4077,13 @@ class MangaDatabase:
                           AND status NOT IN ('BLACKLISTED', 'IGNORED')
                           AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                           AND {media_guard}
+                          AND COALESCE(is_light_novel, 0) = 0
                         ORDER BY updated_at DESC;
                     """)
                 elif status:
                     cur.execute(
-                        f"SELECT * FROM releases WHERE status = ? AND {media_guard} ORDER BY updated_at DESC;",
+                        f"SELECT * FROM releases WHERE status = ? AND {media_guard} "
+                        f"AND COALESCE(is_light_novel, 0) = 0 ORDER BY updated_at DESC;",
                         (status,),
                     )
                 else:
@@ -4049,6 +4092,7 @@ class MangaDatabase:
                         WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
                           AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                           AND {media_guard}
+                          AND COALESCE(is_light_novel, 0) = 0
                         ORDER BY 
                             CASE status WHEN 'REQUESTED' THEN 1 WHEN 'DISCOVERY' THEN 2 WHEN 'IN_CALIBRE' THEN 3 ELSE 4 END,
                             updated_at DESC;

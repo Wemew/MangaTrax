@@ -274,11 +274,11 @@ def test_filter_non_manga_setting_disables_typing():
             settings={"filter_non_manga": "false"},
         )
         db = MangaDatabase(path)
-        # Disabled: nothing typed (inconclusive means kept/visible) and the marker is
-        # left unset so enabling the feature later still runs the one-shot pass.
+        # Disabled: the legacy media-typing pass does nothing and its marker stays unset,
+        # but task-70's persisted light-novel classification still hides known LN rows.
         assert _rows(db)["ln-1"]["media_type"] == MEDIA_TYPE_UNKNOWN
         assert db.get_setting("media_filter_applied") in ("", "0")
-        assert LN_TITLE in _titles(db.get_pending_requests())
+        assert LN_TITLE not in _titles(db.get_pending_requests())
 
         db.set_setting("filter_non_manga", "true")
         db.init_db()

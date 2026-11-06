@@ -724,6 +724,24 @@
                 <div id="false-series-rows" class="divide-y divide-slate-800/60 text-[11px]"></div>
             </div>
 
+            <!-- Light-novel releases audit/cleanup (task-70) -->
+            <div id="light-novel-card" class="mt-4 bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-2">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                    <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
+                        <i data-lucide="book-x" class="w-4 h-4 text-violet-400"></i>
+                        Light-novel releases
+                    </h4>
+                    <div class="flex items-center gap-2">
+                        <button type="button" onclick="auditLightNovels()" id="btn-audit-light-novels" data-task-kind="audit:light-novels" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Audit light novels</button>
+                        <button type="button" onclick="cleanupLightNovels('ignore', this)" id="btn-ignore-light-novels" disabled class="px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold">Ignore selected</button>
+                        <button type="button" onclick="cleanupLightNovels('delete', this)" id="btn-delete-light-novels" disabled class="px-3 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold">Delete selected</button>
+                    </div>
+                </div>
+                <p class="text-[11px] text-slate-400">Persisted light-novel releases are hidden from Releases, Discovery, wanted/auto-download and request lists. Detection uses media tags, ebook formats and publisher/imprint patterns (e.g. “[J-Novel Club]”, “[Yen Press]”, “[Seven Seas]” even without a release group). Auditing is read-only; Ignore marks the selected rows IGNORED (keeping history), Delete removes only the database rows — never files on disk. Both require a second click.</p>
+                <div id="light-novel-summary" class="text-[11px] text-slate-400"></div>
+                <div id="light-novel-rows" class="divide-y divide-slate-800/60 text-[11px]"></div>
+            </div>
+
             <!-- Manual series alias overrides (task-42) -->
             <div id="series-alias-card" class="mt-4 bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-2">
                 <h4 class="text-xs font-bold text-white flex items-center gap-1.5">
@@ -1618,6 +1636,58 @@ async function repairFalseSeriesMatches() {
         showToast(`Repaired ${data.repaired || 0} release(s)`, 'success');
         await auditFalseSeriesMatches();
     } catch (err) { showToast('Repair failed: ' + err, 'error'); }
+}
+
+// --- Light-novel releases audit/cleanup (task-70) ---
+let _lnRows = [];
+let _lnCleanupArmed = null;
+function lnEsc(value) { const div = document.createElement('div'); div.textContent = value == null ? '' : String(value); return div.innerHTML; }
+async function auditLightNovels() {
+    const summary = document.getElementById('light-novel-summary');
+    const rows = document.getElementById('light-novel-rows');
+    if (summary) summary.textContent = 'Auditing light-novel releases…';
+    try {
+        const res = await fetch('/api/maintenance/light-novels/audit');
+        const data = await res.json();
+        if (!res.ok) { if (summary) summary.textContent = data.detail || 'Audit failed'; return; }
+        _lnRows = data.releases || [];
+        if (summary) summary.textContent = `${data.count || 0} flagged light-novel release(s).`;
+        if (rows) rows.innerHTML = _lnRows.length ? _lnRows.map(function (item) {
+            return `<label class="py-2 flex items-start gap-2"><input type="checkbox" class="ln-check" value="${item.id}" onchange="updateLnSelection()"><span class="min-w-0"><span class="block font-semibold text-slate-200">${lnEsc(item.title)}</span><span class="block text-slate-400">${lnEsc(item.series_name || '')} · ${lnEsc(item.status)} · #${item.id}</span></span></label>`;
+        }).join('') : '<p class="py-3 text-emerald-400">No light-novel releases found.</p>';
+        updateLnSelection();
+    } catch (err) { if (summary) summary.textContent = 'Audit failed: ' + err; }
+}
+function updateLnSelection() {
+    const count = document.querySelectorAll('.ln-check:checked').length;
+    ['btn-ignore-light-novels', 'btn-delete-light-novels'].forEach(function (id) {
+        const button = document.getElementById(id);
+        if (button) button.disabled = count === 0;
+    });
+}
+async function cleanupLightNovels(action, button) {
+    const ids = Array.from(document.querySelectorAll('.ln-check:checked')).map(function (box) { return parseInt(box.value, 10); });
+    if (!ids.length) return;
+    if (_lnCleanupArmed !== action + ':' + ids.join(',')) {
+        _lnCleanupArmed = action + ':' + ids.join(',');
+        const original = button.innerHTML;
+        button.dataset.originalText = original;
+        button.innerHTML = action === 'delete' ? 'Confirm delete' : 'Confirm ignore';
+        setTimeout(function () { _lnCleanupArmed = null; button.innerHTML = original; }, 5000);
+        showToast('Click again within 5s to confirm', 'warning');
+        return;
+    }
+    _lnCleanupArmed = null;
+    try {
+        const res = await fetch('/api/maintenance/light-novels/cleanup', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ release_ids: ids, action: action, confirm: true }),
+        });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Cleanup failed', 'error'); return; }
+        showToast(`${data.changed || 0} light-novel release(s) ${action === 'delete' ? 'deleted' : 'ignored'}`, 'success');
+        await auditLightNovels();
+    } catch (err) { showToast('Cleanup failed: ' + err, 'error'); }
 }
 </script>
 {% endblock %}

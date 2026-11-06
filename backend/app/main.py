@@ -22,7 +22,7 @@ from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
-from app import archive_conversion, background_tasks, download_failures, downloads_inventory, downloads_inventory_cleanup, downloads_reconcile, false_series_matches, network_diagnostics, staging_duplicates, staging_groups, storage_health
+from app import archive_conversion, background_tasks, download_failures, ln_releases, downloads_inventory, downloads_inventory_cleanup, downloads_reconcile, false_series_matches, network_diagnostics, staging_duplicates, staging_groups, storage_health
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
 from app.downloader.base import DownloaderError, parse_queued_handle_id
 from app.downloader.torbox import TorboxDownloader
@@ -2464,6 +2464,43 @@ async def api_suspicious_volume_ranges():
         _recorded_task, "audit:volume-ranges", "Audit suspicious volume ranges",
         lambda reporter: db.audit_suspicious_volume_ranges(progress=reporter.report),
         auth_module.get_current_actor(), None,
+    )
+    return JSONResponse({**result, "task_id": task["id"], "task": task})
+
+
+@app.get("/api/maintenance/light-novels/audit")
+async def api_ln_audit():
+    result = await asyncio.to_thread(ln_releases.audit_ln_releases, db)
+    return JSONResponse(result)
+
+
+@app.post("/api/maintenance/light-novels/cleanup")
+async def api_ln_cleanup(payload: Optional[Dict[str, Any]] = None):
+    body = payload or {}
+    if body.get("confirm") is not True:
+        raise HTTPException(status_code=400, detail="confirm must be true to clean up light-novel releases")
+    raw_ids = body.get("release_ids") or []
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise HTTPException(status_code=400, detail="release_ids must be a non-empty list")
+    action = str(body.get("action") or "").strip().lower()
+    if action not in ("ignore", "delete"):
+        raise HTTPException(status_code=400, detail="action must be 'ignore' or 'delete'")
+    try:
+        ids = [int(value) for value in raw_ids[:500]]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="release_ids must be integers")
+    actor = auth_module.get_current_actor()
+
+    def _worker(reporter):
+        reporter.report(0, len(ids), f"{action.title()} selected light-novel releases…", force=True)
+        result = ln_releases.cleanup_ln_releases(db, ids, action, actor=actor)
+        reporter.report(len(ids), len(ids), f"{result['changed']} changed, {result['skipped']} skipped",
+                        progress_pct=100.0, force=True)
+        return result
+
+    result, task = await asyncio.to_thread(
+        _recorded_task, f"repair:light-novels-{action}", f"Light-novel releases: {action}",
+        _worker, actor, None,
     )
     return JSONResponse({**result, "task_id": task["id"], "task": task})
 
