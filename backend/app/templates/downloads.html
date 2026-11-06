@@ -167,7 +167,7 @@
                     <i data-lucide="file-warning" class="w-5 h-5 text-rose-400"></i>
                     Failed documents
                 </h2>
-                <p class="text-xs text-slate-400 mt-1">Files that could not be read as CBZ archives (or failed tagging/move). Retry the matched release, or delete the bad file after confirming.</p>
+                <p class="text-xs text-slate-400 mt-1">Every stuck raw download that cannot reach staging: unreadable CBZ, unsupported CBR/RAR/7Z/CB7/ZIP archives, ebooks/documents, and unrecognised files (plus tagging/move failures). Retry a matched release, convert a comic archive to CBZ, or delete it after confirming. Ebooks cannot be tagged.</p>
             </div>
             <div class="flex items-center gap-2">
                 <span class="text-xs text-slate-500"><span id="failed-documents-count">0</span> file(s)</span>
@@ -1692,24 +1692,47 @@ function renderFailedDocuments() {
             : '<span class="text-amber-300">no matching release</span>';
         const retryDisabled = item.can_retry ? '' : 'disabled';
         const retryTitle = item.can_retry ? 'Send the matched release to the downloader again' : failedEsc(item.retry_reason || 'Retry unavailable');
+        const convertButton = item.can_convert
+            ? `<button type="button" data-task-kind="downloads:archive-convert" onclick="convertFailedDocument(this, ${item.id})" title="Convert this archive to CBZ, then tag/route it normally" class="px-2 py-1 rounded-lg bg-violet-900/40 border border-violet-700/50 text-violet-200 text-[10px] font-semibold mr-1">Convert to CBZ</button>`
+            : '';
         return `<tr class="border-t border-slate-800/60 failed-document-row" data-failure-id="${item.id}">
             <td class="py-2 pr-2 text-slate-200 break-all" title="${failedEsc(item.file_relative)}">${failedEsc(item.name)}<div class="text-[10px] text-slate-500">${failedEsc(item.file_relative)}</div></td>
             <td class="py-2 pr-2 text-slate-400">${formatBytes(item.size || 0)}</td>
             <td class="py-2 pr-2"><span class="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300 text-[10px] uppercase">${failedEsc(item.detected_type || 'unknown')}</span><div class="text-[10px] text-rose-300 mt-1 break-words">${failedEsc(item.reason || '')}</div></td>
             <td class="py-2 pr-2">${matched}</td>
             <td class="py-2 text-right whitespace-nowrap">
+                ${convertButton}
                 <button type="button" onclick="retryFailedDocument(this, ${item.id})" ${retryDisabled} title="${retryTitle}" class="px-2 py-1 rounded-lg bg-cyan-900/40 border border-cyan-700/50 text-cyan-200 text-[10px] font-semibold disabled:opacity-40 disabled:cursor-not-allowed">Retry download</button>
                 <button type="button" onclick="deleteFailedDocument(this, ${item.id})" class="px-2 py-1 rounded-lg bg-rose-900/40 border border-rose-700/50 text-rose-300 text-[10px] font-semibold ml-1">Delete file</button>
             </td>
         </tr>`;
     }).join('');
 }
+async function convertFailedDocument(button, failureId) {
+    button.disabled = true;
+    const original = button.innerHTML;
+    button.innerHTML = '<i data-lucide="loader" class="w-3 h-3 animate-spin"></i> Converting…';
+    try {
+        const res = await fetch(`/api/downloads/failures/${failureId}/convert`, { method: 'POST' });
+        const data = await res.json().catch(function () { return {}; });
+        if (!res.ok) { showToast(data.detail || 'Conversion failed', 'error'); return; }
+        if (data.status === 'success') {
+            showToast(`Converted to ${data.target ? data.target.split(/[\\/]/).pop() : 'CBZ'}; routing queued`, 'success');
+            _failedDocuments = _failedDocuments.filter(function (item) { return item.id !== failureId; });
+            renderFailedDocuments();
+            await loadFailedDocuments();
+        } else {
+            showToast(data.reason || 'Conversion failed', 'error');
+        }
+    } catch (err) { showToast('Conversion failed: ' + err, 'error'); }
+    finally { button.disabled = false; button.innerHTML = original; }
+}
 async function scanFailedDocuments() {
     try {
         const res = await fetch('/api/downloads/failures/scan', { method: 'POST' });
         const data = await res.json().catch(function () { return {}; });
         if (!res.ok) { showToast(data.detail || 'Scan failed', 'error'); return; }
-        showToast(`Scanned ${data.scan ? data.scan.checked : 0} archive(s) · ${data.scan ? data.scan.failed : 0} failed`, 'success');
+        showToast(`Scanned ${data.scan ? data.scan.checked : 0} file(s) · ${data.scan ? data.scan.failed : 0} failed`, 'success');
         await loadFailedDocuments();
     } catch (err) { showToast('Scan failed: ' + err, 'error'); }
 }

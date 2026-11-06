@@ -736,6 +736,7 @@ class MangaDatabase:
                     "downloads_dir": os.getenv("DOWNLOADS_DIR", "/downloads"),
                     "auto_download": "true",
                     "auto_tag": "true",
+                    "convert_archives_to_cbz": "false",
                     "webhook_feed_scan_notifications": "true",
                     "webhook_processed_notifications": "true",
                     # Context-guarded discard of marker-less chapter releases

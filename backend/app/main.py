@@ -22,7 +22,7 @@ from app.providers.registry import create_provider
 from app.scheduler import MangaScheduler
 from app.covers import CoverCache
 from app.downloader.qbit import QBitClient
-from app import background_tasks, download_failures, downloads_inventory, downloads_inventory_cleanup, downloads_reconcile, false_series_matches, network_diagnostics, staging_duplicates, staging_groups, storage_health
+from app import archive_conversion, background_tasks, download_failures, downloads_inventory, downloads_inventory_cleanup, downloads_reconcile, false_series_matches, network_diagnostics, staging_duplicates, staging_groups, storage_health
 from app.downloader import as_bool, build_downloader, resolve_downloader_engine
 from app.downloader.base import DownloaderError, parse_queued_handle_id
 from app.downloader.torbox import TorboxDownloader
@@ -2999,6 +2999,54 @@ async def api_download_failure_retry(failure_id: int):
     )
     return JSONResponse({"status": "success", "failure_id": failure_id, "release_id": info["release_id"],
                          "download": body, "state": release_download_state(db.get_release_by_id(int(info["release_id"])))})
+
+
+@app.post("/api/downloads/failures/{failure_id}/convert")
+async def api_download_failure_convert(failure_id: int):
+    """Convert one convertible raw archive to CBZ, then re-run routing (task-67)."""
+    row = await asyncio.to_thread(db.get_download_failure, failure_id)
+    if not row or str(row.get("status")) != "failed":
+        raise HTTPException(status_code=404, detail="Failed document not found")
+    root = scheduler.get_downloads_dir(create=False)
+    info = await asyncio.to_thread(download_failures.serialize_failure, db, row, root)
+    if not info.get("can_convert"):
+        raise HTTPException(status_code=409, detail="This file is not a convertible comic archive")
+    path = _failure_file_path(row, root)
+    if not path or not os.path.isfile(path) or os.path.islink(path):
+        raise HTTPException(status_code=404, detail="Failed document file not found")
+    actor = auth_module.get_current_actor()
+
+    def _worker(reporter):
+        reporter.report(0, 1, f"Converting {info.get('name') or ''} to CBZ…", force=True)
+        result = archive_conversion.convert_archive_to_cbz(path)
+        if result.get("status") == "success":
+            try:
+                db.clear_download_failure(str(row.get("file_relative") or ""))
+            except Exception:
+                pass
+            try:
+                db.log_activity(
+                    "ARCHIVE_CONVERTED_TO_CBZ",
+                    f"Converted '{info.get('name')}' to CBZ",
+                    json.dumps({"entries": result.get("entries"), "bytes": result.get("bytes"), "source": "failure_row"}),
+                )
+            except Exception:
+                pass
+            try:
+                routing = scheduler.process_downloads_to_staging(actor=actor)
+            except Exception as exc:
+                logger.debug("Routing after conversion failed: %s", exc)
+                routing = {}
+            reporter.report(1, 1, f"Converted to {os.path.basename(result.get('target', ''))}", progress_pct=100.0, force=True)
+            return {"status": "success", **result, "routing": routing}
+        reporter.report(1, 1, f"Conversion failed: {result.get('reason')}", progress_pct=100.0, force=True)
+        return {"status": "error", **result}
+
+    result, task = await asyncio.to_thread(
+        _recorded_task, "downloads:archive-convert", f"Convert failed document #{failure_id}",
+        _worker, actor, str(row.get("file_relative") or ""),
+    )
+    return JSONResponse({**result, "task_id": task["id"], "task": task})
 
 
 def _delete_failure_rows(rows: List[Dict[str, Any]], root: str) -> Dict[str, Any]:

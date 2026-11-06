@@ -658,6 +658,7 @@ class SettingsUpdateRequest(BaseModel):
     downloads_dir: Optional[str] = Field(default=None, max_length=security.MAX_PATH_LENGTH)
     auto_download: Optional[str] = Field(default=None, max_length=20)
     auto_tag: Optional[str] = Field(default=None, max_length=20)
+    convert_archives_to_cbz: Optional[str] = Field(default=None, max_length=20)
     calibre_sync_interval_minutes: Optional[str] = Field(default=None, max_length=20)
     feed_check_interval_minutes: Optional[str] = Field(default=None, max_length=20)
     backfill_max_pages: Optional[str] = Field(default=None, max_length=20)

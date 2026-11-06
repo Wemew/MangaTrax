@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     gosu \
+    p7zip-full \
+    unar \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root unprivileged user (UID/GID 1000)

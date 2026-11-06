@@ -17,6 +17,7 @@ legacy nested staging tree.
 """
 
 import json
+from app.downloader import as_bool
 import logging
 import os
 import difflib
@@ -511,6 +512,7 @@ def process_downloads_to_staging(
         "conflicts_renamed": 0,
         "series_awaiting": [],
         "processed": [],
+        "converted": 0,
         "flattened": 0,
         "flatten_skipped_existing": 0,
         "flatten_conflicts_renamed": 0,
@@ -546,11 +548,33 @@ def process_downloads_to_staging(
     for root, dirs, files in os.walk(downloads_dir):
         dirs.sort()
         for filename in sorted(files):
-            if not filename.lower().endswith(".cbz"):
-                continue
             if any(filename.lower().endswith(suffix) for suffix in _IGNORED_SUFFIXES):
                 continue
             source_path = os.path.join(root, filename)
+            if not filename.lower().endswith(".cbz"):
+                from app import archive_conversion
+                convert_enabled = as_bool(db.get_setting("convert_archives_to_cbz", "false"), default=False)
+                if convert_enabled and archive_conversion.is_convertible(filename):
+                    conversion = archive_conversion.convert_archive_to_cbz(source_path)
+                    if conversion.get("status") == "success":
+                        source_path = conversion["target"]
+                        filename = os.path.basename(source_path)
+                        result["converted"] += 1
+                        try:
+                            db.log_activity(
+                                "ARCHIVE_CONVERTED_TO_CBZ",
+                                f"Converted archive '{os.path.basename(source_path)}' to CBZ",
+                                json.dumps({"entries": conversion.get("entries"), "bytes": conversion.get("bytes")}),
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        result["failed"] += 1
+                        failed_files.append(os.path.basename(source_path))
+                        _record_failure(source_path, f"Archive conversion failed: {conversion.get('reason')}")
+                        continue
+                else:
+                    continue
             result["scanned"] += 1
             try:
                 if os.path.islink(source_path):

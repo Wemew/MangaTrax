@@ -291,6 +291,14 @@
                 </div>
 
                 <div class="flex items-start gap-2.5">
+                    <input type="checkbox" id="setting-convert-archives" {% if settings.convert_archives_to_cbz == 'true' %}checked{% endif %} class="mt-0.5 rounded border-slate-700 bg-slate-900 text-brand-500 focus:ring-0">
+                    <div>
+                        <label for="setting-convert-archives" class="text-xs font-semibold text-white">Convert CBR/RAR/7Z/CB7/ZIP archives to CBZ</label>
+                        <p class="text-[11px] text-slate-400">Off by default. When enabled, raw archives are re-zipped losslessly into CBZ and then tagged/moved normally. Requires py7zr (7z) and rarfile + unar/p7zip (RAR/CBR); missing extractors fail clearly in Failed documents.</p>
+                    </div>
+                </div>
+
+                <div class="flex items-start gap-2.5">
                     <input type="checkbox" id="setting-discard-unmarked-chapters" {% if settings.discard_unmarked_chapters != 'false' %}checked{% endif %} class="mt-0.5 rounded border-slate-700 bg-slate-900 text-brand-500 focus:ring-0">
                     <div>
                         <label for="setting-discard-unmarked-chapters" class="text-xs font-semibold text-white">Discard Marker-less Chapter Releases</label>
@@ -1015,6 +1023,7 @@ async function saveSettings(e) {
         downloads_dir: document.getElementById('setting-downloads-dir').value.trim(),
         auto_download: document.getElementById('setting-auto-download').checked ? 'true' : 'false',
         auto_tag: document.getElementById('setting-auto-tag').checked ? 'true' : 'false',
+        convert_archives_to_cbz: document.getElementById('setting-convert-archives').checked ? 'true' : 'false',
         discard_unmarked_chapters: document.getElementById('setting-discard-unmarked-chapters').checked ? 'true' : 'false',
         filter_non_manga: document.getElementById('setting-filter-non-manga').checked ? 'true' : 'false',
         infer_collected_releases: document.getElementById('setting-infer-collected-releases').checked ? 'true' : 'false',

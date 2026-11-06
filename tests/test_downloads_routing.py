@@ -123,7 +123,7 @@ def test_series_known_tags_and_moves():
         assert result == {
             "scanned": 1, "tagged_and_moved": 1, "awaiting_calibre": 0,
             "failed": 0, "skipped_existing": 0, "conflicts_renamed": 0,
-            "series_awaiting": [], "flattened": 0, "flatten_skipped_existing": 0,
+            "series_awaiting": [], "converted": 0, "flattened": 0, "flatten_skipped_existing": 0,
             "flatten_conflicts_renamed": 0, "flatten_dirs_removed": 0,
             "removed": 1, "pruned_count": 1, "pruned_dirs": ["nested"], "skipped_busy": 0,
         }, result
@@ -399,7 +399,7 @@ def test_idempotent_and_staging_untouched():
         assert second == {
             "scanned": 0, "tagged_and_moved": 0, "awaiting_calibre": 0,
             "failed": 0, "skipped_existing": 0, "conflicts_renamed": 0,
-            "series_awaiting": [], "flattened": 0, "flatten_skipped_existing": 0,
+            "series_awaiting": [], "converted": 0, "flattened": 0, "flatten_skipped_existing": 0,
             "flatten_conflicts_renamed": 0, "flatten_dirs_removed": 0,
             "removed": 0, "pruned_count": 0, "pruned_dirs": [], "skipped_busy": 0,
         }, second

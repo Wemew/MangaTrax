@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from app.parser import extract_manga_bundle_and_volumes, normalize_text
 from app.staging_duplicates import _release_for
+from app.archive_conversion import CONVERTIBLE_EXTENSIONS, NATIVE_EXTENSIONS, is_convertible
 
 logger = logging.getLogger("mangatrax.download_failures")
 
@@ -86,36 +87,73 @@ def clear_pipeline_success(db, downloads_dir: str, path: str) -> None:
 
 
 def scan_failures(db, downloads_dir: str) -> Dict[str, Any]:
-    """Walk .cbz files, record non-ZIP archives, clear now-valid records."""
+    """Walk every raw-download file; record anything that cannot become a staged CBZ."""
     checked = failed = cleared = 0
     if not downloads_dir or not os.path.isdir(downloads_dir):
         return {"checked": 0, "failed": 0, "cleared": 0}
     root = os.path.realpath(downloads_dir)
+    ignored_suffixes = (".part", ".tmp", ".mangatrax-part", ".mangatrax-rewrite-tmp",
+                        ".crdownload", ".download")
+    ebook_exts = {".epub", ".pdf", ".mobi", ".azw3", ".txt", ".doc", ".docx"}
     for current, dirs, names in os.walk(root):
-        dirs[:] = [name for name in dirs if not name.startswith(".")]
+        dirs[:] = [name for name in dirs if not name.startswith(".") and not os.path.islink(os.path.join(current, name))]
         for name in names:
-            if not name.lower().endswith(".cbz"):
+            if name.startswith(".") or any(name.lower().endswith(suffix) for suffix in ignored_suffixes):
                 continue
             path = os.path.join(current, name)
             if os.path.islink(path) or not os.path.isfile(path):
                 continue
+            relative = _relative_to(root, path)
+            ext = os.path.splitext(name)[1].lower()
             checked += 1
-            if is_valid_cbz(path):
-                cleared += 1
+            if ext in NATIVE_EXTENSIONS:
+                if is_valid_cbz(path):
+                    cleared += 1
+                    try:
+                        db.clear_download_failure(relative)
+                    except Exception:
+                        pass
+                else:
+                    detected = detect_document_type(path)
+                    reason = "File is not a zip file"
+                    if detected not in ("unknown", "zip"):
+                        reason = f"File is not a zip file (detected {detected.upper()})"
+                    try:
+                        record_failure(db, root, path, reason, detected)
+                        failed += 1
+                    except Exception as exc:
+                        logger.debug("Could not record scan failure for %s: %s", path, exc)
+                continue
+            if ext in CONVERTIBLE_EXTENSIONS:
+                detected = detect_document_type(path)
+                label = ext.lstrip(".").upper()
+                reason = (
+                    f"Unsupported archive format ({label}) — convert to CBZ; "
+                    "it cannot be tagged or routed until converted"
+                )
                 try:
-                    db.clear_download_failure(_relative_to(root, path))
-                except Exception:
-                    pass
+                    record_failure(db, root, path, reason, detected or ext.lstrip("."))
+                    failed += 1
+                except Exception as exc:
+                    logger.debug("Could not record archive failure for %s: %s", path, exc)
+                continue
+            if ext in ebook_exts:
+                detected = detect_document_type(path) or ext.lstrip(".")
+                try:
+                    record_failure(db, root, path,
+                                   "Ebook/document — not a CBZ comic archive; cannot be tagged or routed",
+                                   detected)
+                    failed += 1
+                except Exception as exc:
+                    logger.debug("Could not record ebook failure for %s: %s", path, exc)
                 continue
             detected = detect_document_type(path)
-            reason = "File is not a zip file"
-            if detected not in ("unknown", "zip"):
-                reason = f"File is not a zip file (detected {detected.upper()})"
             try:
-                record_failure(db, root, path, reason, detected)
+                record_failure(db, root, path,
+                               "Unrecognised file — cannot route to staging", detected)
                 failed += 1
             except Exception as exc:
-                logger.debug("Could not record scan failure for %s: %s", path, exc)
+                logger.debug("Could not record unknown failure for %s: %s", path, exc)
     return {"checked": checked, "failed": failed, "cleared": cleared}
 
 
@@ -181,6 +219,8 @@ def serialize_failure(db, row: Dict[str, Any], downloads_dir: str) -> Dict[str, 
         "can_retry": can_retry,
         "retry_reason": retry_reason,
         "created_at": row.get("created_at") or "",
+        "extension": os.path.splitext(relative)[1].lower(),
+        "can_convert": is_convertible(relative),
     }
 
 
