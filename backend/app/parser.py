@@ -1187,7 +1187,7 @@ def is_light_novel(raw_title: str) -> bool:
 
     # 2. Dedicated Light Novel Imprints (Yen On is exclusively LN, Airship is Seven Seas LN line, etc.)
     #    Checked with parenthesised metadata stripped: only bracket/bare occurrences count.
-    if re.search(r'\b(?:yen\s*on|airship|cross\s*infinite\s*world|tentai\s*books|hanashi\s*media|seven\s*seas\s*siren)\b', t_without_parens):
+    if re.search(r'\b(?:yen\s*on|airship|cross\s*infinite\s*world|j-novel\s*club|j-novel\s*heart|tentai\s*books|hanashi\s*media|seven\s*seas\s*siren)\b', t_without_parens):
         if not has_manga_marker:
             return True
 
@@ -1199,6 +1199,20 @@ def is_light_novel(raw_title: str) -> bool:
     # 4. Pattern: [Publisher] [ReleaseGroup] without manga marker.  Square brackets
     #    only -- the LN imprint convention -- e.g. '[Seven Seas] [Stick]'.
     square_brackets = [b.strip() for b in re.findall(r'\[([^\]]+)\]', raw_title) if b.strip()]
+    # Single square-bracketed publisher/imprint is enough when it names a dedicated
+    # LN imprint: '[Yen Press] Title v01', '[J-Novel Club] ...'.  The bracket must
+    # not itself be a volume/format tag, and parenthesised '(Yen Press)' remains
+    # manga-style metadata (paren convention).
+    if square_brackets and not has_manga_marker:
+        for bracket in square_brackets:
+            cand = bracket.lower()
+            if cand not in LN_IMPRINT_PUBLISHERS:
+                continue
+            if re.search(r"\b(?:v|vol|vols|volume|volumes)\.?\s*\d", cand):
+                continue
+            if re.search(r"\b(?:cbz|cbr|manga|epub|mobi|azw3?|digital)\b", cand):
+                continue
+            return True
     if len(square_brackets) >= 2 and not has_manga_marker:
         for i in range(len(square_brackets) - 1):
             cand_pub = square_brackets[i].lower()

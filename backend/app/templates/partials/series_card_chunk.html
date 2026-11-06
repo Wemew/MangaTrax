@@ -248,6 +248,9 @@
 
                 <!-- Actions for Release -->
                 <div class="flex items-center gap-1.5 self-end md:self-center">
+                    <button type="button" data-series="{{ r.series_name|e }}" onclick="openDifferentSeriesModal({{ r.id }}, this.dataset.series, this)" title="Move this release to a different series" class="different-series-btn p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-violet-300 border border-slate-700 text-xs flex items-center transition-colors">
+                        <i data-lucide="shuffle" class="w-3.5 h-3.5"></i>
+                    </button>
                     {% if r.download_url and (not r.download_state or r.download_state.can_download) %}
                     <button data-release-id="{{ r.id }}" title="Send to downloader" class="download-release-btn px-2.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-sm">
                         <i data-lucide="download" class="w-3.5 h-3.5"></i>

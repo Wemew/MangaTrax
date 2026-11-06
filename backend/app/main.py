@@ -3714,6 +3714,93 @@ async def api_update_series_link(series_id: int, payload: Dict[str, Any]):
     db.update_series_link(series_id, model.website_url)
     return JSONResponse({"status": "success", "website_url": model.website_url})
 
+@app.post("/api/releases/{release_id}/different-series")
+async def api_release_different_series(release_id: int, payload: Dict[str, Any]):
+    """Re-key exactly one release to another series (no global alias) — task-66."""
+    release = await asyncio.to_thread(db.get_release_by_id, release_id)
+    if not release:
+        raise HTTPException(status_code=404, detail="Release not found")
+    body = payload or {}
+    detach = body.get("detach") is True
+    new_title = str(body.get("new_series_title") or "").strip()
+    calibre_series = None
+    if detach:
+        try:
+            from app.parser import extract_manga_bundle_and_volumes
+            target = str(extract_manga_bundle_and_volumes(str(release.get("title") or "")).get("series_name") or "").strip()
+        except Exception:
+            target = ""
+        target = target or str(release.get("series_name") or "").strip()
+    elif new_title:
+        target = new_title
+    else:
+        try:
+            calibre_id = int(body.get("calibre_series_id"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="calibre_series_id, new_series_title or detach is required")
+        snapshot = await asyncio.to_thread(_calibre_series_snapshot)
+        if not snapshot:
+            snapshot = await asyncio.to_thread(db.get_all_series)
+        calibre_series = next(
+            (row for row in snapshot or []
+             if int(row.get("series_id") or row.get("id") or row.get("calibre_series_id") or 0) == calibre_id),
+            None,
+        )
+        if not calibre_series:
+            raise HTTPException(status_code=404, detail="Calibre series not found")
+        target = str(calibre_series.get("series_name") or calibre_series.get("name") or "").strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="target series is empty")
+    old_status = str(release.get("status") or "")
+    veto = old_status.upper() in ("IGNORED", "BLACKLISTED")
+    candidate = dict(release)
+    candidate["series_name"] = target
+    try:
+        matcher = scheduler._series_refresh_matcher()
+        if detach:
+            raise RuntimeError("detach")
+        checked = matcher.check_release(candidate, auto_request_monitored=True)
+        status = checked.get("status") or ("DISCOVERY" if release.get("volumes") == [1.0] else "NEW")
+        missing = checked.get("missing_volumes") or []
+    except Exception:
+        volumes = release.get("volumes") or []
+        missing = volumes
+        status = "DISCOVERY" if (volumes == [1.0] or not volumes or release.get("is_complete") or release.get("is_bundle")) else "NEW"
+    if veto:
+        status = old_status
+    elif detach:
+        # Explicit "detach → Discovery" overrides sticky REQUESTED for this row.
+        status = status if status in ("DISCOVERY", "NEW") else "DISCOVERY"
+    else:
+        from app.database import resolve_status
+        status = resolve_status(old_status, status) or status
+    with db.get_connection() as conn:
+        conn.execute(
+            "UPDATE releases SET series_name = ?, status = ?, missing_vols_json = ?, "
+            "updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+            (target, status, json.dumps([float(v) for v in missing]), release_id),
+        )
+        conn.commit()
+    try:
+        db._invalidate_grouped_cache()
+    except Exception:
+        pass
+    try:
+        db.log_activity(
+            "RELEASE_REKEYED_DIFFERENT_SERIES",
+            f"Re-keyed release #{release_id} from '{release.get('series_name')}' to '{target}'",
+            json.dumps({"detach": detach, "status": status, "no_alias": True}),
+        )
+    except Exception:
+        pass
+    updated = db.get_release_by_id(release_id) or {}
+    return JSONResponse({
+        "status": "success", "release_id": release_id, "series_name": target,
+        "missing_volumes": missing, "release_status": status,
+        "download_state": release_download_state(updated), "release": updated,
+    })
+
+
 @app.post("/api/series/{series_id}/match-calibre")
 async def api_match_series_to_calibre(series_id: int, payload: Dict[str, Any]):
     """Manually link a tracked series to an existing Calibre series (task-62)."""
