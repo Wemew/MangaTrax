@@ -3,18 +3,38 @@
 {% block title %}Downloader & Staging{% endblock %}
 
 {% block content %}
-<div class="mb-5 bg-darkcard border border-slate-800 rounded-2xl p-4" id="auto-download-diagnostics">
+<style>
+    .dl-section, .dl-anchor { scroll-margin-top: 5.5rem; }
+    .dl-anchor { display: block; height: 0; }
+    @media (max-width: 767px) {
+        .dl-action, .dl-icon-btn {
+            min-height: 44px;
+            min-width: 44px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .dl-check-hit { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
+        #dl-section-nav { top: 4rem; }
+    }
+</style>
+<div class="mb-5 bg-darkcard border border-slate-800 rounded-2xl p-4 dl-section" id="auto-download-diagnostics"><span id="dl-diagnostics" class="dl-anchor" aria-hidden="true"></span>
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
         <div>
             <h2 class="text-lg font-bold text-white flex items-center gap-2"><i data-lucide="zap" class="w-5 h-5 text-amber-400"></i> Auto-download diagnostics</h2>
             <p class="text-xs text-slate-400 mt-1">Explains whether new/transitioning feed releases are being auto-downloaded, and why not. Dedupe checks in-flight, staged volumes and qBittorrent limitations.</p>
         </div>
-        <button type="button" onclick="refreshAutoDownloadDiagnostics()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Refresh diagnostics</button>
+        <div class="flex items-center gap-2">
+            <button type="button" id="dl-diag-toggle" onclick="toggleDiagnostics()" aria-expanded="false" aria-controls="auto-download-diagnostics-body" class="md:hidden px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Details</button>
+            <button type="button" onclick="refreshAutoDownloadDiagnostics()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Refresh diagnostics</button>
+        </div>
     </div>
-    <div id="auto-download-summary" class="mt-3 text-xs text-slate-300">Loading…</div>
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
-        <div><h3 class="text-xs font-bold text-slate-200 mb-1">Why nothing fires</h3><ul id="auto-download-checklist" class="space-y-1 text-[11px] text-slate-400"></ul></div>
-        <div><h3 class="text-xs font-bold text-slate-200 mb-1">Recent decisions</h3><ul id="auto-download-decisions" class="space-y-1 text-[11px] text-slate-400 max-h-48 overflow-y-auto"></ul></div>
+    <div id="auto-download-diagnostics-body" class="hidden md:block">
+        <div id="auto-download-summary" class="mt-3 text-xs text-slate-300">Loading…</div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
+            <div><h3 class="text-xs font-bold text-slate-200 mb-1">Why nothing fires</h3><ul id="auto-download-checklist" class="space-y-1 text-[11px] text-slate-400"></ul></div>
+            <div><h3 class="text-xs font-bold text-slate-200 mb-1">Recent decisions</h3><ul id="auto-download-decisions" class="space-y-1 text-[11px] text-slate-400 max-h-48 overflow-y-auto"></ul></div>
+        </div>
     </div>
 </div>
 
@@ -52,6 +72,18 @@
     </div>
 
     {% include "partials/storage_warning.html" %}
+
+    <!-- Sticky in-page section navigator (UX-027) -->
+    <nav id="dl-section-nav" class="mt-section-nav sticky top-16 z-30 bg-[#0b0f19]/95 backdrop-blur border border-slate-800 rounded-2xl p-2 shadow-lg" aria-label="Downloads sections">
+        <a href="#dl-diagnostics" data-dl-nav="dl-diagnostics">Diagnostics</a>
+        <a href="#dl-awaiting" data-dl-nav="dl-awaiting">Awaiting Series</a>
+        <a href="#dl-failed" data-dl-nav="dl-failed">Failed Documents</a>
+        <a href="#dl-queue" data-dl-nav="dl-queue">Queue</a>
+        <a href="#dl-inventory" data-dl-nav="dl-inventory">Inventory</a>
+        <a href="#dl-staging" data-dl-nav="dl-staging">Staging</a>
+        <a href="#dl-cleanup" data-dl-nav="dl-cleanup">Staging Cleanup</a>
+        <a href="#dl-audit" data-dl-nav="dl-audit">Audit</a>
+    </nav>
 
     <!-- In-App Downloader Configuration & Status Card -->
     <div class="bg-darkcard border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
@@ -115,13 +147,13 @@
     </div>
 
     <!-- Awaiting Calibre series (task-22 downloads routing) -->
-    <div class="space-y-3">
+    <div class="space-y-3 dl-section" id="dl-awaiting">
         <div class="flex items-center justify-between">
             <h2 class="text-lg font-bold text-white tracking-tight flex items-center gap-2">
                 <i data-lucide="library" class="w-5 h-5 text-amber-400"></i>
                 Awaiting Calibre Series
             </h2>
-            <span class="text-xs text-slate-500"><span id="awaiting-series-count">{{ awaiting_series|length }}</span> series · <span id="awaiting-file-count">{{ awaiting_total }}</span> file(s)</span>
+            <span class="text-xs text-slate-400"><span id="awaiting-series-count">{{ awaiting_series|length }}</span> series · <span id="awaiting-file-count">{{ awaiting_total }}</span> file(s)</span>
         </div>
         <div class="bg-darkcard border border-slate-800 rounded-2xl p-4 shadow-xl">
             {% if awaiting_series %}
@@ -143,7 +175,7 @@
                     <ul class="mt-1.5 space-y-1">
                         {% for file in item.files %}
                         <li class="awaiting-file-row flex items-center justify-between gap-2 pl-3" data-relative="{{ file.relative }}">
-                            <span class="font-mono text-slate-300 truncate" title="{{ file.relative }}">{{ file.name }} <span class="text-slate-500">({{ file.size_mb }} MB)</span></span>
+                            <span class="font-mono text-slate-300 truncate" title="{{ file.relative }}">{{ file.name }} <span class="text-slate-400">({{ file.size_mb }} MB)</span></span>
                             <button type="button" data-relative="{{ file.relative }}" data-series="{{ item.series|e }}" onclick="deleteDownloadFile(this, 'downloads', this.dataset.relative)" class="file-delete-btn px-2 py-1 rounded-lg bg-rose-900/30 hover:bg-rose-900/50 border border-rose-700/40 text-rose-300 text-[10px] font-semibold inline-flex items-center gap-1" title="Delete this file from raw downloads">
                                 <i data-lucide="trash-2" class="w-3 h-3"></i> Delete
                             </button>
@@ -154,13 +186,13 @@
                 {% endfor %}
             </ul>
             {% else %}
-            <p class="text-xs text-slate-500">Nothing waiting: every downloaded series is either known to Calibre or not downloaded yet.</p>
+            <p class="text-xs text-slate-400">Nothing waiting: every downloaded series is either known to Calibre or not downloaded yet.</p>
             {% endif %}
         </div>
     </div>
 
     <!-- Failed documents (task-58): unreadable archives with retry/delete. -->
-    <div class="space-y-3 bg-darkcard border border-slate-800 rounded-2xl p-4" id="failed-documents-card">
+    <div class="space-y-3 bg-darkcard border border-slate-800 rounded-2xl p-4 dl-section" id="failed-documents-card"><span id="dl-failed" class="dl-anchor" aria-hidden="true"></span>
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
                 <h2 class="text-lg font-bold text-white tracking-tight flex items-center gap-2">
@@ -170,14 +202,14 @@
                 <p class="text-xs text-slate-400 mt-1">Every stuck raw download that cannot reach staging: unreadable CBZ, unsupported CBR/RAR/7Z/CB7/ZIP archives, ebooks/documents, and unrecognised files (plus tagging/move failures). Retry a matched release, convert a comic archive to CBZ, or delete it after confirming. Ebooks cannot be tagged.</p>
             </div>
             <div class="flex items-center gap-2">
-                <span class="text-xs text-slate-500"><span id="failed-documents-count">0</span> file(s)</span>
+                <span class="text-xs text-slate-400"><span id="failed-documents-count">0</span> file(s)</span>
                 <button type="button" onclick="scanFailedDocuments()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200">Scan for failed files</button>
                 <button type="button" onclick="armDeleteAllFailures()" id="btn-delete-all-failures" class="hidden px-3 py-1.5 rounded-lg bg-rose-900/50 border border-rose-500/40 text-rose-200 text-xs font-semibold">Delete all</button>
             </div>
         </div>
         <div id="failed-documents-confirm" class="hidden bg-rose-500/10 border border-rose-500/40 rounded-xl p-3 text-xs text-rose-200"></div>
         <div id="failed-documents-wrap" class="hidden overflow-x-auto">
-            <table class="w-full text-xs">
+            <table class="w-full text-xs mt-table-cards">
                 <thead><tr class="text-slate-400 text-left">
                     <th class="py-2 pr-2">File</th><th class="py-2 pr-2">Size</th>
                     <th class="py-2 pr-2">Detected type / reason</th><th class="py-2 pr-2">Matched release</th><th class="py-2 text-right">Actions</th>
@@ -185,23 +217,21 @@
                 <tbody id="failed-documents-body"></tbody>
             </table>
         </div>
-        <p id="failed-documents-empty" class="text-xs text-slate-500">No failed documents found.</p>
+        <p id="failed-documents-empty" class="text-xs text-slate-400">No failed documents found.</p>
     </div>
 
     <!-- Active Downloader Queue -->
-    <div class="space-y-4">
+    <div class="space-y-4 dl-section" id="dl-queue">
         <div class="flex items-center justify-between">
             <h2 class="text-lg font-bold text-white tracking-tight flex items-center gap-2">
                 <i data-lucide="list-ordered" class="w-5 h-5 text-slate-400"></i>
                 Active {{ 'Torbox' if engine == 'torbox' else 'qBittorrent' }} Queue
             </h2>
-            <div class="flex items-center gap-3">
+            <div class="flex flex-wrap items-center gap-3">
                 {% if engine == 'torbox' %}
-                <span id="torbox-last-checked" class="text-[11px] text-slate-500">
+                <span id="torbox-last-checked" class="text-[11px] text-slate-400">
                     {% if torbox_last_checked_seconds_ago is not none %}Last checked {{ torbox_last_checked_seconds_ago }}s ago{% else %}Not checked yet{% endif %}
                 </span>
-                <span id="torbox-updated" class="text-[11px] text-slate-600">Updated just now</span>
-                <span id="torbox-reconnecting" class="hidden px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Reconnecting…</span>
                 <button type="button" onclick="clearFailedTorbox()" id="btn-clear-failed-torbox" title="Remove all failed items from the Torbox queue (active downloads are kept)" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/30 border border-slate-700 text-xs font-semibold text-rose-300 flex items-center gap-1.5 transition-colors">
                     <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                     Clear failed
@@ -211,13 +241,23 @@
                     Check now
                 </button>
                 {% endif %}
-                <span class="text-xs text-slate-500">{{ torrents|length }} item(s)</span>
+                <span id="torbox-updated" class="text-[11px] text-slate-600">Updated just now</span>
+                <span id="torbox-reconnecting" class="hidden px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Reconnecting…</span>
+                {% if engine == 'qbit' %}
+                <button type="button" id="dl-qbit-retry" onclick="refreshQbitQueueNow(true)" class="hidden px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-200 text-[11px] font-semibold">Stale — Retry</button>
+                {% endif %}
+                <span class="text-xs text-slate-400">{{ torrents|length }} item(s)</span>
             </div>
         </div>
 
-        <div class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+        <div id="dl-queue-refresh-error" class="hidden flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-rose-500/10 border border-rose-500/40 rounded-xl px-4 py-2 text-xs text-rose-200">
+            <span id="dl-queue-refresh-error-text">Couldn't refresh the queue.</span>
+            <button type="button" onclick="refreshDownloadsNow()" class="dl-action px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-semibold">Retry</button>
+        </div>
+
+        <div class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl" id="dl-queue-card">
             <div class="overflow-x-auto">
-                <table class="w-full text-left border-collapse text-xs">
+                <table class="w-full text-left border-collapse text-xs mt-table-cards">
                     <thead>
                         <tr class="bg-slate-900 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
                             <th class="py-3 px-4">Torrent Name</th>
@@ -230,18 +270,18 @@
                     </thead>
                     <tbody id="torbox-queue-body" class="divide-y divide-slate-800/60">
                         {% for t in torrents %}
-                        <tr id="torbox-row-{{ t.release_id }}" data-release-id="{{ t.release_id }}" class="hover:bg-slate-850/50 transition-colors">
-                            <td class="py-3 px-4 max-w-xs font-semibold text-white truncate break-words-anywhere" title="{{ t.name }}">
+                        <tr {% if engine == 'qbit' %}id="torbox-row-{{ t.hash }}"{% else %}id="torbox-row-{{ t.release_id }}"{% endif %} data-release-id="{{ t.release_id }}" data-torrent-hash="{{ t.hash or '' }}" class="hover:bg-slate-850/50 transition-colors">
+                            <td data-label="Torrent Name" class="py-3 px-4 max-w-xs font-semibold text-white truncate break-words-anywhere" title="{{ t.name }}">
                                 {{ t.name }}
                             </td>
-                            <td class="py-3 px-4 text-slate-300">
+                            <td data-label="Size" class="py-3 px-4 text-slate-300 qb-size">
                                 {% if t.phase == 'fetching' and t.total_bytes %}
                                 {{ ((t.total_bytes or 0) / 1024 / 1024)|round(1) }} MB
                                 {% else %}
                                 {{ ((t.size or 0) / 1024 / 1024)|round(1) }} MB
                                 {% endif %}
                             </td>
-                            <td class="py-3 px-4">
+                            <td data-label="Progress" class="py-3 px-4 qb-progress">
                                 {% if t.phase == 'fetching' %}
                                 <div class="torbox-progress-text flex items-center justify-between text-[11px] text-cyan-300 mb-1">
                                     <span>Fetching {{ t.progress_pct or 0 }}% · {{ ((t.downloaded_bytes or 0) / 1024 / 1024)|round(1) }} MB / {{ ((t.total_bytes or 0) / 1024 / 1024)|round(1) }} MB · {{ ((t.speed_bps or 0) / 1024 / 1024)|round(1) }} MB/s</span>
@@ -256,17 +296,17 @@
                                 {% elif t.phase == 'processing' %}
                                 <div class="torbox-progress-text text-[11px] text-amber-300">Processing on Torbox…</div>
                                 {% else %}
-                                <div class="flex items-center justify-between text-[11px] text-slate-400 mb-1">
-                                    <span>{{ ((t.progress or 0) * 100)|round(1) }}%</span>
-                                    <span>ETA: {{ ((t.eta or 0) / 60)|int if (t.eta or 0) > 0 else 0 }}m</span>
+                                <div class="qb-progress-text flex items-center justify-between text-[11px] text-slate-400 mb-1">
+                                    <span class="qb-pct">{{ ((t.progress or 0) * 100)|round(1) }}%</span>
+                                    <span class="qb-eta">ETA: {{ ((t.eta or 0) / 60)|int if (t.eta or 0) > 0 else 0 }}m</span>
                                 </div>
                                 <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                                    <div class="torbox-bar-fill bg-cyan-500 h-1.5 rounded-full" style="width: {{ ((t.progress or 0) * 100)|round }}%"></div>
+                                    <div class="qb-bar-fill torbox-bar-fill bg-cyan-500 h-1.5 rounded-full" style="width: {{ ((t.progress or 0) * 100)|round }}%"></div>
                                 </div>
                                 {% endif %}
                             </td>
-                            <td class="py-3 px-4">
-                                <div class="torbox-speed font-mono text-cyan-400 text-sm font-bold">
+                            <td data-label="Speed" class="py-3 px-4 qb-speed-cell">
+                                <div class="torbox-speed qb-speed font-mono text-cyan-400 text-sm font-bold">
                                     {% if t.phase == 'fetching' %}
                                     {{ ((t.speed_bps or 0) / 1024 / 1024)|round(1) }} MB/s
                                     {% else %}
@@ -275,7 +315,7 @@
                                 </div>
                                 <div class="torbox-spark mt-1 h-4 w-20 text-cyan-500/70" id="torbox-spark-{{ t.release_id }}"></div>
                             </td>
-                            <td class="py-3 px-4 capitalize text-slate-300">
+                            <td data-label="State" class="py-3 px-4 capitalize text-slate-300">
                                 {% if t.failed %}
                                 <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/40 text-rose-300 text-[10px] font-bold">Failed</span>
                                 {% if t.error %}
@@ -283,33 +323,33 @@
                                 {% if t.strict_hint %}<div class="text-[10px] text-amber-300/80 max-w-[280px] mt-0.5" title="{{ t.strict_hint }}">{{ t.strict_hint }}</div>{% endif %}
                                 {% endif %}
                                 {% else %}
-                                <span class="torbox-state {% if t.phase == 'fetching' %}text-cyan-300{% elif t.phase == 'ready' %}text-amber-300{% elif t.phase == 'routing' %}text-teal-300{% endif %}">
+                                <span class="torbox-state qb-state {% if t.phase == 'fetching' %}text-cyan-300{% elif t.phase == 'ready' %}text-amber-300{% elif t.phase == 'routing' %}text-teal-300{% endif %}">
                                     {% if t.phase == 'routing' %}Processing/routing…{% elif t.phase == 'processing' %}Processing on Torbox…{% else %}{{ t.state }}{% endif %}
                                 </span>
                                 {% endif %}
                             </td>
-                            <td class="py-3 px-4 text-right">
+                            <td data-label="Controls" class="py-3 px-4 text-right">
                                 <div class="flex items-center justify-end gap-1.5">
                                     {% if engine == 'torbox' %}
                                     {% if t.failed or t.can_retry %}
-                                    <button onclick="retryTorbox({{ t.release_id }})" title="Retry this Torbox download (strict rules apply)" class="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold" aria-label="Retry Torbox download">
+                                    <button onclick="retryTorbox({{ t.release_id }})" title="Retry this Torbox download (strict rules apply)" class="dl-action inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold" aria-label="Retry Torbox download">
                                         <i data-lucide="refresh-cw" class="w-3 h-3"></i> Retry
                                     </button>
                                     {% endif %}
-                                    <button onclick="removeTorbox({{ t.release_id }})" title="Remove from Torbox (frees the active slot)" class="p-1 rounded bg-slate-800 hover:bg-rose-900/30 text-rose-400" aria-label="Remove from Torbox">
+                                    <button onclick="removeTorbox({{ t.release_id }})" title="Remove from Torbox (frees the active slot)" class="dl-icon-btn p-1 rounded bg-slate-800 hover:bg-rose-900/30 text-rose-400" aria-label="Remove from Torbox">
                                         <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                                     </button>
                                     {% else %}
                                     {% if 'paused' in t.state|lower %}
-                                    <button onclick="resumeTorrent('{{ t.hash }}')" title="Resume" class="p-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-400" aria-label="Resume">
+                                    <button onclick="resumeTorrent('{{ t.hash }}')" title="Resume" class="dl-icon-btn p-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-400" aria-label="Resume">
                                         <i data-lucide="play" class="w-3.5 h-3.5"></i>
                                     </button>
                                     {% else %}
-                                    <button onclick="pauseTorrent('{{ t.hash }}')" title="Pause" class="p-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-400" aria-label="Pause">
+                                    <button onclick="pauseTorrent('{{ t.hash }}')" title="Pause" class="dl-icon-btn p-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-400" aria-label="Pause">
                                         <i data-lucide="pause" class="w-3.5 h-3.5"></i>
                                     </button>
                                     {% endif %}
-                                    <button onclick="deleteTorrent('{{ t.hash }}')" title="Delete from queue" class="p-1 rounded bg-slate-800 hover:bg-rose-900/30 text-rose-400" aria-label="Delete from queue">
+                                    <button onclick="deleteTorrent('{{ t.hash }}')" title="Delete from queue" class="dl-icon-btn p-1 rounded bg-slate-800 hover:bg-rose-900/30 text-rose-400" aria-label="Delete from queue">
                                         <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                                     </button>
                                     {% endif %}
@@ -317,8 +357,8 @@
                             </td>
                         </tr>
                         {% else %}
-                        <tr>
-                            <td colspan="6" class="py-10 text-center text-slate-500">
+                        <tr class="mt-table-empty">
+                            <td colspan="6" class="py-10 text-center text-slate-400">
                                 No active downloads in {{ 'the Torbox' if engine == 'torbox' else 'qBittorrent' }} queue.
                             </td>
                         </tr>
@@ -330,33 +370,33 @@
     </div>
 
     <!-- Raw Downloads Folder Inventory (task-30) -->
-    <div id="raw-downloads-card" data-scanned-at="{{ downloads_inventory.scanned_at if downloads_inventory else '' }}" class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+    <div id="raw-downloads-card" data-scanned-at="{{ downloads_inventory.scanned_at if downloads_inventory else '' }}" class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl dl-section"><span id="dl-inventory" class="dl-anchor" aria-hidden="true"></span>
         <div class="flex items-center justify-between px-6 py-4 border-b border-slate-800">
             <div>
                 <h2 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
                     <i data-lucide="folder-down" class="w-4 h-4 text-cyan-400"></i>
                     Downloads Folder (raw)
                 </h2>
-                <p class="text-[11px] text-slate-500 mt-1">
+                <p class="text-[11px] text-slate-400 mt-1">
                     Files fetched by the downloader before tagging. A finished download appears here automatically.
                     <span id="inventory-last-scan">{% if downloads_inventory_scanned_seconds is not none %}Last scanned {{ downloads_inventory_scanned_seconds }}s ago{% else %}Not scanned yet{% endif %}</span>
                 </p>
             </div>
-            <div class="flex items-center gap-2">
-                <button type="button" onclick="openRawCleanupPreview()" class="px-3 py-1.5 rounded-lg bg-amber-900/40 hover:bg-amber-900/60 border border-amber-700/50 text-amber-200 text-xs font-semibold flex items-center gap-1.5">
+            <div class="flex flex-wrap items-center gap-2">
+                <button type="button" onclick="openRawCleanupPreview()" class="dl-action px-3 py-1.5 rounded-lg bg-amber-900/40 hover:bg-amber-900/60 border border-amber-700/50 text-amber-200 text-xs font-semibold flex items-center gap-1.5">
                     <i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Clean up raw duplicates
                 </button>
-                <button type="button" onclick="rescanDownloads()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                <button type="button" onclick="rescanDownloads()" class="dl-action px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
                     <i data-lucide="search" class="w-3.5 h-3.5 text-cyan-400"></i> Rescan
                 </button>
-                <button type="button" onclick="pruneEmptyFolders()" id="btn-prune-empty" data-task-kind="downloads:prune" aria-label="Prune empty folders" title="Remove empty leftover folders from the downloads directory (busy downloads are kept)" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                <button type="button" onclick="pruneEmptyFolders()" id="btn-prune-empty" data-task-kind="downloads:prune" aria-label="Prune empty folders" title="Remove empty leftover folders from the downloads directory (busy downloads are kept)" class="dl-action px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
                     <i data-lucide="folder-x" class="w-3.5 h-3.5 text-amber-400"></i> Prune empty folders
                 </button>
-                <button type="button" onclick="flattenStaging()" id="btn-flatten-staging" data-task-kind="downloads:flatten" aria-label="Flatten staging folder" title="Move files out of nested staging subfolders into the staging root (collisions get a (2) suffix)" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                <button type="button" onclick="flattenStaging()" id="btn-flatten-staging" data-task-kind="downloads:flatten" aria-label="Flatten staging folder" title="Move files out of nested staging subfolders into the staging root (collisions get a (2) suffix)" class="dl-action px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5">
                     <i data-lucide="folders" class="w-3.5 h-3.5 text-cyan-400"></i> Flatten staging
                 </button>
-                <button type="button" onclick="tagMoveNow()" class="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5">
-                    <i data-lucide="tag" class="w-3.5 h-3.5"></i> Tag & move now
+                <button type="button" onclick="tagMoveNow()" title="Same foreground action as the header 'Process Downloads' button: tags eligible raw downloads and moves them to staging (no background task)" class="dl-action px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5">
+                    <i data-lucide="tag" class="w-3.5 h-3.5"></i> Tag & move now <span class="text-[10px] font-normal text-slate-400">(same as Process Downloads)</span>
                 </button>
             </div>
         </div>
@@ -378,7 +418,7 @@
 
         {% if downloads_inventory and downloads_inventory.entries %}
         <div class="overflow-x-auto">
-            <table class="w-full text-left border-collapse text-xs">
+            <table class="w-full text-left border-collapse text-xs mt-table-cards">
                 <thead>
                     <tr class="bg-slate-900 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
                         <th class="py-3 px-4">Name</th>
@@ -394,14 +434,14 @@
                 <tbody id="inventory-body" class="divide-y divide-slate-800/60">
                     {% for e in downloads_inventory.entries %}
                     <tr class="hover:bg-slate-850/50 transition-colors" data-relative="{{ e.relative }}">
-                        <td class="py-3 px-4 font-semibold text-white max-w-xs truncate break-words-anywhere" title="{{ e.relative }}">{{ e.name }}</td>
-                        <td class="py-3 px-4 text-slate-300">{{ e.file_count }}{% if e.cbz_count %} ({{ e.cbz_count }} cbz){% endif %}</td>
-                        <td class="py-3 px-4 text-slate-300">{{ (e.size_bytes / 1024 / 1024)|round(1) }} MB</td>
-                        <td class="py-3 px-4 text-slate-400">{% if e.age_seconds is not none %}{{ (e.age_seconds // 60) }}m{% else %}-{% endif %}</td>
-                        <td class="py-3 px-4 text-slate-300">
+                        <td data-label="Name" class="py-3 px-4 font-semibold text-white max-w-xs truncate break-words-anywhere" title="{{ e.relative }}">{{ e.name }}</td>
+                        <td data-label="Files" class="py-3 px-4 text-slate-300">{{ e.file_count }}{% if e.cbz_count %} ({{ e.cbz_count }} cbz){% endif %}</td>
+                        <td data-label="Size" class="py-3 px-4 text-slate-300">{{ (e.size_bytes / 1024 / 1024)|round(1) }} MB</td>
+                        <td data-label="Age" class="py-3 px-4 text-slate-400">{% if e.age_seconds is not none %}{{ (e.age_seconds // 60) }}m{% else %}-{% endif %}</td>
+                        <td data-label="Series / Volumes" class="py-3 px-4 text-slate-300">
                             {% if e.series_name %}{{ e.series_name }}{% if e.volumes %} · v{{ e.volumes|join(', ') }}{% endif %}{% else %}-{% endif %}
                         </td>
-                        <td class="py-3 px-4">
+                        <td data-label="State" class="py-3 px-4">
                             {% if e.state == 'ready' %}
                             <span class="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-[10px] font-bold">Ready to move</span>
                             {% elif e.state == 'awaiting_calibre' %}
@@ -412,15 +452,15 @@
                             <span class="px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/40 text-rose-300 text-[10px] font-bold">Unmatched</span>
                             {% endif %}
                         </td>
-                        <td class="py-3 px-4 text-slate-400 max-w-xs truncate" title="{% if e.release %}{{ e.release.title }}{% endif %}">
-                            {% if e.release %}{{ e.release.title }} <span class="text-slate-500">({{ e.release.download_status }})</span>{% else %}-{% endif %}
+                        <td data-label="Matched release" class="py-3 px-4 text-slate-400 max-w-xs truncate" title="{% if e.release %}{{ e.release.title }}{% endif %}">
+                            {% if e.release %}{{ e.release.title }} <span class="text-slate-400">({{ e.release.download_status }})</span>{% else %}-{% endif %}
                         </td>
-                        <td class="py-3 px-4 text-right">
+                        <td data-label="Action" class="py-3 px-4 text-right">
                             <div class="inline-flex items-center gap-1">
                                 {% if e.state == 'awaiting_calibre' and e.series_name %}
-                                <button type="button" data-series="{{ e.series_name|e }}" onclick="openManualMatch(this.dataset.series)" aria-label="Manual match {{ e.series_name|e }}" class="px-2 py-1 rounded bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Manual match</button>
+                                <button type="button" data-series="{{ e.series_name|e }}" onclick="openManualMatch(this.dataset.series)" aria-label="Manual match {{ e.series_name|e }}" class="dl-action px-2 py-1 rounded bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Manual match</button>
                                 {% endif %}
-                                <button type="button" data-relative="{{ e.relative }}" onclick="deleteRawInventoryEntry(this, this.dataset.relative)" class="raw-delete-btn px-2 py-1 rounded bg-rose-900/30 hover:bg-rose-900/50 border border-rose-700/40 text-rose-300 text-[10px] font-bold" title="Delete this raw entry permanently">Delete</button>
+                                <button type="button" data-relative="{{ e.relative }}" onclick="deleteRawInventoryEntry(this, this.dataset.relative)" class="dl-action raw-delete-btn px-2 py-1 rounded bg-rose-900/30 hover:bg-rose-900/50 border border-rose-700/40 text-rose-300 text-[10px] font-bold" title="Delete this raw entry permanently">Delete</button>
                             </div>
                         </td>
                     </tr>
@@ -429,7 +469,7 @@
             </table>
         </div>
         {% else %}
-        <div id="inventory-empty" class="px-6 py-8 text-center text-slate-500 text-xs">
+        <div id="inventory-empty" class="px-6 py-8 text-center text-slate-400 text-xs">
             Downloads folder is empty{% if downloads_inventory and not downloads_inventory.exists %} or not configured{% endif %}.
             <span class="text-slate-600">Last scanned {% if downloads_inventory_scanned_seconds is not none %}{{ downloads_inventory_scanned_seconds }}s ago{% else %}never{% endif %}.</span>
         </div>
@@ -437,7 +477,7 @@
     </div>
 
     <!-- Staging Directory Files & ComicInfo.xml Status -->
-    <div class="space-y-4">
+    <div class="space-y-4 dl-section" id="dl-staging">
         <div class="flex items-center justify-between">
             <div>
                 <h2 class="text-lg font-bold text-white tracking-tight flex items-center gap-2">
@@ -447,7 +487,7 @@
                 <p class="text-xs text-slate-400 mt-0.5">
                     Location: <span class="font-mono text-slate-300">{{ staging_dir }}</span>. MangaTrax tags these files with ComicInfo.xml so Calibre and BookOrbit read metadata automatically.
                 </p>
-                <p class="text-[11px] text-slate-500 mt-1">
+                <p class="text-[11px] text-slate-400 mt-1">
                     Staging is the final hand-off: MangaTrax never writes into the Calibre library. Files stay here until
                     Calibre/BookOrbit imports them; the next Calibre sync then marks their releases In Calibre. If you already
                     imported a file, use <strong>Delete</strong> to remove the staging copy, or audit duplicates in
@@ -459,7 +499,7 @@
                     <option value="all">All staged files</option>
                     <option value="needs">Needs naming intervention</option>
                 </select>
-                <span class="text-xs text-slate-500"><span id="staging-file-count">{{ staging_files|length }}</span> CBZ file(s)</span>
+                <span class="text-xs text-slate-400"><span id="staging-file-count">{{ staging_files|length }}</span> CBZ file(s)</span>
             </div>
         </div>
 
@@ -483,7 +523,7 @@
                         </div>
                     </summary>
                     <div class="overflow-x-auto border-t border-slate-800/60">
-                        <table class="w-full text-left border-collapse text-xs">
+                        <table class="w-full text-left border-collapse text-xs mt-table-cards">
                             <thead>
                                 <tr class="bg-slate-900 text-slate-400 font-semibold uppercase tracking-wider text-[10px]">
                                     <th class="py-2 px-4">File Name</th><th class="py-2 px-4">Size</th>
@@ -493,25 +533,25 @@
                             <tbody class="divide-y divide-slate-800/60 staging-group-body">
                                 {% for f in group.files %}
                                 <tr class="hover:bg-slate-850/50 transition-colors staging-file-row" data-needs-intervention="{{ 'true' if f.needs_intervention else 'false' }}">
-                                    <td class="py-3 px-4 font-mono text-slate-200">{{ f.name }}
+                                    <td data-label="File Name" class="py-3 px-4 font-mono text-slate-200">{{ f.name }}
                                         {% if f.needs_intervention %}<div class="text-[10px] text-rose-300 mt-1" title="{{ f.intervention_reason }}">Needs intervention: {{ f.intervention_reason }}</div>{% endif %}
                                     </td>
-                                    <td class="py-3 px-4 text-slate-400 font-mono">{{ f.size_mb }} MB</td>
-                                    <td class="py-3 px-4">
+                                    <td data-label="Size" class="py-3 px-4 text-slate-400 font-mono">{{ f.size_mb }} MB</td>
+                                    <td data-label="ComicInfo.xml Tag" class="py-3 px-4">
                                         {% if f.tagged %}
                                         <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"><i data-lucide="check" class="w-3 h-3"></i> Tagged</span>
                                         {% else %}
                                         <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20"><i data-lucide="clock" class="w-3 h-3"></i> Untagged</span>
                                         {% endif %}
                                     </td>
-                                    <td class="py-3 px-4 text-right"><span class="text-slate-400 text-[11px]">Ready for ingestion</span></td>
-                                    <td class="py-3 px-4 text-right">
-                                        <div class="inline-flex items-center gap-1.5">
+                                    <td data-label="Status" class="py-3 px-4 text-right"><span class="text-slate-400 text-[11px]">Ready for ingestion</span></td>
+                                    <td data-label="Metadata" class="py-3 px-4 text-right">
+                                        <div class="inline-flex flex-wrap items-center justify-end gap-1.5">
                                             {% if f.needs_intervention %}
-                                            <button type="button" data-relative="{{ f.relative }}" data-suggested-filename="{{ f.suggested_filename }}" data-suggested-title="{{ f.suggested_title }}" onclick="openTagModal(this.dataset.relative, {fix: true, suggestedFilename: this.dataset.suggestedFilename, suggestedTitle: this.dataset.suggestedTitle})" class="px-2 py-1 rounded-lg bg-rose-900/40 hover:bg-rose-900/60 border border-rose-700/50 text-[11px] font-semibold text-rose-200 inline-flex items-center gap-1"><i data-lucide="wrench" class="w-3 h-3"></i> Fix naming</button>
+                                            <button type="button" data-relative="{{ f.relative }}" data-suggested-filename="{{ f.suggested_filename }}" data-suggested-title="{{ f.suggested_title }}" onclick="openTagModal(this.dataset.relative, {fix: true, suggestedFilename: this.dataset.suggestedFilename, suggestedTitle: this.dataset.suggestedTitle})" class="dl-action px-2 py-1 rounded-lg bg-rose-900/40 hover:bg-rose-900/60 border border-rose-700/50 text-[11px] font-semibold text-rose-200 inline-flex items-center gap-1"><i data-lucide="wrench" class="w-3 h-3"></i> Fix naming</button>
                                             {% endif %}
-                                            <button type="button" data-filename="{{ f.relative }}" onclick="openTagModal(this.dataset.filename)" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-semibold text-cyan-300 inline-flex items-center gap-1"><i data-lucide="tag" class="w-3 h-3"></i> Preview / Tag</button>
-                                            <button type="button" data-relative="{{ f.relative }}" onclick="deleteDownloadFile(this, 'staging', this.dataset.relative)" class="file-delete-btn px-2 py-1 rounded-lg bg-rose-900/30 hover:bg-rose-900/50 border border-rose-700/40 text-rose-300 text-[11px] font-semibold inline-flex items-center gap-1"><i data-lucide="trash-2" class="w-3 h-3"></i> Delete</button>
+                                            <button type="button" data-filename="{{ f.relative }}" onclick="openTagModal(this.dataset.filename)" class="dl-action px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-semibold text-cyan-300 inline-flex items-center gap-1"><i data-lucide="tag" class="w-3 h-3"></i> Preview / Tag</button>
+                                            <button type="button" data-relative="{{ f.relative }}" onclick="deleteDownloadFile(this, 'staging', this.dataset.relative)" class="dl-action file-delete-btn px-2 py-1 rounded-lg bg-rose-900/30 hover:bg-rose-900/50 border border-rose-700/40 text-rose-300 text-[11px] font-semibold inline-flex items-center gap-1"><i data-lucide="trash-2" class="w-3 h-3"></i> Delete</button>
                                         </div>
                                     </td>
                                 </tr>
@@ -521,14 +561,14 @@
                     </div>
                 </details>
                 {% else %}
-                <p class="staging-empty-row px-4 py-10 text-center text-slate-500 text-xs">Staging directory is empty. Completed downloads will appear here.</p>
+                <p class="staging-empty-row px-4 py-10 text-center text-slate-400 text-xs">Staging directory is empty. Completed downloads will appear here.</p>
                 {% endfor %}
             </div>
         </div>
     </div>
 
     <!-- Staging cleanup: files already present in Calibre (task-55). Audit before purge. -->
-    <div class="space-y-3 bg-darkcard border border-slate-800 rounded-2xl p-4">
+    <div class="space-y-3 bg-darkcard border border-slate-800 rounded-2xl p-4 dl-section" id="dl-cleanup">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
                 <h2 class="text-lg font-bold text-white tracking-tight flex items-center gap-2">
@@ -546,13 +586,13 @@
         <div id="staging-duplicates-confirm" class="hidden bg-rose-500/10 border border-rose-500/40 rounded-xl p-3 text-xs text-rose-200"></div>
         <div id="staging-duplicates-state" class="text-xs text-slate-400">Not audited yet — click “Audit staging duplicates”.</div>
         <div id="staging-duplicates-wrap" class="hidden overflow-x-auto">
-            <table class="w-full text-xs">
+            <table class="w-full text-xs mt-table-cards">
                 <thead><tr class="text-slate-400 text-left">
-                    <th class="py-2 pr-2"><input type="checkbox" id="staging-dup-select-all" onchange="toggleAllDuplicates(this)" aria-label="Select all duplicates"></th>
+                    <th class="py-2 pr-2"><label class="dl-check-hit"><input type="checkbox" id="staging-dup-select-all" onchange="toggleAllDuplicates(this)" aria-label="Select all duplicates"></label></th>
                     <th class="py-2 pr-2">File</th><th class="py-2 pr-2">Series / volume(s)</th>
                     <th class="py-2 pr-2">Size</th><th class="py-2 pr-2">Calibre match</th><th class="py-2">Linked release</th>
                 </tr></thead>
-                <tbody id="staging-duplicates-body"></tbody>
+                <tbody id="staging-duplicates-body" class="divide-y divide-slate-800/60"></tbody>
             </table>
         </div>
     </div>
@@ -560,7 +600,7 @@
     <!-- CBZ Series Tag Audit: the old rename bug wrote AniList display titles into
          ComicInfo.xml <Series>, which breaks Calibre matching.  The audit is
          read-only; only explicitly selected files are rewritten. -->
-    <div class="space-y-4">
+    <div class="space-y-4 dl-section" id="dl-audit">
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
                 <h2 class="text-lg font-bold text-white tracking-tight flex items-center gap-2">
@@ -587,7 +627,7 @@
 
         <div class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
             <div class="overflow-x-auto">
-                <table class="w-full text-left border-collapse text-xs">
+                <table class="w-full text-left border-collapse text-xs mt-table-cards">
                     <thead>
                         <tr class="bg-slate-900 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
                             <th class="py-3 px-4 w-10"></th>
@@ -600,8 +640,8 @@
                         </tr>
                     </thead>
                     <tbody id="audit-rows" class="divide-y divide-slate-800/60">
-                        <tr>
-                            <td colspan="7" class="py-8 text-center text-slate-500">
+                        <tr class="mt-table-empty">
+                            <td colspan="7" class="py-8 text-center text-slate-400">
                                 Not audited yet. Click "Audit Series Tags" to scan the staging directory (read-only).
                             </td>
                         </tr>
@@ -611,62 +651,6 @@
         </div>
     </div>
 
-</div>
-
-<!-- Preview / manual tag modal -->
-<div id="tag-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm items-center justify-center p-4">
-    <div class="bg-darkcard border border-slate-700 rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-4">
-        <div class="flex items-start justify-between gap-3">
-            <div>
-                <h3 class="text-sm font-bold text-white flex items-center gap-2">
-                    <i data-lucide="tag" class="w-4 h-4 text-cyan-400"></i>
-                    Preview &amp; Manual Tag
-                </h3>
-                <p id="tag-modal-file" class="text-[11px] text-slate-400 font-mono mt-0.5 break-all"></p>
-            </div>
-            <button type="button" onclick="closeTagModal()" class="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300" title="Close" aria-label="Close">
-                <i data-lucide="x" class="w-4 h-4"></i>
-            </button>
-        </div>
-        <div id="tag-modal-current" class="text-[11px] text-slate-400 bg-slate-900/60 border border-slate-800 rounded-xl p-3 font-mono whitespace-pre-wrap max-h-32 overflow-y-auto">Loading current ComicInfo.xml...</div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div class="sm:col-span-2">
-                <label class="block text-xs font-semibold text-slate-300 mb-1">Filename (staged, .cbz)</label>
-                <input type="text" id="tag-field-filename" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
-            </div>
-            <div class="sm:col-span-2">
-                <label class="block text-xs font-semibold text-slate-300 mb-1">Series (Calibre matching key)</label>
-                <input type="text" id="tag-field-series" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
-            </div>
-            <div>
-                <label class="block text-xs font-semibold text-slate-300 mb-1">Volume</label>
-                <input type="text" id="tag-field-volume" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
-            </div>
-            <div>
-                <label class="block text-xs font-semibold text-slate-300 mb-1">Title</label>
-                <input type="text" id="tag-field-title" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
-            </div>
-            <div>
-                <label class="block text-xs font-semibold text-slate-300 mb-1">Writer</label>
-                <input type="text" id="tag-field-writer" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
-            </div>
-            <div>
-                <label class="block text-xs font-semibold text-slate-300 mb-1">Publisher</label>
-                <input type="text" id="tag-field-publisher" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
-            </div>
-            <div class="sm:col-span-2">
-                <label class="block text-xs font-semibold text-slate-300 mb-1">Genre</label>
-                <input type="text" id="tag-field-genre" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
-            </div>
-        </div>
-        <div class="flex items-center justify-end gap-2 pt-1">
-            <button type="button" onclick="closeTagModal()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold">Cancel</button>
-            <button type="button" onclick="saveManualTag()" class="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95">
-                <i data-lucide="save" class="w-3.5 h-3.5"></i>
-                Save ComicInfo.xml
-            </button>
-        </div>
-    </div>
 </div>
 
 <script>
@@ -833,7 +817,7 @@ function _ensureTorboxEmptyState() {
     const tbody = document.getElementById('torbox-queue-body');
     if (!tbody) return;
     if (tbody.querySelectorAll('tr[data-release-id]').length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="py-10 text-center text-slate-500">No active downloads in the Torbox queue.</td></tr>';
+        tbody.innerHTML = _torboxEmptyRow();
     }
 }
 
@@ -935,12 +919,16 @@ function _torboxControlsHtml(t) {
 function _torboxRowHtml(t) {
     const speed = `<div class="torbox-speed font-mono text-cyan-400 text-sm font-bold">${_fmtMb(t.phase === 'fetching' ? t.speed_bps : t.dlspeed)} MB/s</div>` +
         `<div class="torbox-spark mt-1 h-4 w-20 text-cyan-500/70" id="torbox-spark-${t.release_id}">${_sparklineSvg(t.speed_history)}</div>`;
-    return `<td class="py-3 px-4 max-w-xs font-semibold text-white truncate break-words-anywhere" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</td>` +
-        `<td class="py-3 px-4 text-slate-300">${_fmtSize(t.phase === 'fetching' && t.total_bytes ? t.total_bytes : t.size)}</td>` +
-        `<td class="py-3 px-4">${_torboxProgressHtml(t)}</td>` +
-        `<td class="py-3 px-4">${speed}</td>` +
-        `<td class="py-3 px-4">${_torboxStateHtml(t)}</td>` +
-        `<td class="py-3 px-4 text-right">${_torboxControlsHtml(t)}</td>`;
+    return `<td data-label="Torrent Name" class="py-3 px-4 max-w-xs font-semibold text-white truncate break-words-anywhere" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</td>` +
+        `<td data-label="Size" class="py-3 px-4 text-slate-300">${_fmtSize(t.phase === 'fetching' && t.total_bytes ? t.total_bytes : t.size)}</td>` +
+        `<td data-label="Progress" class="py-3 px-4">${_torboxProgressHtml(t)}</td>` +
+        `<td data-label="Speed" class="py-3 px-4">${speed}</td>` +
+        `<td data-label="State" class="py-3 px-4">${_torboxStateHtml(t)}</td>` +
+        `<td data-label="Controls" class="py-3 px-4 text-right">${_torboxControlsHtml(t)}</td>`;
+}
+
+function _torboxEmptyRow() {
+    return '<tr class="mt-table-empty"><td colspan="6" class="py-10 text-center text-slate-400">No active downloads in the Torbox queue.</td></tr>';
 }
 
 function renderTorboxQueue(torrents, meta) {
@@ -955,7 +943,7 @@ function renderTorboxQueue(torrents, meta) {
 
     if (stale && rows.length === 0 && _lastTorboxRows.size > 0) return; // keep last rows
     if (!stale && meta.live_state_available !== false && rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="py-10 text-center text-slate-500">No active downloads in the Torbox queue.</td></tr>';
+        tbody.innerHTML = _torboxEmptyRow();
         _lastTorboxRows.clear();
         return;
     }
@@ -1015,19 +1003,22 @@ function renderInventory(inventory, lastScannedAt) {
             }
             const series = e.series_name ? `${escapeHtml(e.series_name)}${(e.volumes || []).length ? ' · v' + e.volumes.join(', ') : ''}` : '-';
             const age = (e.age_seconds === null || e.age_seconds === undefined) ? '-' : `${Math.floor(e.age_seconds / 60)}m`;
-            const release = e.release ? `${escapeHtml(e.release.title)} <span class="text-slate-500">(${escapeHtml(e.release.download_status)})</span>` : '-';
-            row.innerHTML = `<td class="py-3 px-4 font-semibold text-white max-w-xs truncate" title="${escapeHtml(e.relative || e.name)}">${escapeHtml(e.name)}</td>` +
-                `<td class="py-3 px-4 text-slate-300">${e.file_count}${e.cbz_count ? ` (${e.cbz_count} cbz)` : ''}</td>` +
-                `<td class="py-3 px-4 text-slate-300">${_fmtSize(e.size_bytes)}</td>` +
-                `<td class="py-3 px-4 text-slate-400">${age}</td>` +
-                `<td class="py-3 px-4 text-slate-300">${series}</td>` +
-                `<td class="py-3 px-4">${_inventoryStateHtml(e)}</td>` +
-                `<td class="py-3 px-4 text-slate-400 max-w-xs truncate">${release}</td>` +
-                `<td class="py-3 px-4 text-right"><div class="inline-flex items-center gap-1">${e.state === 'awaiting_calibre' && e.series_name ? `<button data-series="${escapeHtml(e.series_name)}" onclick="openManualMatch(this.dataset.series)" class="px-2 py-1 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Manual match</button>` : ''}<button data-relative="${escapeHtml(e.relative || e.name || '')}" onclick="deleteRawInventoryEntry(this, this.dataset.relative)" class="px-2 py-1 rounded bg-rose-900/30 border border-rose-700/40 text-rose-300 text-[10px] font-bold" title="Delete this raw entry permanently">Delete</button></div></td>`;
+            const release = e.release ? `${escapeHtml(e.release.title)} <span class="text-slate-400">(${escapeHtml(e.release.download_status)})</span>` : '-';
+            row.innerHTML = `<td data-label="Name" class="py-3 px-4 font-semibold text-white max-w-xs truncate" title="${escapeHtml(e.relative || e.name)}">${escapeHtml(e.name)}</td>` +
+                `<td data-label="Files" class="py-3 px-4 text-slate-300">${e.file_count}${e.cbz_count ? ` (${e.cbz_count} cbz)` : ''}</td>` +
+                `<td data-label="Size" class="py-3 px-4 text-slate-300">${_fmtSize(e.size_bytes)}</td>` +
+                `<td data-label="Age" class="py-3 px-4 text-slate-400">${age}</td>` +
+                `<td data-label="Series / Volumes" class="py-3 px-4 text-slate-300">${series}</td>` +
+                `<td data-label="State" class="py-3 px-4">${_inventoryStateHtml(e)}</td>` +
+                `<td data-label="Matched release" class="py-3 px-4 text-slate-400 max-w-xs truncate">${release}</td>` +
+                `<td data-label="Action" class="py-3 px-4 text-right"><div class="inline-flex items-center gap-1">${e.state === 'awaiting_calibre' && e.series_name ? `<button data-series="${escapeHtml(e.series_name)}" onclick="openManualMatch(this.dataset.series)" class="dl-action px-2 py-1 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] font-bold">Manual match</button>` : ''}<button data-relative="${escapeHtml(e.relative || e.name || '')}" onclick="deleteRawInventoryEntry(this, this.dataset.relative)" class="dl-action px-2 py-1 rounded bg-rose-900/30 border border-rose-700/40 text-rose-300 text-[10px] font-bold" title="Delete this raw entry permanently">Delete</button></div></td>`;
         }
         const seen = new Set(entries.map(e => e.relative || e.name || ''));
         for (const row of Array.from(tbody.querySelectorAll('tr[data-relative]'))) {
             if (!seen.has(row.dataset.relative)) row.remove();
+        }
+        if (entries.length === 0) {
+            tbody.innerHTML = '<tr class="mt-table-empty"><td colspan="8" class="py-8 text-center text-slate-400">No raw downloads match the current inventory.</td></tr>';
         }
     }
     const empty = document.getElementById('inventory-empty');
@@ -1053,7 +1044,7 @@ function openManualMatch(source) {
     document.getElementById('manual-match-search').value = '';
     document.getElementById('manual-match-new-title').value = '';
     document.getElementById('manual-match-error').classList.add('hidden');
-    document.getElementById('manual-match-list').innerHTML = '<p class="p-4 text-center text-slate-500 text-[11px]">Loading Calibre series...</p>';
+    document.getElementById('manual-match-list').innerHTML = '<p class="p-4 text-center text-slate-400 text-[11px]">Loading Calibre series...</p>';
     modal.classList.remove('hidden');
     modal.classList.add('flex');
     loadManualMatchSuggestions('');
@@ -1091,7 +1082,7 @@ function searchManualMatch() {
 function renderManualMatchList() {
     const list = document.getElementById('manual-match-list');
     if (!_manualMatchItems.length) {
-        list.innerHTML = '<p class="p-4 text-center text-slate-500 text-[11px]">No Calibre series found. Create a new title below.</p>';
+        list.innerHTML = '<p class="p-4 text-center text-slate-400 text-[11px]">No Calibre series found. Create a new title below.</p>';
         return;
     }
     list.innerHTML = _manualMatchItems.map(function (item) {
@@ -1143,18 +1134,29 @@ async function submitManualMatch() {
 async function refreshDownloadsNow() {
     if (_downloadsPollTimer) { clearTimeout(_downloadsPollTimer); _downloadsPollTimer = null; }
     let active = false;
+    const errorBar = document.getElementById('dl-queue-refresh-error');
     try {
         const res = await fetch('/api/downloads/status', { headers: { 'Accept': 'application/json' } });
-        if (res.ok) {
-            const data = await res.json();
-            renderTorboxQueue(data.torrents || [], data);
-            renderInventory(data.inventory, data.last_scanned_at);
-            const last = data.downloader && data.downloader.last_checked_seconds_ago;
-            const header = document.getElementById('torbox-last-checked');
-            if (header && last !== undefined && last !== null) header.textContent = `Last checked ${last}s ago`;
-            active = (data.torrents || []).some(t => t && (t.is_active || ['ready', 'fetching', 'routing'].includes(t.phase)));
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const eng = data.engine || 'torbox';
+        if (eng === 'torbox') renderTorboxQueue(data.torrents || [], data);
+        renderInventory(data.inventory, data.last_scanned_at);
+        const last = data.downloader && data.downloader.last_checked_seconds_ago;
+        const header = document.getElementById('torbox-last-checked');
+        if (header && last !== undefined && last !== null) header.textContent = `Last checked ${last}s ago`;
+        active = (data.torrents || []).some(t => t && (t.is_active || ['ready', 'fetching', 'routing'].includes(t.phase)));
+        if (errorBar) errorBar.classList.add('hidden');
+        if (window.mtPollOk) mtPollOk();
+    } catch (err) {
+        /* Keep the last known rows, but surface a retry affordance instead of failing silently. */
+        if (errorBar) {
+            const msg = document.getElementById('dl-queue-refresh-error-text');
+            if (msg) msg.textContent = "Couldn't refresh the queue: " + (err && err.message ? err.message : String(err));
+            errorBar.classList.remove('hidden');
         }
-    } catch (err) { /* keep last rows; retry shortly */ }
+        if (window.mtPollFail) mtPollFail(res.status);
+    }
     _downloadsPollTimer = setTimeout(refreshDownloadsNow, active ? 1000 : 5000);
 }
 
@@ -1271,7 +1273,7 @@ function renderAudit(data) {
     const files = (data && data.files) || [];
     const summary = (data && data.summary) || {};
     if (!files.length) {
-        tbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500">No .cbz files found in the staging directory.</td></tr>';
+        tbody.innerHTML = '<tr class="mt-table-empty"><td colspan="7" class="py-8 text-center text-slate-400">No .cbz files found in the staging directory.</td></tr>';
         summaryEl.textContent = '';
         return;
     }
@@ -1288,13 +1290,13 @@ function renderAudit(data) {
             ? `<input type="checkbox" data-audit-index="${index}" onchange="toggleAuditSelection(this)" class="rounded border-slate-700 bg-slate-900 text-amber-500 focus:ring-0">`
             : '<span class="text-slate-600">&mdash;</span>';
         return `<tr class="hover:bg-slate-850/50 transition-colors">
-            <td class="py-3 px-4">${checkbox}</td>
-            <td class="py-3 px-4 font-mono text-slate-200 break-all">${escapeHtml(row.file)}</td>
-            <td class="py-3 px-4 text-slate-300 font-mono break-all">${escapeHtml(row.current_series || '-')}</td>
-            <td class="py-3 px-4 text-amber-300 font-mono break-all">${escapeHtml(row.suggested_series || '-')}</td>
-            <td class="py-3 px-4 text-[10px] font-mono text-slate-400 max-w-md">${auditFieldDiff(row)}</td>
-            <td class="py-3 px-4">${auditStatusBadge(row)}${(row.changes && row.changes.length) ? ` <span class="text-[10px] text-slate-400">(${escapeHtml(row.changes.join(', '))})</span>` : ''}</td>
-            <td class="py-3 px-4 text-slate-400 text-[11px] max-w-md">${escapeHtml(row.reason || '')}</td>
+            <td data-label="Select" class="py-3 px-4"><label class="dl-check-hit">${checkbox}</label></td>
+            <td data-label="File" class="py-3 px-4 font-mono text-slate-200 break-all">${escapeHtml(row.file)}</td>
+            <td data-label="Current Series" class="py-3 px-4 text-slate-300 font-mono break-all">${escapeHtml(row.current_series || '-')}</td>
+            <td data-label="Suggested" class="py-3 px-4 text-amber-300 font-mono break-all">${escapeHtml(row.suggested_series || '-')}</td>
+            <td data-label="Calibre fields" class="py-3 px-4 text-[10px] font-mono text-slate-400 max-w-md">${auditFieldDiff(row)}</td>
+            <td data-label="Status" class="py-3 px-4">${auditStatusBadge(row)}${(row.changes && row.changes.length) ? ` <span class="text-[10px] text-slate-400">(${escapeHtml(row.changes.join(', '))})</span>` : ''}</td>
+            <td data-label="Why" class="py-3 px-4 text-slate-400 text-[11px] max-w-md">${escapeHtml(row.reason || '')}</td>
         </tr>`;
     }).join('');
     window._auditData = files;
@@ -1315,17 +1317,17 @@ function toggleAuditSelection(checkbox) {
 
 async function auditSeriesTags() {
     const tbody = document.getElementById('audit-rows');
-    tbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500">Auditing staging directory (read-only)...</td></tr>';
+    tbody.innerHTML = '<tr class="mt-table-empty"><td colspan="7" class="py-8 text-center text-slate-400">Auditing staging directory (read-only)...</td></tr>';
     try {
         const res = await fetch('/api/tagger/audit');
         const data = await res.json();
         if (res.ok && data.status === 'success') {
             renderAudit(data);
         } else {
-            tbody.innerHTML = `<tr><td colspan="7" class="py-8 text-center text-rose-400">${escapeHtml(data.detail || 'Audit failed')}</td></tr>`;
+            tbody.innerHTML = `<tr class="mt-table-empty"><td colspan="7" class="py-8 text-center text-rose-400">${escapeHtml(data.detail || 'Audit failed')}</td></tr>`;
         }
     } catch (err) {
-        tbody.innerHTML = `<tr><td colspan="7" class="py-8 text-center text-rose-400">Audit failed: ${escapeHtml(String(err))}</td></tr>`;
+        tbody.innerHTML = `<tr class="mt-table-empty"><td colspan="7" class="py-8 text-center text-rose-400">Audit failed: ${escapeHtml(String(err))}</td></tr>`;
     }
 }
 
@@ -1358,9 +1360,35 @@ async function repairSelectedSeries() {
     }
 }
 
+let _tagModalDirty = false;
+let _tagModalGuardReady = false;
+function setTagModalDirty(dirty) {
+    _tagModalDirty = !!dirty;
+    if (!dirty) hideTagUnsavedWarning();
+}
+function hideTagUnsavedWarning() {
+    const box = document.getElementById('tag-modal-unsaved');
+    if (box) box.classList.add('hidden');
+}
+function showTagUnsavedWarning() {
+    const box = document.getElementById('tag-modal-unsaved');
+    if (box) box.classList.remove('hidden');
+}
+function openTagModalDialog(modal) {
+    if (window.MangaModal) { try { window.MangaModal.open(modal, null, { labelledBy: 'tag-modal-title' }); return; } catch (e) { /* fall through */ } }
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+}
+function closeTagModalDialog(modal) {
+    if (window.MangaModal) { try { window.MangaModal.close(modal); return; } catch (e) { /* fall through */ } }
+    modal.classList.add('hidden');
+    modal.classList.remove('flex');
+}
 async function openTagModal(filename, options) {
     _tagModalFile = filename;
     _tagModalOptions = options || {};
+    _tagModalDirty = false;
+    hideTagUnsavedWarning();
     const modal = document.getElementById('tag-modal');
     document.getElementById('tag-modal-file').textContent = filename;
     document.getElementById('tag-modal-current').textContent = 'Loading current ComicInfo.xml...';
@@ -1368,7 +1396,7 @@ async function openTagModal(filename, options) {
         document.getElementById('tag-field-' + field).value = '';
     });
     document.getElementById('tag-field-filename').value = _tagModalOptions.suggestedFilename || filename;
-    modal.style.display = 'flex';
+    if (modal) { modal.style.display = ''; openTagModalDialog(modal); }
     try {
         const res = await fetch('/api/tagger/preview?filename=' + encodeURIComponent(filename));
         const data = await res.json();
@@ -1382,14 +1410,28 @@ async function openTagModal(filename, options) {
         document.getElementById('tag-modal-current').textContent = data.has_comicinfo
             ? JSON.stringify(info, null, 2)
             : 'No ComicInfo.xml yet. Saving will create one.';
+        _tagModalDirty = false;
+        hideTagUnsavedWarning();
     } catch (err) {
         document.getElementById('tag-modal-current').textContent = 'Could not load preview: ' + err;
     }
 }
 
 function closeTagModal() {
-    document.getElementById('tag-modal').style.display = 'none';
+    const modal = document.getElementById('tag-modal');
+    _tagModalDirty = false;
+    hideTagUnsavedWarning();
+    if (modal) closeTagModalDialog(modal);
     _tagModalFile = null;
+}
+
+function requestCloseTagModal() {
+    if (_tagModalDirty) { showTagUnsavedWarning(); return; }
+    closeTagModal();
+}
+
+function discardAndCloseTagModal() {
+    closeTagModal();
 }
 
 async function saveManualTag() {
@@ -1463,12 +1505,12 @@ function renderStagingDuplicates() {
     if (body) {
         body.innerHTML = _stagingDuplicates.map(function (item) {
             return `<tr class="border-t border-slate-800/60">
-                <td class="py-2 pr-2"><input type="checkbox" class="staging-dup-check" data-relative="${stagingDupEsc(item.relative)}" checked onchange="updateDuplicatePurgeButtons()" aria-label="Select ${stagingDupEsc(item.filename)}"></td>
-                <td class="py-2 pr-2 text-slate-200 break-all">${stagingDupEsc(item.filename)}</td>
-                <td class="py-2 pr-2 text-slate-300">${stagingDupEsc(item.series)} · v${(item.volumes || []).join(', ')}</td>
-                <td class="py-2 pr-2 text-slate-400">${formatBytes(item.size || 0)}</td>
-                <td class="py-2 pr-2 text-emerald-300">${stagingDupEsc(item.calibre_series)}${(item.calibre_volumes || []).length ? ' · owned v' + stagingDupEsc((item.calibre_volumes || []).join(', ')) : ' · owned volumes unknown'}</td>
-                <td class="py-2 text-slate-400">${item.release_id ? '#' + item.release_id + ' · ' + stagingDupEsc(item.release_title) : '-'}</td>
+                <td data-label="Select" class="py-2 pr-2"><label class="dl-check-hit"><input type="checkbox" class="staging-dup-check" data-relative="${stagingDupEsc(item.relative)}" checked onchange="updateDuplicatePurgeButtons()" aria-label="Select ${stagingDupEsc(item.filename)}"></label></td>
+                <td data-label="File" class="py-2 pr-2 text-slate-200 break-all">${stagingDupEsc(item.filename)}</td>
+                <td data-label="Series / volume(s)" class="py-2 pr-2 text-slate-300">${stagingDupEsc(item.series)} · v${(item.volumes || []).join(', ')}</td>
+                <td data-label="Size" class="py-2 pr-2 text-slate-400">${formatBytes(item.size || 0)}</td>
+                <td data-label="Calibre match" class="py-2 pr-2 text-emerald-300">${stagingDupEsc(item.calibre_series)}${(item.calibre_volumes || []).length ? ' · owned v' + stagingDupEsc((item.calibre_volumes || []).join(', ')) : ' · owned volumes unknown'}</td>
+                <td data-label="Linked release" class="py-2 text-slate-400">${item.release_id ? '#' + item.release_id + ' · ' + stagingDupEsc(item.release_title) : '-'}</td>
             </tr>`;
         }).join('');
     }
@@ -1583,7 +1625,7 @@ async function refreshAutoDownloadDiagnostics() {
             decisions.innerHTML = rows.length ? rows.map(function (item) {
                 const wanted = (item.wanted_volumes || []).join(', ');
                 return `<li class="${item.event === 'AUTO_DOWNLOAD_SUBMITTED' ? 'text-emerald-300' : 'text-slate-400'}"><span class="font-semibold">${escapeHtml(item.event.replace('AUTO_DOWNLOAD_', ''))}</span> ${escapeHtml(item.reason || '')} · ${escapeHtml(item.series || '')} ${wanted ? '→ v' + escapeHtml(wanted) : ''}</li>`;
-            }).join('') : '<li class="text-slate-500">No auto-download decisions yet.</li>';
+            }).join('') : '<li class="text-slate-400">No auto-download decisions yet.</li>';
         }
     } catch (err) { if (summary) summary.textContent = 'Diagnostics failed: ' + err; }
 }
@@ -1643,7 +1685,7 @@ async function deleteDownloadFile(button, area, relative) {
             if (countEl) countEl.textContent = String(data.remaining_files != null ? data.remaining_files : Math.max(0, parseInt(countEl.textContent || '0', 10) - 1));
             const groupsEl = document.getElementById('staging-series-groups');
             if (groupsEl && !groupsEl.querySelector('details.staging-series-group')) {
-                groupsEl.innerHTML = '<p class="staging-empty-row px-4 py-10 text-center text-slate-500 text-xs">Staging directory is empty. Completed downloads will appear here.</p>';
+                groupsEl.innerHTML = '<p class="staging-empty-row px-4 py-10 text-center text-slate-400 text-xs">Staging directory is empty. Completed downloads will appear here.</p>';
             }
         } else {
             const fileRow = button.closest('.awaiting-file-row');
@@ -1661,7 +1703,7 @@ async function deleteDownloadFile(button, area, relative) {
             if (seriesCount && list) seriesCount.textContent = String(list.querySelectorAll('.awaiting-series-row').length);
             if (fileCount && list) fileCount.textContent = String(list.querySelectorAll('.awaiting-file-row').length);
             if (list && !list.querySelector('.awaiting-series-row')) {
-                list.insertAdjacentHTML('beforeend', '<p class="text-xs text-slate-500" id="awaiting-empty-state">Nothing waiting: every downloaded series is either known to Calibre or not downloaded yet.</p>');
+                list.insertAdjacentHTML('beforeend', '<p class="text-xs text-slate-400" id="awaiting-empty-state">Nothing waiting: every downloaded series is either known to Calibre or not downloaded yet.</p>');
             }
         }
         showToast(`Deleted ${relative}`, 'success');
@@ -1709,7 +1751,7 @@ function renderFailedDocuments() {
     if (!body) return;
     body.innerHTML = _failedDocuments.map(function (item) {
         const matched = item.release_id
-            ? `<span class="font-semibold text-slate-200">${failedEsc(item.release_title)}</span> <span class="text-slate-500">#${item.release_id} · ${failedEsc(item.release_status)}</span>`
+            ? `<span class="font-semibold text-slate-200">${failedEsc(item.release_title)}</span> <span class="text-slate-400">#${item.release_id} · ${failedEsc(item.release_status)}</span>`
             : '<span class="text-amber-300">no matching release</span>';
         const retryDisabled = item.can_retry ? '' : 'disabled';
         const retryTitle = item.can_retry ? 'Send the matched release to the downloader again' : failedEsc(item.retry_reason || 'Retry unavailable');
@@ -1717,14 +1759,14 @@ function renderFailedDocuments() {
             ? `<button type="button" data-task-kind="downloads:archive-convert" onclick="convertFailedDocument(this, ${item.id})" title="Convert this archive to CBZ, then tag/route it normally" class="px-2 py-1 rounded-lg bg-violet-900/40 border border-violet-700/50 text-violet-200 text-[10px] font-semibold mr-1">Convert to CBZ</button>`
             : '';
         return `<tr class="border-t border-slate-800/60 failed-document-row" data-failure-id="${item.id}">
-            <td class="py-2 pr-2 text-slate-200 break-all" title="${failedEsc(item.file_relative)}">${failedEsc(item.name)}<div class="text-[10px] text-slate-500">${failedEsc(item.file_relative)}</div></td>
-            <td class="py-2 pr-2 text-slate-400">${formatBytes(item.size || 0)}</td>
-            <td class="py-2 pr-2"><span class="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300 text-[10px] uppercase">${failedEsc(item.detected_type || 'unknown')}</span><div class="text-[10px] text-rose-300 mt-1 break-words">${failedEsc(item.reason || '')}</div></td>
-            <td class="py-2 pr-2">${matched}</td>
-            <td class="py-2 text-right whitespace-nowrap">
+            <td data-label="File" class="py-2 pr-2 text-slate-200 break-all" title="${failedEsc(item.file_relative)}">${failedEsc(item.name)}<div class="text-[10px] text-slate-400">${failedEsc(item.file_relative)}</div></td>
+            <td data-label="Size" class="py-2 pr-2 text-slate-400">${formatBytes(item.size || 0)}</td>
+            <td data-label="Detected type / reason" class="py-2 pr-2"><span class="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300 text-[10px] uppercase">${failedEsc(item.detected_type || 'unknown')}</span><div class="text-[10px] text-rose-300 mt-1 break-words">${failedEsc(item.reason || '')}</div></td>
+            <td data-label="Matched release" class="py-2 pr-2">${matched}</td>
+            <td data-label="Actions" class="py-2 text-right whitespace-nowrap">
                 ${convertButton}
-                <button type="button" onclick="retryFailedDocument(this, ${item.id})" ${retryDisabled} title="${retryTitle}" class="px-2 py-1 rounded-lg bg-cyan-900/40 border border-cyan-700/50 text-cyan-200 text-[10px] font-semibold disabled:opacity-40 disabled:cursor-not-allowed">Retry download</button>
-                <button type="button" onclick="deleteFailedDocument(this, ${item.id})" class="px-2 py-1 rounded-lg bg-rose-900/40 border border-rose-700/50 text-rose-300 text-[10px] font-semibold ml-1">Delete file</button>
+                <button type="button" onclick="retryFailedDocument(this, ${item.id})" ${retryDisabled} title="${retryTitle}" class="dl-action px-2 py-1 rounded-lg bg-cyan-900/40 border border-cyan-700/50 text-cyan-200 text-[10px] font-semibold disabled:opacity-40 disabled:cursor-not-allowed">Retry download</button>
+                <button type="button" onclick="deleteFailedDocument(this, ${item.id})" class="dl-action px-2 py-1 rounded-lg bg-rose-900/40 border border-rose-700/50 text-rose-300 text-[10px] font-semibold ml-1">Delete file</button>
             </td>
         </tr>`;
     }).join('');
@@ -1870,10 +1912,10 @@ async function openRawCleanupPreview() {
                 const detail = item.reason === 'duplicate' ? `Duplicate of ${rawCleanupEsc(item.alternate || '')}`
                     : rawCleanupEsc(item.detail || item.reason);
                 return `<div class="bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-2 text-[11px] flex items-center justify-between gap-3">
-                    <div class="min-w-0"><span class="font-semibold text-slate-200">${rawCleanupEsc(item.name)}</span> <span class="text-slate-500">(${formatBytes(item.size_bytes || 0)})</span><div class="text-slate-400">${detail}</div></div>
+                    <div class="min-w-0"><span class="font-semibold text-slate-200">${rawCleanupEsc(item.name)}</span> <span class="text-slate-400">(${formatBytes(item.size_bytes || 0)})</span><div class="text-slate-400">${detail}</div></div>
                     <span class="shrink-0 px-1.5 py-0.5 rounded bg-rose-900/30 border border-rose-700/40 text-rose-300 text-[10px] uppercase">${rawCleanupEsc(item.reason)}</span>
                 </div>`;
-            }).join('') : '<p class="text-xs text-slate-500">No duplicate or already-present raw entries found.</p>';
+            }).join('') : '<p class="text-xs text-slate-400">No duplicate or already-present raw entries found.</p>';
         }
     } catch (err) { if (summary) summary.textContent = 'Audit failed: ' + err; }
 }
@@ -1985,7 +2027,7 @@ function openStagingSeriesMatch(source, button) {
     document.getElementById('staging-series-match-title').textContent = `Match staging series '${source || ''}'`;
     document.getElementById('staging-series-match-search').value = source || '';
     document.getElementById('staging-series-match-new').value = '';
-    document.getElementById('staging-series-match-list').innerHTML = '<p class="p-4 text-center text-slate-500 text-[11px]">Searching Calibre…</p>';
+    document.getElementById('staging-series-match-list').innerHTML = '<p class="p-4 text-center text-slate-400 text-[11px]">Searching Calibre…</p>';
     document.getElementById('staging-series-match-error').classList.add('hidden');
     modal.classList.remove('hidden'); modal.classList.add('flex');
     searchStagingSeriesMatch();
@@ -2002,7 +2044,7 @@ async function searchStagingSeriesMatch() {
         list.innerHTML = items.length ? items.map(function (item) {
             const id = item.id || item.series_id;
             return `<button type="button" onclick="selectStagingSeriesMatch(${JSON.stringify(id)})" class="w-full text-left px-3 py-2 hover:bg-slate-800/60"><span class="block text-xs font-semibold text-white">${stagingSeriesEsc(item.name || item.series_name)}</span><span class="block text-[10px] text-slate-400">${item.book_count || 0} book(s)</span></button>`;
-        }).join('') : '<p class="p-4 text-center text-slate-500 text-[11px]">No Calibre series found. Create a new title below.</p>';
+        }).join('') : '<p class="p-4 text-center text-slate-400 text-[11px]">No Calibre series found. Create a new title below.</p>';
     } catch (err) { list.innerHTML = '<p class="p-4 text-center text-rose-300 text-[11px]">Could not load Calibre series.</p>'; }
 }
 function selectStagingSeriesMatch(id) { _stagingSeriesTarget = id; }
@@ -2059,7 +2101,230 @@ function filterStagingIntervention(mode) {
         group.classList.toggle('hidden', needs && !hasNeeds);
     });
 }
+
+// --- UX-027: section navigator, diagnostics collapse, safe qBittorrent refresh ---
+const _DL_ENGINE = '{{ engine }}';
+let _qbitPollTimer = null;
+let _qbitPollBusy = false;
+
+function toggleDiagnostics() {
+    const body = document.getElementById('auto-download-diagnostics-body');
+    const btn = document.getElementById('dl-diag-toggle');
+    if (!body) return;
+    const wasHidden = body.classList.contains('hidden');
+    body.classList.toggle('hidden', !wasHidden);
+    if (btn) {
+        btn.setAttribute('aria-expanded', wasHidden ? 'true' : 'false');
+        btn.textContent = wasHidden ? 'Hide details' : 'Details';
+    }
+}
+
+function setQbitStale(stale, message) {
+    const chip = document.getElementById('torbox-reconnecting');
+    const updated = document.getElementById('torbox-updated');
+    const retry = document.getElementById('dl-qbit-retry');
+    if (chip) chip.classList.toggle('hidden', !stale);
+    if (retry) retry.classList.toggle('hidden', !stale);
+    if (updated) updated.textContent = stale ? (message || 'Stale — Retry') : 'Updated just now';
+}
+
+function _qbNum(value) { const n = Number(value); return isFinite(n) ? n : 0; }
+function _qbMb(bytes) { return (_qbNum(bytes) / 1024 / 1024).toFixed(1) + ' MB'; }
+
+function updateQbitRow(row, t) {
+    if (!row || !t) return;
+    const progress = Math.max(0, Math.min(1, _qbNum(t.progress)));
+    const percent = progress * 100;
+    const pctEl = row.querySelector('.qb-pct');
+    if (pctEl) pctEl.textContent = percent.toFixed(1) + '%';
+    const bar = row.querySelector('.qb-bar-fill');
+    if (bar) bar.style.width = percent.toFixed(1) + '%';
+    const etaEl = row.querySelector('.qb-eta');
+    if (etaEl) {
+        const eta = _qbNum(t.eta);
+        etaEl.textContent = 'ETA: ' + (eta > 0 ? Math.round(eta / 60) + 'm' : '0m');
+    }
+    const speedEl = row.querySelector('.qb-speed');
+    if (speedEl) speedEl.textContent = (_qbNum(t.dlspeed) / 1024 / 1024).toFixed(2) + ' MB/s';
+    const sizeEl = row.querySelector('.qb-size');
+    if (sizeEl) sizeEl.textContent = _qbMb(t.size);
+    const stateEl = row.querySelector('.qb-state');
+    if (stateEl) stateEl.textContent = String((t && t.state) || 'unknown');
+}
+
+async function refreshQbitQueueNow(fromRetry) {
+    if (fromRetry) setQbitStale(false);
+    if (_qbitPollBusy) return;
+    if (document.hidden && !fromRetry) return;
+    _qbitPollBusy = true;
+    const card = document.getElementById('dl-queue-card');
+    if (card) card.setAttribute('aria-busy', 'true');
+    try {
+        const res = await fetch('/api/downloads/status', { headers: { 'Accept': 'application/json' } });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const live = data && data.engine === 'qbit' && data.live_state_available !== false && !data.degraded;
+        if (!live) { setQbitStale(true, 'Stale — Retry'); if (window.mtPollFail) mtPollFail(503); return; }
+        setQbitStale(false);
+        const tbody = document.getElementById('torbox-queue-body');
+        const rows = tbody ? Array.from(tbody.querySelectorAll('tr[data-torrent-hash]')) : [];
+        if (rows.length) {
+            const byHash = {};
+            (data.torrents || []).forEach(function (t) { if (t && t.hash) byHash[String(t.hash).toLowerCase()] = t; });
+            rows.forEach(function (row) {
+                const hash = String(row.getAttribute('data-torrent-hash') || '').toLowerCase();
+                const t = byHash[hash];
+                if (t) updateQbitRow(row, t);
+            });
+        }
+        if (window.mtPollOk) mtPollOk();
+    } catch (err) {
+        setQbitStale(true, 'Stale — Retry');
+        if (window.mtPollFail) mtPollFail(503);
+    } finally {
+        _qbitPollBusy = false;
+        if (card) card.setAttribute('aria-busy', 'false');
+    }
+}
+
+function startQbitQueuePolling() {
+    if (_qbitPollTimer) clearInterval(_qbitPollTimer);
+    refreshQbitQueueNow(false);
+    _qbitPollTimer = setInterval(function () {
+        if (document.hidden) return;
+        refreshQbitQueueNow(false);
+    }, 10000);
+    document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) refreshQbitQueueNow(false);
+    });
+}
+
+function initDlSectionNav() {
+    const nav = document.getElementById('dl-section-nav');
+    if (!nav) return;
+    const links = Array.from(nav.querySelectorAll('a[data-dl-nav]'));
+    const entries = links.map(function (link) {
+        const id = link.getAttribute('data-dl-nav');
+        const anchor = document.getElementById(id);
+        const section = anchor ? (anchor.classList.contains('dl-section') ? anchor : anchor.closest('.dl-section')) : null;
+        return { id: id, link: link, section: section };
+    }).filter(function (entry) { return entry.section; });
+    function setActive(id) {
+        links.forEach(function (link) {
+            link.setAttribute('aria-current', link.getAttribute('data-dl-nav') === id ? 'true' : 'false');
+        });
+    }
+    links.forEach(function (link) {
+        link.addEventListener('click', function () {
+            const id = link.getAttribute('data-dl-nav');
+            setActive(id);
+            try { history.replaceState(null, '', '#' + id); } catch (e) { /* no-op */ }
+        });
+    });
+    if ('IntersectionObserver' in window) {
+        const bySection = new Map();
+        entries.forEach(function (entry) { bySection.set(entry.section, entry.id); });
+        const observer = new IntersectionObserver(function (items) {
+            items.forEach(function (item) {
+                if (item.isIntersecting && bySection.has(item.target)) setActive(bySection.get(item.target));
+            });
+        }, { rootMargin: '-20% 0px -70% 0px', threshold: 0 });
+        entries.forEach(function (entry) { observer.observe(entry.section); });
+    }
+    const hash = (location.hash || '').replace('#', '');
+    if (hash && document.getElementById(hash)) {
+        setActive(hash);
+        setTimeout(function () {
+            const target = document.getElementById(hash);
+            if (target) target.scrollIntoView({ block: 'start' });
+        }, 80);
+    } else if (entries.length) {
+        setActive(entries[0].id);
+    }
+}
+
+function initTagModalGuard() {
+    const modal = document.getElementById('tag-modal');
+    if (!modal || _tagModalGuardReady) return;
+    _tagModalGuardReady = true;
+    modal.addEventListener('input', function () { setTagModalDirty(true); });
+    modal.addEventListener('change', function () { setTagModalDirty(true); });
+    document.addEventListener('keydown', function (event) {
+        if (event.key !== 'Escape') return;
+        if (modal.classList.contains('hidden') || !_tagModalDirty) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        showTagUnsavedWarning();
+    }, true);
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    initDlSectionNav();
+    initTagModalGuard();
+    if (_DL_ENGINE === 'qbit') startQbitQueuePolling();
+});
 </script>
+
+<!-- Preview / manual tag modal (dialog semantics through window.MangaModal; must stay after the single script block) -->
+<div id="tag-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm items-center justify-center p-4 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="tag-modal-title" aria-hidden="true">
+    <div class="bg-darkcard border border-slate-700 rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-4 max-h-[90dvh] overflow-y-auto">
+        <div class="flex items-start justify-between gap-3">
+            <div>
+                <h3 id="tag-modal-title" class="text-sm font-bold text-white flex items-center gap-2">
+                    <i data-lucide="tag" class="w-4 h-4 text-cyan-400"></i>
+                    Preview &amp; Manual Tag
+                </h3>
+                <p id="tag-modal-file" class="text-[11px] text-slate-400 font-mono mt-0.5 break-all"></p>
+            </div>
+            <button type="button" onclick="requestCloseTagModal()" class="dl-icon-btn p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300" title="Close" aria-label="Close">
+                <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+        </div>
+        <div id="tag-modal-current" class="text-[11px] text-slate-400 bg-slate-900/60 border border-slate-800 rounded-xl p-3 font-mono whitespace-pre-wrap max-h-32 overflow-y-auto">Loading current ComicInfo.xml...</div>
+        <div id="tag-modal-unsaved" class="hidden bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-[11px] text-amber-200">
+            Unsaved ComicInfo changes. Close without saving?
+            <button type="button" onclick="discardAndCloseTagModal()" class="ml-2 px-2 py-0.5 rounded bg-rose-600 text-white font-semibold">Discard &amp; close</button>
+            <button type="button" onclick="hideTagUnsavedWarning()" class="ml-1 px-2 py-0.5 rounded bg-slate-800 border border-slate-700">Keep editing</button>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div class="sm:col-span-2">
+                <label class="block text-xs font-semibold text-slate-300 mb-1">Filename (staged, .cbz)</label>
+                <input type="text" id="tag-field-filename" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+            </div>
+            <div class="sm:col-span-2">
+                <label class="block text-xs font-semibold text-slate-300 mb-1">Series (Calibre matching key)</label>
+                <input type="text" id="tag-field-series" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+            </div>
+            <div>
+                <label class="block text-xs font-semibold text-slate-300 mb-1">Volume</label>
+                <input type="text" id="tag-field-volume" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+            </div>
+            <div>
+                <label class="block text-xs font-semibold text-slate-300 mb-1">Title</label>
+                <input type="text" id="tag-field-title" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+            </div>
+            <div>
+                <label class="block text-xs font-semibold text-slate-300 mb-1">Writer</label>
+                <input type="text" id="tag-field-writer" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+            </div>
+            <div>
+                <label class="block text-xs font-semibold text-slate-300 mb-1">Publisher</label>
+                <input type="text" id="tag-field-publisher" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+            </div>
+            <div class="sm:col-span-2">
+                <label class="block text-xs font-semibold text-slate-300 mb-1">Genre</label>
+                <input type="text" id="tag-field-genre" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+            </div>
+        </div>
+        <div class="flex items-center justify-end gap-2 pt-1">
+            <button type="button" onclick="requestCloseTagModal()" class="dl-action px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold">Cancel</button>
+            <button type="button" onclick="saveManualTag()" class="dl-action px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95">
+                <i data-lucide="save" class="w-3.5 h-3.5"></i>
+                Save ComicInfo.xml
+            </button>
+        </div>
+    </div>
+</div>
 
 <!-- Manual series match modal (task-42) -->
 <div id="manual-match-modal" class="hidden fixed inset-0 z-50 bg-black/70 items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="manual-match-title">

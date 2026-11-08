@@ -2,7 +2,7 @@
 <html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>{% block title %}MangaTrax{% endblock %} - Manga Release Monitor & Downloader</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -24,7 +24,8 @@
                         },
                         darkbg: '#0b0f19',
                         darkcard: '#161e2e',
-                        darkborder: '#273549'
+                        darkborder: '#273549',
+                        slate: { 850: '#1b2537' }
                     }
                 }
             }
@@ -90,15 +91,170 @@
             background-color: rgba(30, 41, 59, 0.9);
             outline-offset: 0;
         }
+
+        /* ===== MangaTrax UI enhancement layer (Phase 1) ===== */
+        :root {
+            --mt-header-h: 4rem;
+            --mt-bottom-bar-h: calc(4rem + env(safe-area-inset-bottom));
+            --mt-z-header: 40;
+            --mt-z-save: 45;
+            --mt-z-progress: 50;
+            --mt-z-backdrop: 60;
+            --mt-z-sheet: 70;
+            --mt-z-palette-backdrop: 80;
+            --mt-z-dialog: 90;
+            --mt-z-tasks: 55;
+            --mt-z-toast: 100;
+            --mt-ink: #e2e8f0;
+            --mt-ink-muted: #94a3b8;
+            --mt-surface: #161e2e;
+            --mt-border: #273549;
+        }
+        .mt-skip-link {
+            position: absolute; left: 0.75rem; top: -3rem; z-index: 200;
+            background: #e11d48; color: #fff; padding: 0.5rem 0.9rem;
+            border-radius: 0.5rem; font-size: 0.8rem; font-weight: 700;
+            transition: top 0.15s ease;
+        }
+        .mt-skip-link:focus { top: 0.75rem; }
+        .mt-skip-link:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+        #mobile-menu-backdrop { z-index: 60; }
+        #mobile-menu.mt-sheet {
+            position: fixed; left: 0; right: 0; bottom: 0; z-index: 70;
+            max-height: 80dvh; overflow-y: auto;
+            border-radius: 1rem 1rem 0 0;
+            padding-bottom: env(safe-area-inset-bottom);
+            background: #0d131f;
+            border-top: 1px solid #273549;
+            box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.55);
+        }
+        body.mt-scroll-locked { overflow: hidden; }
+        .mt-bottom-bar {
+            position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+            display: none; grid-template-columns: repeat(5, minmax(0, 1fr));
+            background: rgba(17, 24, 39, 0.97);
+            border-top: 1px solid #1f2a3d;
+            padding-bottom: env(safe-area-inset-bottom);
+            backdrop-filter: blur(10px);
+        }
+        @media (max-width: 767px) {
+            .mt-bottom-bar { display: grid; }
+            body { padding-bottom: var(--mt-bottom-bar-h); }
+        }
+        .mt-bottom-bar a {
+            min-height: 44px; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 2px;
+            font-size: 10px; font-weight: 600; color: #94a3b8;
+            padding: 6px 2px; position: relative;
+        }
+        .mt-bottom-bar a[aria-current="page"] { color: #fb7185; font-weight: 700; }
+        body.mt-modal-open .mt-bottom-bar, body.mt-modal-open #offline-banner { visibility: hidden; }
+        body.mt-modal-open #toast-container button, body.mt-modal-open #toast-errors button { pointer-events: none; opacity: 0.5; }
+        .mt-bottom-bar a[aria-current="page"]::before {
+            content: ""; position: absolute; top: 0; left: 22%; right: 22%;
+            height: 2px; border-radius: 2px; background: #f43f5e;
+        }
+        .mt-bottom-bar .mt-tab-badge {
+            position: absolute; top: 4px; right: calc(50% - 18px);
+            min-width: 14px; height: 14px; border-radius: 999px;
+            background: #e11d48; color: #fff; font-size: 9px; line-height: 14px;
+            text-align: center; padding: 0 4px;
+        }
+        @media (max-width: 767px) { #mobile-menu:not(.hidden) { display: block !important; } }
+        .mt-sheet-close {
+            min-width: 44px; min-height: 44px; display: inline-flex;
+            align-items: center; justify-content: center; border-radius: 0.75rem;
+            color: #e2e8f0;
+        }
+        .mt-sheet-close:hover { background: rgba(30, 41, 59, 0.9); }
+        #image-modal { z-index: 90; }
+        #command-palette { z-index: 90; }
+        #command-palette .mt-palette-panel {
+            width: min(40rem, calc(100vw - 1.5rem)); max-height: min(34rem, 80dvh);
+            display: flex; flex-direction: column;
+            background: #111827; border: 1px solid #273549;
+            border-radius: 1rem; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+            overflow: hidden;
+        }
+        .mt-palette-input { width: 100%; background: transparent; border: 0; color: #e2e8f0; font-size: 1rem; padding: 0.9rem 1rem; }
+        .mt-palette-input:focus { outline: none; }
+        .mt-palette-list { overflow-y: auto; padding: 0.4rem; }
+        .mt-palette-group { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #94a3b8; padding: 0.5rem 0.75rem 0.25rem; }
+        .mt-palette-item { display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 0.75rem; border-radius: 0.6rem; font-size: 0.8rem; color: #cbd5e1; cursor: pointer; }
+        .mt-palette-item[aria-selected="true"], .mt-palette-item:hover { background: rgba(30, 41, 59, 0.95); color: #fff; }
+        .mt-palette-item .mt-kbd { margin-left: auto; font-family: ui-monospace, monospace; font-size: 10px; color: #94a3b8; border: 1px solid #273549; border-radius: 0.35rem; padding: 0 0.3rem; }
+        .mt-palette-empty { padding: 1.25rem; text-align: center; font-size: 0.75rem; color: #94a3b8; }
+        #toast-container { z-index: 100; }
+        #toast-errors { z-index: 100; }
+        @media (max-width: 767px) {
+            #offline-banner { position: fixed; left: 0.75rem; right: 0.75rem; bottom: calc(var(--mt-bottom-bar-h) + 0.5rem); margin: 0; z-index: 36; }
+            #toast-container, #toast-errors { top: calc(var(--mt-header-h) + 0.5rem); bottom: auto; left: 0.75rem; right: 0.75rem; align-items: stretch; }
+            #toast-container > *, #toast-errors > * { width: 100%; }
+        }
+        #global-tasks { z-index: 55; }
+        body.mt-modal-open #global-tasks, body.mt-save-open #global-tasks { visibility: hidden; opacity: 0; pointer-events: none; }
+        @media (max-width: 767px) {
+            #global-tasks { bottom: calc(var(--mt-bottom-bar-h) + 0.75rem); right: 0.75rem; }
+        }
+        .mt-table-cards { width: 100%; }
+        @media (max-width: 767px) {
+            .mt-table-cards thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+            .mt-table-cards tbody, .mt-table-cards tr, .mt-table-cards td { display: block; width: 100%; }
+            .mt-table-cards tr { background: #161e2e; border: 1px solid #273549; border-radius: 0.9rem; margin-bottom: 0.6rem; padding: 0.5rem 0.75rem; }
+            .mt-table-cards td { border: 0; padding: 0.3rem 0; text-align: left; }
+            .mt-table-cards td::before { content: attr(data-label); display: block; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: #94a3b8; }
+            .mt-table-cards td:not([data-label])::before { content: none; }
+            .mt-table-cards td.mt-cell-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; justify-content: flex-start; padding-top: 0.5rem; }
+            .mt-table-cards td.mt-cell-actions::before { width: 100%; }
+            .mt-table-cards .mt-table-empty { display: block !important; text-align: center; padding: 1.5rem 0.5rem; }
+            .mt-table-cards .mt-table-empty::before { content: none; }
+            .mt-table-cards td button, .mt-table-cards td a { min-height: 44px; min-width: 44px; }
+        }
+        .mt-skeleton { background: linear-gradient(110deg, #161e2e 8%, #1f2a3d 18%, #161e2e 33%); background-size: 200% 100%; animation: shimmer 1.5s linear infinite; }
+        .mt-retry-row { display: flex; align-items: center; justify-content: center; gap: 0.6rem; padding: 1rem; font-size: 0.75rem; color: #94a3b8; }
+        .mt-mobile-only { display: block; }
+        @media (min-width: 768px) { .mt-mobile-only { display: none !important; } }
+        .mt-offline-banner { position: relative; z-index: 35; margin: 0 auto; max-width: 80rem; background: rgba(120, 53, 15, 0.95); border: 1px solid rgba(245, 158, 11, 0.4); color: #fde68a; border-radius: 0.75rem; padding: 0.5rem 0.9rem; font-size: 0.75rem; }
+        .mt-btn { display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; border-radius: 0.75rem; font-size: 0.75rem; font-weight: 600; min-height: 36px; padding: 0.45rem 0.8rem; }
+        @media (max-width: 767px) { .mt-btn { min-height: 44px; } }
+        .mt-btn-primary { background: #e11d48; color: #fff; }
+        .mt-btn-primary:hover { background: #be123c; }
+        .mt-btn-secondary { background: #1e293b; color: #e2e8f0; border: 1px solid #334155; }
+        .mt-btn-secondary:hover { background: #273549; }
+        @media (max-width: 767px) {
+            #sticky-load-more { position: static !important; right: auto; bottom: auto; margin: 0.9rem auto 0; display: flex; justify-content: center; }
+        }
+        @media (min-width: 768px) {
+            #sticky-load-more { bottom: 5.5rem; right: 1rem; }
+        }
+        .mt-quick-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
+        @media (min-width: 768px) { .mt-quick-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+        .mt-quick-action { display: flex; align-items: center; gap: 0.55rem; min-height: 44px; padding: 0.7rem 0.8rem; border-radius: 0.8rem; background: #161e2e; border: 1px solid #273549; color: #e2e8f0; font-size: 0.75rem; font-weight: 600; }
+        .mt-quick-action:hover { border-color: #475569; background: #1b2537; }
+        .mt-section-nav { display: flex; gap: 0.4rem; overflow-x: auto; padding-bottom: 0.25rem; scrollbar-width: thin; }
+        .mt-section-nav a { white-space: nowrap; padding: 0.45rem 0.7rem; border-radius: 999px; font-size: 0.7rem; font-weight: 600; color: #94a3b8; border: 1px solid #273549; background: #111827; min-height: 36px; display: inline-flex; align-items: center; }
+        .mt-section-nav a[aria-current="true"] { color: #fff; background: #1e293b; border-color: #475569; }
+        @media (max-width: 767px) { .mt-section-nav a { min-height: 44px; } }
+        @media (max-width: 767px) {
+            main select, main input[type="text"], main input[type="number"], .mt-palette-item, .mt-btn { min-height: 44px; }
+        }
+        #different-series-modal, #manual-match-modal, #modal-add-feed, #modal-link, #pickup-match-modal,
+        #series-calibre-match-modal, #staging-series-match-modal, #tag-modal { z-index: 90; }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+            .animate-pulse, .cover-placeholder, .mt-skeleton { animation: none !important; }
+            .animate-spin { animation: spin 0.9s linear infinite !important; }
+        }
     </style>
 </head>
 <body class="bg-[#0b0f19] text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-brand-500 selection:text-white">
+    <a href="#main-content" class="mt-skip-link">Skip to main content</a>
 
     <!-- Global Top Loading Progress Bar for Instant Click Feedback -->
     <div id="page-progress-bar" class="fixed top-0 left-0 h-[2.5px] bg-gradient-to-r from-rose-500 via-brand-500 to-amber-400 z-50 transition-all duration-300 pointer-events-none opacity-0 shadow-sm shadow-brand-500/50" style="width: 0%;"></div>
 
     <!-- Top Navigation Bar -->
-    <header class="bg-[#111827]/90 backdrop-blur-md border-b border-slate-800 sticky top-0 z-40">
+    <header id="site-header" class="bg-[#111827]/90 backdrop-blur-md border-b border-slate-800 sticky top-0 z-40">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex items-center justify-between h-16">
                 <!-- Brand Logo & Name -->
@@ -161,16 +317,24 @@
                         </div>
                     </div>
 
-                    <!-- Downloads -->
-                    <a href="/downloads" data-nav-item="downloads" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'downloads' %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
-                        <i data-lucide="download-cloud" class="w-4 h-4 text-cyan-400"></i>
-                        Downloads
-                    </a>
-        <a href="/downloads/manual-pickup" class="px-3 py-2 rounded-lg text-sm font-medium text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2">
-            <i data-lucide="hand" class="w-4 h-4 text-amber-400"></i>
-            Manual Pickup
-            <span id="nav-manual-pickup-count" class="hidden px-1.5 py-0.5 rounded-full text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30"></span>
-        </a>
+                    <!-- Downloads (grouped with Manual Pickup) -->
+                    <div class="relative" data-dropdown data-nav-item="downloads">
+                        <button type="button" data-dropdown-trigger aria-haspopup="true" aria-expanded="false" aria-controls="nav-menu-downloads" title="Downloads: Downloads, Manual Pickup" class="px-3 py-2 rounded-lg text-sm font-medium transition-colors {% if active_page == 'downloads' or request.url.path.startswith('/downloads/manual-pickup') %}bg-slate-800 text-brand-400 border border-slate-700{% else %}text-slate-300 hover:text-white hover:bg-slate-800/60{% endif %} flex items-center gap-1.5">
+                            <i data-lucide="download-cloud" class="w-4 h-4 text-cyan-400"></i>
+                            Downloads
+                            <i data-lucide="chevron-down" class="w-3.5 h-3.5 opacity-70"></i>
+                        </button>
+                        <div id="nav-menu-downloads" data-dropdown-menu role="menu" class="hidden absolute left-0 mt-2 w-56 bg-darkcard border border-slate-800 rounded-xl shadow-2xl p-1.5 z-50">
+                            <a href="/downloads" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if active_page == 'downloads' and not request.url.path.startswith('/downloads/manual-pickup') %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="download-cloud" class="w-4 h-4 text-cyan-400"></i> Downloads
+                            </a>
+                            <a href="/downloads/manual-pickup" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm {% if request.url.path.startswith('/downloads/manual-pickup') %}bg-slate-800 text-amber-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
+                                <i data-lucide="hand" class="w-4 h-4 text-amber-400"></i>
+                                Manual Pickup
+                                <span id="nav-manual-pickup-count" class="hidden ml-auto px-1.5 py-0.5 rounded-full text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30"></span>
+                            </a>
+                        </div>
+                    </div>
 
                     <!-- System -->
                     <div class="relative" data-dropdown data-nav-item="system">
@@ -194,6 +358,9 @@
                      actions (Sync Calibre / Tag CBZ / Poll Feeds) live on the pages
                      that own them (series / downloads / feeds). -->
                 <div class="flex items-center space-x-2">
+                    <button type="button" id="btn-command-palette" aria-haspopup="dialog" aria-expanded="false" aria-controls="command-palette" aria-label="Open command palette" title="Search and actions (Ctrl+K)" class="w-11 h-11 md:w-8 md:h-8 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center justify-center transition-colors">
+                        <i data-lucide="search" class="w-4 h-4"></i>
+                    </button>
                     {% if auth_mode and auth_mode != 'none' %}
                     <div class="relative hidden md:block" data-dropdown>
                         <button type="button" data-dropdown-trigger aria-haspopup="true" aria-expanded="false" aria-controls="nav-menu-user" aria-label="User menu for {{ auth_actor() }}" title="Signed in via {{ auth_mode }} — open user menu" class="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 transition-colors">
@@ -202,14 +369,14 @@
                             <i data-lucide="chevron-down" class="w-3 h-3 opacity-70"></i>
                         </button>
                         <div id="nav-menu-user" data-dropdown-menu role="menu" class="hidden absolute right-0 mt-2 w-48 bg-darkcard border border-slate-800 rounded-xl shadow-2xl p-1.5 z-50">
-                            <p class="px-3 py-1.5 text-[10px] uppercase tracking-wider text-slate-500">Signed in ({{ auth_mode }})</p>
+                            <p class="px-3 py-1.5 text-[10px] uppercase tracking-wider text-slate-400">Signed in ({{ auth_mode }})</p>
                             <a href="/auth/logout" role="menuitem" class="nav-tab flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-slate-300 hover:bg-slate-800/70 hover:text-white">
                                 <i data-lucide="log-out" class="w-4 h-4"></i> Sign out
                             </a>
                         </div>
                     </div>
                     {% endif %}
-                    <button type="button" id="btn-mobile-menu" onclick="toggleMobileMenu()" aria-haspopup="true" aria-expanded="false" aria-controls="mobile-menu" aria-label="Open navigation menu" title="Open navigation menu" class="md:hidden w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center justify-center transition-colors">
+                    <button type="button" id="btn-mobile-menu" onclick="toggleMobileMenu(this)" aria-haspopup="true" aria-expanded="false" aria-controls="mobile-menu" aria-label="Open navigation menu" title="Open navigation menu" class="md:hidden w-11 h-11 md:w-8 md:h-8 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 flex items-center justify-center transition-colors">
                         <i data-lucide="menu" class="w-4 h-4"></i>
                     </button>
                 </div>
@@ -217,14 +384,23 @@
         </div>
     </header>
 
+    <div id="offline-banner" class="hidden mt-3 mx-4"><div class="mt-offline-banner" role="status" aria-live="polite">Connection lost — data may be stale. Reconnecting…</div></div>
+
     <!-- Mobile navigation menu: same 5-item grouping as desktop (task-15) -->
-    <div id="mobile-menu" class="hidden md:hidden border-b border-slate-800 bg-[#0d131f] shadow-xl">
+    <div id="mobile-menu-backdrop" aria-hidden="true" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm md:hidden" onclick="closeMobileMenu()"></div>
+    <div id="mobile-menu" role="dialog" aria-modal="true" aria-labelledby="mobile-menu-title" class="mt-sheet hidden md:hidden border-b border-slate-800 bg-[#0d131f] shadow-xl">
+        <div class="flex items-center justify-between px-4 sm:px-6 pt-3 pb-1 border-b border-slate-800/80">
+            <p id="mobile-menu-title" class="text-xs font-bold uppercase tracking-wider text-slate-400">Menu</p>
+            <button type="button" onclick="closeMobileMenu()" class="mt-sheet-close" aria-label="Close navigation menu" title="Close navigation menu">
+                <i data-lucide="x" class="w-5 h-5"></i>
+            </button>
+        </div>
         <nav class="max-w-7xl mx-auto px-4 sm:px-6 py-3 space-y-0.5" aria-label="Mobile navigation">
             <a href="/" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'dashboard' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
                 <i data-lucide="layout-dashboard" class="w-4 h-4"></i> Overview
             </a>
 
-            <p class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Library</p>
+            <p class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Library</p>
             <a href="/series" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'series' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
                 <i data-lucide="library" class="w-4 h-4"></i> Series
             </a>
@@ -235,7 +411,7 @@
                 <i data-lucide="star" class="w-4 h-4 text-amber-400"></i> Prioritized
             </a>
 
-            <p class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Discover</p>
+            <p class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Discover</p>
             <a href="/discovery" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'discovery' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
                 <i data-lucide="compass" class="w-4 h-4 text-amber-400"></i> Discovery
             </a>
@@ -246,11 +422,13 @@
             <a href="/downloads" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'downloads' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
                 <i data-lucide="download-cloud" class="w-4 h-4 text-cyan-400"></i> Downloads
             </a>
-        <a href="/downloads/manual-pickup" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium text-slate-300 hover:bg-slate-800 hover:text-white">
-            <i data-lucide="hand" class="w-4 h-4 text-amber-400"></i> Manual Pickup
+        <a href="/downloads/manual-pickup" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if request.url.path.startswith('/downloads/manual-pickup') %}bg-slate-800 text-amber-400{% else %}text-slate-300 hover:bg-slate-800 hover:text-white{% endif %}">
+            <i data-lucide="hand" class="w-4 h-4 text-amber-400"></i>
+            <span>Manual Pickup</span>
+            <span id="mobile-manual-pickup-count" class="hidden ml-auto px-1.5 py-0.5 rounded-full text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30"></span>
         </a>
 
-            <p class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-slate-500 font-semibold">System</p>
+            <p class="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-slate-400 font-semibold">System</p>
             <a href="/logs" class="nav-tab flex items-center gap-2.5 min-h-[44px] px-3 rounded-lg text-sm font-medium {% if active_page == 'logs' %}bg-slate-800 text-brand-400{% else %}text-slate-300 hover:bg-slate-800/70 hover:text-white{% endif %}">
                 <i data-lucide="scroll-text" class="w-4 h-4"></i> Logs
             </a>
@@ -260,7 +438,7 @@
 
             {% if auth_mode and auth_mode != 'none' %}
             <div class="pt-3 mt-2 border-t border-slate-800/80">
-                <p class="px-3 pb-1 text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Signed in ({{ auth_mode }})</p>
+                <p class="px-3 pb-1 text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Signed in ({{ auth_mode }})</p>
                 <p class="px-3 pb-1 text-sm text-slate-300 flex items-center gap-2">
                     <i data-lucide="user" class="w-4 h-4 text-brand-400"></i> {{ auth_actor() }}
                 </p>
@@ -273,7 +451,32 @@
     </div>
 
     <!-- Notification Toast Container -->
-    <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none"></div>
+    <!-- status region + error (alert) region for UI feedback -->
+    <div id="toast-container" role="status" aria-live="polite" class="fixed bottom-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none"></div>
+    <div id="toast-errors" role="alert" aria-live="assertive" class="fixed bottom-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none hidden"></div>
+
+    <!-- Command palette (UI enhancement): outside <header>, after toasts -->
+    <div id="command-palette" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-90 items-start justify-center p-4 pt-20 sm:pt-24" onclick="closeCommandPalette()" role="presentation">
+        <div class="mt-palette-panel" role="dialog" aria-modal="true" aria-labelledby="command-palette-title" onclick="event.stopPropagation()">
+            <h2 id="command-palette-title" class="sr-only">Command palette</h2>
+            <div class="flex items-center gap-2 border-b border-slate-800 px-2">
+                <i data-lucide="search" class="w-4 h-4 text-slate-400 ml-2"></i>
+                <input id="command-palette-input" type="text" class="mt-palette-input" placeholder="Search series, releases, pages and actions…" autocomplete="off" spellcheck="false" aria-controls="command-palette-results" aria-autocomplete="list">
+                <button type="button" onclick="closeCommandPalette()" class="mt-sheet-close shrink-0" aria-label="Close command palette" title="Close command palette">
+                    <i data-lucide="x" class="w-4 h-4"></i>
+                </button>
+            </div>
+            <div id="command-palette-results" class="mt-palette-list" role="listbox" aria-label="Command results">
+                <p class="mt-palette-empty">Type to search, or pick a page or action.</p>
+            </div>
+            <div class="border-t border-slate-800 px-3 py-2 text-[10px] text-slate-400 flex items-center gap-3">
+                <span><span class="mt-kbd">↑</span><span class="mt-kbd">↓</span> navigate</span>
+                <span><span class="mt-kbd">↵</span> open</span>
+                <span><span class="mt-kbd">esc</span> close</span>
+                <span class="ml-auto">Ctrl / ⌘ + K</span>
+            </div>
+        </div>
+    </div>
 
     <!-- Global Image Modal / Lightbox -->
     <div id="image-modal" class="fixed inset-0 z-50 bg-black/85 backdrop-blur-md hidden items-center justify-center p-4 transition-all duration-200" onclick="closeImageModal()">
@@ -309,12 +512,12 @@
                         <span id="backfill-resume-hint" class="text-[11px] text-brand-400 cursor-pointer hover:underline hidden" onclick="useResumePage()"></span>
                     </div>
                     <input type="number" id="backfill-input-start-page" min="1" value="1" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500 font-mono">
-                    <p class="text-[10px] text-slate-500 mt-1">Page 1 is most recent. If a previous run stopped or failed at page N, you can resume directly from there.</p>
+                    <p class="text-[10px] text-slate-400 mt-1">Page 1 is most recent. If a previous run stopped or failed at page N, you can resume directly from there.</p>
                 </div>
                 <div>
                     <label class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">Max Pages to Crawl</label>
                     <input type="number" id="backfill-input-max-pages" min="1" max="500" value="15" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-brand-500 font-mono">
-                    <p class="text-[10px] text-slate-500 mt-1">Number of sequential pages to process (~75 releases per page).</p>
+                    <p class="text-[10px] text-slate-400 mt-1">Number of sequential pages to process (~75 releases per page).</p>
                 </div>
             </div>
             <div class="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
@@ -328,7 +531,7 @@
     </div>
 
     <!-- Main Content Body -->
-    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <main id="main-content" tabindex="-1" class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {% if not request.url.path.startswith('/auth/') %}
         <!-- Background Calibre sync banner (task-16): explains empty/stale data
              while the worker indexes the library; auto-refreshes when it finishes. -->
@@ -367,12 +570,32 @@
         {% block content %}{% endblock %}
     </main>
 
+    <!-- Mobile bottom tab bar (UI enhancement) -->
+    <nav id="mobile-bottom-bar" class="mt-bottom-bar" aria-label="Primary mobile navigation">
+        <a href="/" {% if active_page == 'dashboard' %}aria-current="page"{% endif %} aria-label="Overview" title="Overview">
+            <i data-lucide="layout-dashboard" class="w-5 h-5"></i><span>Overview</span>
+        </a>
+        <a href="/series" {% if active_page == 'series' %}aria-current="page"{% endif %} aria-label="Series" title="Series">
+            <i data-lucide="library" class="w-5 h-5"></i><span>Series</span>
+        </a>
+        <a href="/downloads" {% if active_page == 'downloads' %}aria-current="page"{% endif %} aria-label="Downloads" title="Downloads">
+            <i data-lucide="download-cloud" class="w-5 h-5"></i><span>Downloads</span>
+            <span id="tab-manual-pickup-count" class="mt-tab-badge hidden"></span>
+        </a>
+        <a href="/discovery" {% if active_page == 'discovery' %}aria-current="page"{% endif %} aria-label="Discover" title="Discover">
+            <i data-lucide="compass" class="w-5 h-5"></i><span>Discover</span>
+        </a>
+        <a href="#mobile-menu" onclick="event.preventDefault(); toggleMobileMenu(this);" data-mt-sheet-opener="more" {% if active_page in ['releases', 'prioritized', 'feeds', 'logs', 'settings'] %}aria-current="page"{% endif %} aria-haspopup="dialog" aria-controls="mobile-menu" aria-label="More navigation" title="More">
+            <i data-lucide="menu" class="w-5 h-5"></i><span>More</span>
+        </a>
+    </nav>
+
     <!-- Footer -->
-    <footer class="border-t border-slate-800/80 bg-[#0d131f] py-6 mt-auto">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-4">
+    <footer id="site-footer" class="border-t border-slate-800/80 bg-[#0d131f] py-6 mt-auto">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-400 gap-4">
             <div class="flex items-center space-x-2">
                 <span class="w-2 h-2 rounded-full bg-brand-500 animate-pulse"></span>
-                <span class="font-medium text-slate-400">MangaTrax v1.0.0</span>
+                <span class="font-medium text-slate-400">MangaTrax v1.1.0</span>
                 <span>&bull;</span>
                 <span>Zero-Lock Calibre & BookOrbit Integration</span>
             </div>
@@ -399,28 +622,52 @@
 <script>
         lucide.createIcons();
 
-        function showToast(message, type = 'success') {
-            const container = document.getElementById('toast-container');
+        function showToast(message, type = 'success', options = {}) {
+            const isError = type === 'error';
+            const container = document.getElementById(isError ? 'toast-errors' : 'toast-container');
+            if (!container) return;
+            if (isError) container.classList.remove('hidden');
             const toast = document.createElement('div');
             toast.className = `pointer-events-auto flex items-center gap-2.5 px-4 py-3 rounded-xl shadow-xl text-sm font-medium transition-all transform duration-300 translate-y-2 opacity-0 ${
                 type === 'success' ? 'bg-slate-800 border border-brand-500/30 text-brand-300' :
-                type === 'error' ? 'bg-slate-800 border border-rose-500/30 text-rose-300' :
+                isError ? 'bg-slate-800 border border-rose-500/30 text-rose-300' :
                 'bg-slate-800 border border-slate-700 text-slate-200'
             }`;
-
-            const iconName = type === 'success' ? 'check-circle' : type === 'error' ? 'alert-triangle' : 'info';
-            toast.innerHTML = `<i data-lucide="${iconName}" class="w-4 h-4 shrink-0"></i><span>${message}</span>`;
+            const icon = document.createElement('i');
+            icon.setAttribute('data-lucide', type === 'success' ? 'check-circle' : isError ? 'alert-triangle' : 'info');
+            icon.className = 'w-4 h-4 shrink-0';
+            const text = document.createElement('span');
+            const prefix = (isError && options && options.action) ? String(options.action) + ' failed: ' : '';
+            text.textContent = prefix + (message == null ? '' : String(message));
+            toast.appendChild(icon);
+            toast.appendChild(text);
+            if (isError) {
+                const dismiss = document.createElement('button');
+                dismiss.type = 'button';
+                dismiss.setAttribute('aria-label', 'Dismiss error');
+                dismiss.title = 'Dismiss error';
+                dismiss.className = 'ml-2 shrink-0 text-slate-400 hover:text-white';
+                dismiss.textContent = '×';
+                dismiss.addEventListener('click', () => { toast.remove(); if (!container.children.length) container.classList.add('hidden'); });
+                toast.appendChild(dismiss);
+                if (options && typeof options.retry === 'function') {
+                    const retry = document.createElement('button');
+                    retry.type = 'button';
+                    retry.className = 'ml-2 shrink-0 underline text-amber-300 hover:text-amber-200';
+                    retry.textContent = 'Retry';
+                    retry.addEventListener('click', function () { toast.remove(); options.retry(); });
+                    toast.appendChild(retry);
+                }
+            }
             container.appendChild(toast);
-            lucide.createIcons();
-
-            setTimeout(() => {
-                toast.classList.remove('translate-y-2', 'opacity-0');
-            }, 10);
-
-            setTimeout(() => {
-                toast.classList.add('opacity-0', 'translate-y-2');
-                setTimeout(() => toast.remove(), 300);
-            }, 4000);
+            if (window.lucide) lucide.createIcons();
+            setTimeout(() => { toast.classList.remove('translate-y-2', 'opacity-0'); }, 10);
+            if (!isError) {
+                setTimeout(() => {
+                    toast.classList.add('opacity-0', 'translate-y-2');
+                    setTimeout(() => toast.remove(), 300);
+                }, 4000);
+            }
         }
 
         // --- Navigation dropdowns & mobile menu (task-15) ---------------------
@@ -455,27 +702,41 @@
             }
         }
 
-        function closeMobileMenu() {
+        function closeMobileMenu(restoreFocus = true) {
             const menu = document.getElementById('mobile-menu');
             const btn = document.getElementById('btn-mobile-menu');
+            const backdrop = document.getElementById('mobile-menu-backdrop');
             if (!menu || !btn) return;
             menu.classList.add('hidden');
+            if (backdrop) backdrop.classList.add('hidden');
+            document.body.classList.remove('mt-scroll-locked');
             btn.setAttribute('aria-expanded', 'false');
             btn.setAttribute('aria-label', 'Open navigation menu');
             btn.setAttribute('title', 'Open navigation menu');
+            document.querySelectorAll('[data-mt-sheet-opener]').forEach(function (el) { el.setAttribute('aria-expanded', 'false'); });
+            if (window.MangaModal) MangaModal.close(menu);
         }
 
-        function toggleMobileMenu() {
+        function toggleMobileMenu(opener = null) {
             const menu = document.getElementById('mobile-menu');
             const btn = document.getElementById('btn-mobile-menu');
+            const backdrop = document.getElementById('mobile-menu-backdrop');
             if (!menu || !btn) return;
             const willOpen = menu.classList.contains('hidden');
             menu.classList.toggle('hidden', !willOpen);
+            if (backdrop) backdrop.classList.toggle('hidden', !willOpen);
+            document.body.classList.toggle('mt-scroll-locked', willOpen);
             btn.setAttribute('aria-expanded', String(willOpen));
+            document.querySelectorAll('[data-mt-sheet-opener]').forEach(function (el) { el.setAttribute('aria-expanded', String(willOpen)); });
             const label = willOpen ? 'Close navigation menu' : 'Open navigation menu';
             btn.setAttribute('aria-label', label);
             btn.setAttribute('title', label);
-            if (willOpen) closeAllDropdowns();
+            if (willOpen) {
+                closeAllDropdowns();
+                if (window.MangaModal) MangaModal.open(menu, opener || btn, { labelledBy: 'mobile-menu-title' });
+            } else if (window.MangaModal) {
+                MangaModal.close(menu);
+            }
             if (window.lucide) lucide.createIcons();
         }
 
@@ -493,7 +754,7 @@
                 return;
             }
             closeAllDropdowns();
-            if (!event.target.closest('#mobile-menu') && !event.target.closest('#btn-mobile-menu')) {
+            if (!event.target.closest('#mobile-menu') && !event.target.closest('#btn-mobile-menu') && !event.target.closest('[data-mt-sheet-opener]')) {
                 closeMobileMenu();
             }
         });
@@ -624,23 +885,17 @@
             if (!modal || !img || !titleEl) return;
             img.src = src;
             titleEl.textContent = title;
-            modal.classList.remove('hidden');
-            modal.classList.add('flex');
-            document.body.style.overflow = 'hidden';
+            if (window.MangaModal) MangaModal.open(modal, document.activeElement, { labelledBy: 'image-modal-title' });
+            else { modal.classList.remove('hidden'); modal.classList.add('flex'); }
             if (window.lucide) lucide.createIcons();
         }
 
         function closeImageModal() {
             const modal = document.getElementById('image-modal');
             if (!modal) return;
-            modal.classList.add('hidden');
-            modal.classList.remove('flex');
-            document.body.style.overflow = '';
+            if (window.MangaModal) MangaModal.close(modal);
+            else { modal.classList.add('hidden'); modal.classList.remove('flex'); }
         }
-
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') closeImageModal();
-        });
 
         let globalBackfillPollTimer = null;
 
@@ -1020,7 +1275,7 @@
             const panel = document.getElementById('tasks-panel');
             if (!panel) return;
             if (!tasks.length) {
-                panel.innerHTML = '<p class="text-slate-500 py-2 text-center">No recent tasks.</p>';
+                panel.innerHTML = '<p class="text-slate-400 py-2 text-center">No recent tasks.</p>';
                 return;
             }
             panel.innerHTML = tasks.slice(0, 12).map(function (task) {
@@ -1059,16 +1314,22 @@
         }
 
         async function poll() {
+            if (document.hidden) return;
             try {
                 const res = await fetch('/api/tasks?active=0&limit=20', { headers: { 'Accept': 'application/json' } });
                 if (res.ok) {
+                    if (window.mtPollOk) mtPollOk();
                     const data = await res.json();
                     tasks = data.tasks || [];
                     toastFinished();
                     render();
                     reattach();
+                } else if (window.mtPollFail) {
+                    mtPollFail(res.status);
                 }
-            } catch (err) { /* polling is best-effort */ }
+            } catch (err) {
+                if (window.mtPollFail) mtPollFail();
+            }
         }
 
         function reattach() {
@@ -1143,6 +1404,384 @@
     })();
     window.MangaTasks = MangaTasks;
     </script>
+
+    <script>
+    // ===== UI enhancement runtime (Phase 1) =====
+    (function () {
+        'use strict';
+
+        // ---- shared dialog helper: inert background, scroll lock, focus trap/return ----
+        const _modalStack = [];
+        function _focusables(root) {
+            return Array.from(root.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+                .filter(function (el) { return el.offsetParent !== null || el === document.activeElement; });
+        }
+        const MangaModal = {
+            open: function (el, opener, opts) {
+                if (!el || el.contains(document.activeElement)) return;
+                opts = opts || {};
+                el._mtOpener = opener || document.activeElement;
+                if (!el.getAttribute('role')) el.setAttribute('role', 'dialog');
+                el.setAttribute('aria-modal', 'true');
+                el.classList.remove('hidden');
+                el.classList.add('flex');
+                el.setAttribute('aria-hidden', 'false');
+                document.body.classList.add('mt-scroll-locked');
+                document.body.classList.add('mt-modal-open');
+                ['main-content', 'site-header', 'site-footer', 'global-tasks', 'mobile-bottom-bar', 'offline-banner'].forEach(function (id) {
+                    const node = document.getElementById(id);
+                    if (node && !node.contains(el)) { try { node.setAttribute('inert', ''); } catch (e) {} }
+                });
+                ['toast-container', 'toast-errors'].forEach(function (id) {
+                    const box = document.getElementById(id);
+                    if (!box || el.contains(box)) return;
+                    box.querySelectorAll('button').forEach(function (btn) { btn.dataset.mtWasEnabled = btn.disabled ? '1' : '0'; btn.disabled = true; btn.tabIndex = -1; });
+                });
+                if (opts.labelledBy && !el.getAttribute('aria-labelledby')) el.setAttribute('aria-labelledby', opts.labelledBy);
+                if (_modalStack.indexOf(el) === -1) _modalStack.push(el);
+                const first = el.querySelector('[data-mt-autofocus]') || _focusables(el)[0];
+                setTimeout(function () { try { (first || el).focus(); } catch (e) {} }, 20);
+                if (window.lucide) lucide.createIcons();
+            },
+            close: function (el) {
+                if (!el) return;
+                const idx = _modalStack.indexOf(el);
+                if (idx !== -1) _modalStack.splice(idx, 1);
+                el.classList.add('hidden');
+                el.classList.remove('flex');
+                el.setAttribute('aria-hidden', 'true');
+                if (!_modalStack.length) {
+                    document.body.classList.remove('mt-scroll-locked');
+                    document.body.classList.remove('mt-modal-open');
+                    ['main-content', 'site-header', 'site-footer', 'global-tasks', 'mobile-bottom-bar', 'offline-banner'].forEach(function (id) {
+                        const node = document.getElementById(id);
+                        if (node) { try { node.removeAttribute('inert'); } catch (e) {} }
+                    });
+                    ['toast-container', 'toast-errors'].forEach(function (id) {
+                        const box = document.getElementById(id);
+                        if (!box) return;
+                        box.querySelectorAll('button').forEach(function (btn) { if (btn.dataset.mtWasEnabled === '0') btn.disabled = false; btn.removeAttribute('tabindex'); delete btn.dataset.mtWasEnabled; });
+                    });
+                }
+                const opener = el._mtOpener;
+                if (opener && document.contains(opener)) { try { opener.focus(); } catch (e) {} }
+                el._mtOpener = null;
+            }
+        };
+        window.MangaModal = MangaModal;
+
+        document.addEventListener('keydown', function (event) {
+            if (!_modalStack.length) return;
+            const top = _modalStack[_modalStack.length - 1];
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                if (top.id === 'command-palette') closeCommandPalette();
+                else if (top.id === 'mobile-menu') closeMobileMenu();
+                else MangaModal.close(top);
+                return;
+            }
+            if (event.key !== 'Tab') return;
+            const focusables = _focusables(top);
+            if (!focusables.length) return;
+            const first = focusables[0];
+            const last = focusables[focusables.length - 1];
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+        });
+
+        // ---- quick action dispatcher (palette + dashboard use data-mt-action) ----
+        function mtRunAction(action) {
+            switch (action) {
+                case 'calibre-sync': triggerCalibreSync(); break;
+                case 'feeds-poll': triggerFeedCheck(); break;
+                case 'downloads-process': triggerStagingTag(); break;
+                case 'backfill': openBackfillModal(); break;
+                case 'manual-pickup': location.href = '/downloads/manual-pickup'; break;
+                default: break;
+            }
+        }
+        window.mtRunAction = mtRunAction;
+
+        document.addEventListener('click', function (event) {
+            const el = event.target.closest('[data-mt-action]');
+            if (!el) return;
+            event.preventDefault();
+            mtRunAction(el.getAttribute('data-mt-action'));
+        });
+
+        // ---- command palette ----
+        const PAGE_COMMANDS = [
+            ['Overview', '/', 'layout-dashboard'], ['Series', '/series', 'library'],
+            ['Releases', '/releases', 'sparkles'], ['Prioritized', '/prioritized', 'star'],
+            ['Discovery', '/discovery', 'compass'], ['Feeds', '/feeds', 'rss'],
+            ['Downloads', '/downloads', 'download-cloud'], ['Manual Pickup', '/downloads/manual-pickup', 'hand'],
+            ['Logs', '/logs', 'scroll-text'], ['Settings', '/settings', 'settings']
+        ];
+        const ACTION_COMMANDS = [
+            ['Sync Calibre library', 'calibre-sync', 'refresh-cw'],
+            ['Poll feeds now', 'feeds-poll', 'radio'],
+            ['Process downloads (tag & move)', 'downloads-process', 'tag'],
+            ['Start historical backfill', 'backfill', 'history'],
+            ['Open Manual Pickup', 'manual-pickup', 'hand']
+        ];
+        let paletteItems = [];
+        let paletteIndex = 0;
+        let paletteTimer = null;
+        let paletteAbort = null;
+
+        function paletteEls() {
+            return {
+                root: document.getElementById('command-palette'),
+                input: document.getElementById('command-palette-input'),
+                results: document.getElementById('command-palette-results'),
+                trigger: document.getElementById('btn-command-palette')
+            };
+        }
+        function paletteOption(html, onActivate, extraAttrs) {
+            const item = document.createElement('div');
+            item.setAttribute('role', 'option');
+            item.setAttribute('aria-selected', 'false');
+            item.className = 'mt-palette-item';
+            item.tabIndex = -1;
+            item.innerHTML = html;
+            item.addEventListener('click', onActivate);
+            if (extraAttrs) Object.keys(extraAttrs).forEach(function (k) { item.setAttribute(k, extraAttrs[k]); });
+            return item;
+        }
+        function iconHtml(name) { return '<i data-lucide="' + name + '" class="w-4 h-4 shrink-0 text-slate-400"></i>'; }
+        function renderPalette(query, searchResults) {
+            const els = paletteEls();
+            if (!els.results) return;
+            els.results.innerHTML = '';
+            paletteItems = [];
+            function addGroup(title) {
+                const group = document.createElement('p');
+                group.className = 'mt-palette-group';
+                group.textContent = title;
+                els.results.appendChild(group);
+            }
+            function add(item, labelHtml, activate) {
+                const option = paletteOption(labelHtml, activate);
+                els.results.appendChild(option);
+                paletteItems.push({ el: option, activate: activate });
+            }
+            const q = (query || '').toLowerCase().trim();
+            const pages = PAGE_COMMANDS.filter(function (p) { return !q || p[0].toLowerCase().indexOf(q) !== -1; });
+            if (pages.length) {
+                addGroup('Pages');
+                pages.forEach(function (p) { add(null, iconHtml(p[2]) + '<span>' + p[0] + '</span><span class="mt-kbd">↵</span>', function () { location.href = p[1]; }); });
+            }
+            const actions = ACTION_COMMANDS.filter(function (a) { return !q || a[0].toLowerCase().indexOf(q) !== -1; });
+            if (actions.length) {
+                addGroup('Actions');
+                actions.forEach(function (a) { add(null, iconHtml(a[2]) + '<span>' + a[0] + '</span>', function () { closeCommandPalette(); mtRunAction(a[1]); }); });
+            }
+            const data = searchResults || {};
+            if (data.series && data.series.length) {
+                addGroup('Series');
+                data.series.forEach(function (s) {
+                    const name = s.stable_name || s.name || s.display_title || '';
+                    add(null, iconHtml('library') + '<span>' + escHtml(name) + '</span><span class="mt-kbd">↵</span>', function () { location.href = '/series?search=' + encodeURIComponent(name); });
+                });
+            }
+            if (data.releases && data.releases.length) {
+                addGroup('Releases');
+                data.releases.forEach(function (r) {
+                    const title = r.title || r.series_name || '';
+                    add(null, iconHtml('sparkles') + '<span>' + escHtml(title) + '</span><span class="mt-kbd">↵</span>', function () { location.href = '/releases?view=flat&q=' + encodeURIComponent(title); });
+                });
+            }
+            if (!paletteItems.length) {
+                const empty = document.createElement('p');
+                empty.className = 'mt-palette-empty';
+                empty.textContent = q ? 'No matches.' : 'Type to search, or pick a page or action.';
+                els.results.appendChild(empty);
+            }
+            paletteIndex = 0;
+            highlightPalette();
+            if (window.lucide) lucide.createIcons();
+        }
+        function escHtml(value) {
+            const div = document.createElement('div');
+            div.textContent = value == null ? '' : String(value);
+            return div.innerHTML;
+        }
+        function highlightPalette() {
+            paletteItems.forEach(function (item, i) {
+                const selected = i === paletteIndex;
+                item.el.setAttribute('aria-selected', selected ? 'true' : 'false');
+                if (selected) item.el.scrollIntoView({ block: 'nearest' });
+            });
+        }
+        function openCommandPalette(opener) {
+            const els = paletteEls();
+            if (!els.root) return;
+            els.root.dataset.opener = 'palette';
+            MangaModal.open(els.root, opener || els.trigger, { labelledBy: 'command-palette-title' });
+            renderPalette('', null);
+            if (els.input) { els.input.value = ''; els.input.focus(); }
+            if (els.trigger) els.trigger.setAttribute('aria-expanded', 'true');
+        }
+        function closeCommandPalette() {
+            const els = paletteEls();
+            if (!els.root) return;
+            MangaModal.close(els.root);
+            if (els.trigger) els.trigger.setAttribute('aria-expanded', 'false');
+            if (paletteAbort) { paletteAbort.abort(); paletteAbort = null; }
+        }
+        window.openCommandPalette = openCommandPalette;
+        window.closeCommandPalette = closeCommandPalette;
+
+        function paletteSearch(query) {
+            if (paletteAbort) paletteAbort.abort();
+            if (!query || query.trim().length < 2) { renderPalette(query, null); return; }
+            paletteAbort = new AbortController();
+            fetch('/api/search?q=' + encodeURIComponent(query.trim()) + '&limit=8', { signal: paletteAbort.signal })
+                .then(function (res) { return res.ok ? res.json() : null; })
+                .then(function (data) { renderPalette(query, data || {}); })
+                .catch(function (err) {
+                    if (err.name === 'AbortError') return;
+                    const els = paletteEls();
+                    if (!els.results) return;
+                    els.results.innerHTML = '';
+                    const row = document.createElement('p');
+                    row.className = 'mt-palette-empty';
+                    row.textContent = 'Search unavailable. ';
+                    const retry = document.createElement('button');
+                    retry.type = 'button';
+                    retry.className = 'underline text-brand-400';
+                    retry.textContent = 'Retry';
+                    retry.addEventListener('click', function () { paletteSearch(query); });
+                    row.appendChild(retry);
+                    els.results.appendChild(row);
+                    paletteItems = [];
+                });
+        }
+
+        document.addEventListener('keydown', function (event) {
+            const els = paletteEls();
+            const open = els.root && !els.root.classList.contains('hidden');
+            if (((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') || (event.altKey && event.key.toLowerCase() === 'k')) {
+                event.preventDefault();
+                if (open) closeCommandPalette(); else openCommandPalette(els.trigger);
+                return;
+            }
+            if (!open) {
+                if (event.key === '/' && !/input|textarea|select/i.test((document.activeElement || {}).tagName || '')) {
+                    const pageSearch = document.querySelector('#releaseSearchInput, #series-search, #log-search, #discovery-search');
+                    if (pageSearch) { event.preventDefault(); pageSearch.focus(); }
+                }
+                return;
+            }
+            if (event.key === 'ArrowDown') { event.preventDefault(); paletteIndex = Math.min(paletteIndex + 1, paletteItems.length - 1); highlightPalette(); }
+            else if (event.key === 'ArrowUp') { event.preventDefault(); paletteIndex = Math.max(paletteIndex - 1, 0); highlightPalette(); }
+            else if (event.key === 'Home') { event.preventDefault(); paletteIndex = 0; highlightPalette(); }
+            else if (event.key === 'End') { event.preventDefault(); paletteIndex = Math.max(paletteItems.length - 1, 0); highlightPalette(); }
+            else if (event.key === 'Enter') { event.preventDefault(); if (paletteItems[paletteIndex]) paletteItems[paletteIndex].activate(); }
+        });
+
+        document.addEventListener('DOMContentLoaded', function () {
+            const els = paletteEls();
+            if (els.trigger) els.trigger.addEventListener('click', function (event) { event.preventDefault(); openCommandPalette(els.trigger); });
+            if (els.input) {
+                els.input.addEventListener('input', function () {
+                    const q = els.input.value;
+                    renderPalette(q, null);
+                    if (paletteTimer) clearTimeout(paletteTimer);
+                    paletteTimer = setTimeout(function () { paletteSearch(q); }, 200);
+                });
+            }
+        });
+        document.addEventListener('keydown', function (event) {
+            const els = paletteEls();
+            if (!els.root || els.root.classList.contains('hidden')) return;
+            if (event.key === 'Tab') return; // handled by the modal trap
+        });
+
+        // ---- manual pickup badge + offline banner + poll health ----
+        async function refreshManualPickupBadge() {
+            let count = 0;
+            try {
+                const res = await fetch('/api/torbox/manual-pickups');
+                if (res.ok) {
+                    const data = await res.json().catch(function () { return {}; });
+                    count = (data.active_count != null) ? data.active_count : ((data.pickups || []).length);
+                }
+            } catch (err) { /* badge is best-effort */ }
+            ['nav-manual-pickup-count', 'mobile-manual-pickup-count', 'tab-manual-pickup-count'].forEach(function (id) {
+                const el = document.getElementById(id);
+                if (!el) return;
+                if (count > 0) { el.textContent = String(count); el.classList.remove('hidden'); }
+                else { el.classList.add('hidden'); }
+                el.setAttribute('aria-hidden', 'true');
+            });
+            const tab = document.querySelector('#mobile-bottom-bar a[href="/downloads"]');
+            if (tab) tab.setAttribute('aria-label', count > 0 ? 'Downloads, ' + count + ' manual pickups waiting' : 'Downloads');
+            const navLink = document.querySelector('#nav-menu-downloads a[href="/downloads/manual-pickup"]');
+            if (navLink) { navLink.setAttribute('aria-label', count > 0 ? 'Manual Pickup, ' + count + ' waiting' : 'Manual Pickup'); navLink.setAttribute('title', navLink.getAttribute('aria-label')); }
+            const mobileLink = document.querySelector('#mobile-menu a[href="/downloads/manual-pickup"]');
+            if (mobileLink) { mobileLink.setAttribute('aria-label', count > 0 ? 'Manual Pickup, ' + count + ' waiting' : 'Manual Pickup'); mobileLink.setAttribute('title', mobileLink.getAttribute('aria-label')); }
+            return count;
+        }
+        window.refreshManualPickupBadge = refreshManualPickupBadge;
+
+        let pollFailures = 0;
+        function setOfflineBanner(show) {
+            const banner = document.getElementById('offline-banner');
+            if (banner) banner.classList.toggle('hidden', !show);
+        }
+        window.mtPollOk = function () { pollFailures = 0; setOfflineBanner(false); };
+        window.mtPollFail = function (status) { if (status === 401 || status === 403) return; pollFailures += 1; if (pollFailures >= 2) setOfflineBanner(true); };
+        window.addEventListener('online', function () { pollFailures = 0; setOfflineBanner(false); });
+        window.addEventListener('offline', function () { setOfflineBanner(true); });
+        if (!navigator.onLine) setOfflineBanner(true);
+
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) return;
+            if (window.MangaTasks) MangaTasks.poll();
+            refreshManualPickupBadge();
+        });
+        document.addEventListener('DOMContentLoaded', refreshManualPickupBadge);
+
+        // ---- dropdown keyboard pattern (existing roles unchanged) ----
+        function focusMenuItem(menu) {
+            const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
+            if (items.length) items[0].focus();
+        }
+        document.addEventListener('keydown', function (event) {
+            const trigger = event.target.closest('[data-dropdown-trigger]');
+            if (trigger && (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown')) {
+                event.preventDefault();
+                const wrapper = trigger.closest('[data-dropdown]');
+                const menu = wrapper ? wrapper.querySelector('[data-dropdown-menu]') : null;
+                if (menu && menu.classList.contains('hidden')) {
+                    if (typeof toggleDropdown === 'function') toggleDropdown(trigger);
+                    setTimeout(function () { focusMenuItem(menu); }, 20);
+                }
+                return;
+            }
+            const openMenu = event.target.closest('[data-dropdown-menu]');
+            if (openMenu && (event.key.indexOf('Arrow') === 0 || event.key === 'Home' || event.key === 'End')) {
+                event.preventDefault();
+                const items = Array.from(openMenu.querySelectorAll('[role="menuitem"]'));
+                let next = items.indexOf(document.activeElement);
+                if (event.key === 'ArrowDown') next = Math.min(next + 1, items.length - 1);
+                else if (event.key === 'ArrowUp') next = Math.max(next - 1, 0);
+                else if (event.key === 'Home') next = 0;
+                else if (event.key === 'End') next = items.length - 1;
+                if (items[next]) items[next].focus();
+            }
+            if (openMenu && event.key === 'Tab') {
+                openMenu.closest('[data-dropdown]').querySelector('[data-dropdown-trigger]').setAttribute('aria-expanded', 'false');
+                openMenu.classList.add('hidden');
+            }
+        });
+
+        // expose the one-shot modal helper for page-level modals
+        window.mtModal = MangaModal;
+    })();
+    </script>
+
     {% block scripts %}{% endblock %}
 </body>
 </html>

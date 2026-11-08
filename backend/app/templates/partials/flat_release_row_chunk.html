@@ -1,6 +1,6 @@
 {% for r in releases %}
 <tr class="hover:bg-slate-850/50 transition-colors release-row" data-release-id="{{ r.id }}" data-release-name="{{ r.title|lower }} {{ (r.series_name or '')|lower }} {{ (r.display_series_name or '')|lower }} {{ (r.romaji_name or '')|lower }} {{ (r.release_group or '')|lower }} {{ (r.release_groups or [])|join(' ')|lower }}">
-    <td class="py-3 px-4 text-center">
+    <td class="py-3 px-4 text-center" data-label="Cover">
         {% if r.cover_url %}
         <img src="/api/covers?url={{ r.cover_url|urlencode }}" alt="Cover" onclick="openImageModal(this.src, '{{ (r.display_series_name or r.series_name or r.title)|escape }}')" class="w-8 h-12 object-cover rounded shadow border border-slate-700/60 inline-block cursor-pointer hover:opacity-90 transition-all cover-placeholder" loading="lazy" decoding="async" title="Click to enlarge cover artwork">
         {% else %}
@@ -9,7 +9,7 @@
         </div>
         {% endif %}
     </td>
-    <td class="py-3 px-4 max-w-sm min-w-0">
+    <td class="py-3 px-4 max-w-sm min-w-0" data-label="Release">
         <div class="flex items-center gap-1.5 mb-1.5 flex-wrap">
             <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20 truncate max-w-full break-words-anywhere" title="{{ r.series_name }}">
                 {{ r.display_series_name or r.series_name or 'Uncategorized' }}
@@ -68,7 +68,7 @@
             {{ r.updated_at|localtime }}
         </div>
     </td>
-    <td class="py-3 px-4 max-w-md">
+    <td class="py-3 px-4 max-w-md" data-label="Series &amp; Volumes">
         <div class="font-bold text-slate-200 text-sm flex items-center gap-2">
             <span>{{ r.display_series_name or r.series_name or '-' }}</span>
             {% set row_groups2 = r.release_groups or ([r.release_group] if r.release_group else []) %}
@@ -120,7 +120,7 @@
         </div>
         {% endif %}
     </td>
-    <td class="py-3 px-4">
+    <td class="py-3 px-4" data-label="Status / Missing">
         {% if r.status == 'REQUESTED' %}
         <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/20">
             <i data-lucide="bell" class="w-3 h-3"></i> Wanted
@@ -160,7 +160,7 @@
         </div>
         {% endif %}
     </td>
-    <td class="py-3 px-4 text-slate-400">
+    <td class="py-3 px-4 text-slate-400" data-label="Feed Source">
         {% if r.link %}
         <a href="{{ r.link|safe_url }}" target="_blank" rel="noopener noreferrer" class="hover:text-brand-400 underline underline-offset-2 transition-colors inline-flex items-center gap-1" title="Open RSS Feed Post">
             <i data-lucide="rss" class="w-3 h-3 text-amber-500"></i>
@@ -170,27 +170,27 @@
         {{ r.source_feed_name or '-' }}
         {% endif %}
     </td>
-    <td class="py-3 px-4 text-right">
+    <td class="py-3 px-4 text-right mt-cell-actions" data-label="Actions">
         <div class="flex items-center justify-end gap-1.5">
             <button type="button" data-series="{{ r.series_name|e }}" onclick="openDifferentSeriesModal({{ r.id }}, this.dataset.series, this)" title="Move this release to a different series" aria-label="Different series" class="different-series-btn px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-violet-300 border border-slate-700 text-xs flex items-center gap-1 transition-colors">
                 <i data-lucide="shuffle" class="w-3.5 h-3.5"></i><span class="hidden sm:inline">Different series</span>
             </button>
             {% if r.download_url and (not r.download_state or r.download_state.can_download) %}
-            <button data-release-id="{{ r.id }}" title="Send to downloader" class="download-release-btn p-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-medium text-xs flex items-center gap-1 transition-colors">
+            <button data-release-id="{{ r.id }}" title="Send to downloader" aria-label="Download release" class="download-release-btn p-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-medium text-xs flex items-center gap-1 transition-colors">
                 <i data-lucide="download" class="w-3.5 h-3.5"></i>
             </button>
             {% endif %}
             {% if r.status != 'IGNORED' %}
-            <button type="button" onclick="ignoreReleaseGlobal({{ r.id }}, this)" title="Ignore this release batch" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-amber-300 border border-slate-700 text-xs flex items-center transition-colors">
+            <button type="button" onclick="ignoreReleaseGlobal({{ r.id }}, this)" title="Ignore this release batch" aria-label="Ignore this release batch" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-amber-300 border border-slate-700 text-xs flex items-center transition-colors">
                 <i data-lucide="eye-off" class="w-3.5 h-3.5"></i>
             </button>
             {% else %}
-            <button type="button" onclick="unignoreReleaseGlobal({{ r.id }}, this)" title="Un-ignore and restore release" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-700 text-xs flex items-center transition-colors">
+            <button type="button" onclick="unignoreReleaseGlobal({{ r.id }}, this)" title="Un-ignore and restore release" aria-label="Un-ignore and restore release" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-700 text-xs flex items-center transition-colors">
                 <i data-lucide="eye" class="w-3.5 h-3.5"></i>
             </button>
             {% endif %}
             {% if r.series_name %}
-            <button type="button" onclick="blacklistSeriesGlobal('{{ r.series_name|escape }}', this)" title="Blacklist series: {{ r.series_name }}" class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 border border-slate-700 text-xs flex items-center transition-colors">
+            <button type="button" onclick="blacklistSeriesGlobal('{{ r.series_name|escape }}', this)" title="Blacklist series: {{ r.series_name }}" aria-label="Blacklist series" class="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/40 text-slate-400 hover:text-rose-300 border border-slate-700 text-xs flex items-center transition-colors">
                 <i data-lucide="ban" class="w-3.5 h-3.5"></i>
             </button>
             {% endif %}

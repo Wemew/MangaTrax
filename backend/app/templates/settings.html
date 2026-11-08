@@ -3,6 +3,32 @@
 {% block title %}Settings{% endblock %}
 
 {% block content %}
+<style>
+    /* Settings page (UI Phase 1): mobile chip nav, collapsible cards, save bar above the tab bar. */
+    #settings-save-bar { z-index: 45; }
+    /* Advanced nav anchor stays in the source (9 anchors / test pin) but is hidden when the debug flag is off. */
+    #settings-section-nav a.settings-nav-hidden { display: none !important; }
+    #settings-discard-confirm { position: fixed; left: 0.75rem; right: 0.75rem; bottom: calc(var(--mt-bottom-bar-h, 4rem) + 0.75rem); z-index: 46; }
+    @media (min-width: 768px) {
+        #settings-discard-confirm { left: auto; right: 1.25rem; bottom: 6.5rem; width: 22rem; }
+    }
+    .settings-card-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem; }
+    .settings-card-toggle { display: none; }
+    @media (max-width: 767px) {
+        #settings-save-bar { bottom: calc(var(--mt-bottom-bar-h, 4rem) + 0.75rem); left: 0.75rem; right: 0.75rem; justify-content: space-between; }
+        [data-settings-card][data-collapsed="1"] > .settings-card-body { display: none; }
+        .settings-card-toggle {
+            display: inline-flex; align-items: center; justify-content: center;
+            min-width: 44px; min-height: 44px; border-radius: 0.75rem;
+            background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
+        }
+        .settings-card-toggle i, .settings-card-toggle svg { transition: transform 0.15s ease; }
+        .settings-card-toggle[aria-expanded="true"] i, .settings-card-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .settings-card-toggle i, .settings-card-toggle svg { transition: none; }
+    }
+</style>
 <div class="space-y-6 max-w-6xl mx-auto">
 
     <!-- Header -->
@@ -19,7 +45,7 @@
     <div class="lg:grid lg:grid-cols-[210px_minmax(0,1fr)] lg:gap-6 lg:items-start">
         <!-- Sticky in-page section navigation (task-16) -->
         <nav id="settings-section-nav" aria-label="Settings sections" class="sticky top-20 z-30 bg-darkcard/95 backdrop-blur border border-slate-800 rounded-2xl p-2 shadow-lg">
-            <div class="flex gap-1 overflow-x-auto lg:flex-col lg:overflow-visible" role="tablist" aria-orientation="vertical">
+            <div class="mt-section-nav flex gap-1 overflow-x-auto lg:flex-col lg:overflow-visible">
                 <a href="#section-calibre" data-settings-nav="section-calibre" class="settings-nav-link shrink-0 whitespace-nowrap flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border border-transparent text-slate-400 hover:text-white hover:bg-slate-800/70 transition-colors">
                     <i data-lucide="library" class="w-3.5 h-3.5"></i> Calibre
                 </a>
@@ -44,7 +70,7 @@
                 <a href="#section-maintenance" data-settings-nav="section-maintenance" class="settings-nav-link shrink-0 whitespace-nowrap flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border border-transparent text-slate-400 hover:text-white hover:bg-slate-800/70 transition-colors">
                     <i data-lucide="wrench" class="w-3.5 h-3.5"></i> Maintenance
                 </a>
-                <a href="#section-advanced" data-settings-nav="section-advanced" class="settings-nav-link shrink-0 whitespace-nowrap flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border border-transparent text-slate-400 hover:text-white hover:bg-slate-800/70 transition-colors">
+                <a href="#section-advanced" data-settings-nav="section-advanced" class="settings-nav-link{% if not debug_actions_enabled %} settings-nav-hidden{% endif %} shrink-0 whitespace-nowrap flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border border-transparent text-slate-400 hover:text-white hover:bg-slate-800/70 transition-colors">
                     <i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i> Advanced
                 </a>
             </div>
@@ -54,7 +80,7 @@
     <form id="settings-form" onsubmit="saveSettings(event)" class="space-y-6">
 
         <!-- Calibre Integration Card -->
-        <div id="section-calibre" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+        <div id="section-calibre" data-settings-card="section-calibre" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
             <h3 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
                 <i data-lucide="library" class="w-4 h-4 text-brand-400"></i>
                 Calibre Library Integration
@@ -76,7 +102,7 @@
         </div>
 
         <!-- BitTorrent Downloader In-App Integration Card -->
-        <div id="section-downloader" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+        <div id="section-downloader" data-settings-card="section-downloader" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
                     <h3 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
@@ -108,7 +134,7 @@
                 <div class="sm:col-span-1">
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Web API URL (Host & Port)</label>
                     <input type="text" id="setting-qbit-url" value="{{ settings.qbit_url }}" required placeholder="http://192.168.1.50:8080" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500">
-                    <p class="text-[10px] text-slate-500 mt-1">E.g., http://192.168.1.100:8080 or http://localhost:8080</p>
+                    <p class="text-[10px] text-slate-400 mt-1">E.g., http://192.168.1.100:8080 or http://localhost:8080</p>
                 </div>
                 <div class="sm:col-span-1">
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Username</label>
@@ -116,7 +142,8 @@
                 </div>
                 <div class="sm:col-span-1">
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Password</label>
-                    <input type="password" id="setting-qbit-pass" value="{{ settings.qbit_password }}" placeholder="••••••••" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+                    <input type="password" id="setting-qbit-pass" value="" placeholder="•••••••• (unchanged)" autocomplete="new-password" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
+                    <p class="text-[10px] text-slate-400 mt-1">Leave blank to keep the saved password (blank = unchanged).</p>
                 </div>
             </div>
 
@@ -124,12 +151,12 @@
                 <div>
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Target Category</label>
                     <input type="text" id="setting-qbit-category" value="{{ settings.qbit_category or 'manga' }}" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500">
-                    <p class="text-[10px] text-slate-500 mt-1">Downloader category to isolate manga releases (default: manga)</p>
+                    <p class="text-[10px] text-slate-400 mt-1">Downloader category to isolate manga releases (default: manga)</p>
                 </div>
                 <div>
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Tags</label>
                     <input type="text" id="setting-qbit-tags" value="{{ settings.qbit_tags or 'mangatrax' }}" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500">
-                    <p class="text-[10px] text-slate-500 mt-1">Comma-separated tags added to downloaded torrents</p>
+                    <p class="text-[10px] text-slate-400 mt-1">Comma-separated tags added to downloaded torrents</p>
                 </div>
             </div>
 
@@ -164,7 +191,7 @@
                     <div>
                         <label for="setting-torbox-api-key" class="block text-xs font-semibold text-slate-300 mb-1">Torbox API Key</label>
                         <input type="password" id="setting-torbox-api-key" value="{{ settings.torbox_api_key }}" placeholder="{{ 'API key saved — leave the mask to keep it' if torbox_api_key_set else 'Paste your Torbox API key' }}" autocomplete="new-password" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-cyan-500">
-                        <p class="text-[10px] text-slate-500 mt-1">Stored server-side, masked in the UI/API and never written to logs or activity details.</p>
+                        <p class="text-[10px] text-slate-400 mt-1">Stored server-side, masked in the UI/API and never written to logs or activity details.</p>
                     </div>
                     <div class="flex items-end gap-2">
                         <button type="button" onclick="testTorboxConnection()" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
@@ -200,12 +227,12 @@
                     <div>
                         <label for="setting-torbox-manual-pickup-max-items" class="block text-xs font-semibold text-slate-300 mb-1">Manual Pickup Cap (0 = unlimited)</label>
                         <input type="number" step="1" id="setting-torbox-manual-pickup-max-items" value="{{ settings.torbox_manual_pickup_max_items or '10' }}" min="0" max="1000" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
-                        <p class="text-[10px] text-slate-500 mt-1">Maximum held torrents. 0 means unlimited/infinite; finite cap falls back to FAILED when full. Currently held: {{ manual_pickup_count|default(0) }}.</p>
+                        <p class="text-[10px] text-slate-400 mt-1">Maximum held torrents. 0 means unlimited/infinite; finite cap falls back to FAILED when full. Currently held: {{ manual_pickup_count|default(0) }}.</p>
                     </div>
                     <div>
                         <label for="setting-torbox-manual-pickup-expiry-days" class="block text-xs font-semibold text-slate-300 mb-1">Manual Pickup Expiry (days; 0 = never)</label>
                         <input type="number" step="1" id="setting-torbox-manual-pickup-expiry-days" value="{{ settings.torbox_manual_pickup_expiry_days or '7' }}" min="0" max="3650" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
-                        <p class="text-[10px] text-slate-500 mt-1">Held torrents expire after this many days (remote deleted best-effort). 0 means never expires.</p>
+                        <p class="text-[10px] text-slate-400 mt-1">Held torrents expire after this many days (remote deleted best-effort). 0 means never expires.</p>
                     </div>
                     <div class="flex items-start gap-2.5 sm:col-span-3">
                         <input type="checkbox" id="setting-torbox-delete-on-failure" {% if settings.torbox_delete_on_failure != 'false' %}checked{% endif %} class="mt-0.5 rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-0">
@@ -217,17 +244,17 @@
                     <div>
                         <label for="setting-torbox-download-concurrency" class="block text-xs font-semibold text-slate-300 mb-1">Parallel Downloads (conns)</label>
                         <input type="number" step="1" id="setting-torbox-download-concurrency" value="{{ settings.torbox_download_concurrency or '4' }}" min="1" max="16" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
-                        <p class="text-[10px] text-slate-500 mt-1">Concurrent file downloads (default 4). 1 = sequential diagnostic mode.</p>
+                        <p class="text-[10px] text-slate-400 mt-1">Concurrent file downloads (default 4). 1 = sequential diagnostic mode.</p>
                     </div>
                     <div>
                         <label for="setting-torbox-parallel-chunks" class="block text-xs font-semibold text-slate-300 mb-1">Ranged Chunks / File</label>
                         <input type="number" step="1" id="setting-torbox-parallel-chunks" value="{{ settings.torbox_parallel_chunks or '4' }}" min="1" max="8" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
-                        <p class="text-[10px] text-slate-500 mt-1">Connections per large file (&gt;16 MiB, default 4). 1 = single stream diagnostic mode.</p>
+                        <p class="text-[10px] text-slate-400 mt-1">Connections per large file (&gt;16 MiB, default 4). 1 = single stream diagnostic mode.</p>
                     </div>
                     <div>
                         <label for="setting-torbox-max-download-gb" class="block text-xs font-semibold text-slate-300 mb-1">Max Download Size (GiB)</label>
                         <input type="number" step="1" id="setting-torbox-max-download-gb" value="{{ settings.torbox_max_download_gb or '64' }}" min="1" max="10240" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
-                        <p class="text-[10px] text-slate-500 mt-1">Per file and per whole-torrent archive; bigger downloads fail with an actionable error before streaming. Default 64.</p>
+                        <p class="text-[10px] text-slate-400 mt-1">Per file and per whole-torrent archive; bigger downloads fail with an actionable error before streaming. Default 64.</p>
                     </div>
                     <div>
                         <label for="setting-torbox-poll-seconds" class="block text-xs font-semibold text-slate-300 mb-1">Poll Interval (seconds)</label>
@@ -246,7 +273,7 @@
         </div>
 
         <!-- Staging & Tagging Pipeline Card -->
-        <div id="section-staging" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+        <div id="section-staging" data-settings-card="section-staging" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
             <h3 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
                 <i data-lucide="folder-check" class="w-4 h-4 text-emerald-400"></i>
                 Staging & Metadata Pipeline
@@ -262,13 +289,13 @@
                 <div>
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Downloads Directory Path (raw)</label>
                     <input type="text" id="setting-downloads-dir" value="{{ settings.downloads_dir or '/downloads' }}" required class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-emerald-500">
-                    <p class="text-[10px] text-slate-500 mt-1">Both qBittorrent and Torbox save raw downloads here. Must differ from the staging directory; keep both on the same drive so moves are atomic renames.</p>
+                    <p class="text-[10px] text-slate-400 mt-1">Both qBittorrent and Torbox save raw downloads here. Must differ from the staging directory; keep both on the same drive so moves are atomic renames.</p>
                     {% if storage_health %}{% with probe=storage_health.downloads, action="Downloads will fail —" %}{% include "partials/storage_path_warning.html" %}{% endwith %}{% endif %}
                 </div>
                 <div>
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Staging Directory Path (final)</label>
                     <input type="text" id="setting-staging-dir" value="{{ settings.staging_dir }}" required class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-emerald-500">
-                    <p class="text-[10px] text-slate-500 mt-1">Tagged .cbz files are moved here (relative subfolders preserved) for manual import into Calibre.</p>
+                    <p class="text-[10px] text-slate-400 mt-1">Tagged .cbz files are moved here (relative subfolders preserved) for manual import into Calibre.</p>
                     {% if storage_health %}{% with probe=storage_health.staging, action="Tagged files cannot be moved here —" %}{% include "partials/storage_path_warning.html" %}{% endwith %}{% endif %}
                 </div>
             </div>
@@ -325,7 +352,7 @@
         </div>
 
         <!-- Background Schedules -->
-        <div id="section-schedules" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+        <div id="section-schedules" data-settings-card="section-schedules" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
             <h3 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
                 <i data-lucide="clock" class="w-4 h-4 text-purple-400"></i>
                 Background Schedules
@@ -343,25 +370,25 @@
                 <div>
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Polite Backfill Max Pages</label>
                     <input type="number" id="setting-backfill-pages" value="{{ settings.backfill_max_pages or '15' }}" min="0" max="1000" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-purple-500">
-                    <p class="text-[11px] text-slate-500 mt-1">Set to <strong>0 for unlimited</strong>. MangaTrax will scan until the feed naturally ends.</p>
+                    <p class="text-[11px] text-slate-400 mt-1">Set to <strong>0 for unlimited</strong>. MangaTrax will scan until the feed naturally ends.</p>
                 </div>
                 <div>
                     <label class="block text-xs font-semibold text-slate-300 mb-1">Polite Backfill Delay (Seconds)</label>
                     <input type="number" step="0.5" id="setting-backfill-delay" value="{{ settings.backfill_delay_seconds or '2.0' }}" min="0.5" max="30" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-purple-500">
-                    <p class="text-[11px] text-slate-500 mt-1">Delay between requests to prevent tracker rate-limits or IP bans.</p>
+                    <p class="text-[11px] text-slate-400 mt-1">Delay between requests to prevent tracker rate-limits or IP bans.</p>
                 </div>
                 <div class="sm:col-span-2 pt-2 border-t border-slate-800">
                     <label class="block text-xs font-semibold text-slate-300 mb-1">
                         Application Timezone (IANA)
                     </label>
                     <input type="text" id="setting-timezone" value="{{ settings.app_timezone or 'Europe/Copenhagen' }}" placeholder="Europe/Copenhagen" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-purple-500">
-                    <p class="text-[11px] text-slate-500 mt-1">E.g., <code>Europe/Copenhagen</code>, <code>Europe/London</code>, <code>America/New_York</code>, or <code>UTC</code>. MangaTrax automatically handles winter and summer daylight saving transitions for this zone.</p>
+                    <p class="text-[11px] text-slate-400 mt-1">E.g., <code>Europe/Copenhagen</code>, <code>Europe/London</code>, <code>America/New_York</code>, or <code>UTC</code>. MangaTrax automatically handles winter and summer daylight saving transitions for this zone.</p>
                 </div>
             </div>
         </div>
 
         <!-- Nyaa / Tracker Source (mirror & proxy support) -->
-        <div id="section-tracker" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+        <div id="section-tracker" data-settings-card="section-tracker" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
             <h3 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
                 <i data-lucide="globe" class="w-4 h-4 text-sky-400"></i>
                 Nyaa / Tracker Source
@@ -374,7 +401,7 @@
             <div>
                 <label class="block text-xs font-semibold text-slate-300 mb-1">Nyaa Base URL</label>
                 <input type="text" id="setting-nyaa-base-url" value="{{ settings.nyaa_base_url or 'https://nyaa.si' }}" placeholder="https://nyaa.si" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-sky-500">
-                <p class="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                <p class="text-[11px] text-slate-400 mt-1 leading-relaxed">
                     Accepts a bare base (<code>https://wemew-nyaa.vercel.app</code>) or a full Nyaa-style URL
                     (<code>https://mirror/?page=rss&amp;c=3_1&amp;f=0</code>); the query string is dropped and the value is
                     normalised to <code>scheme://host[:port][/path]</code>. The proxy must forward Nyaa's query API:
@@ -386,7 +413,7 @@
         </div>
 
         <!-- Notification Webhooks Card -->
-        <div id="section-webhooks" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+        <div id="section-webhooks" data-settings-card="section-webhooks" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
             <h3 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
                 <i data-lucide="bell" class="w-4 h-4 text-brand-400"></i>
                 Notification Webhooks (Optional)
@@ -407,7 +434,7 @@
                             Test Discord
                         </button>
                     </div>
-                    <p class="text-[11px] text-slate-500 mt-1">Sends rich embed cards when a new manga release is requested or acquired into Calibre.</p>
+                    <p class="text-[11px] text-slate-400 mt-1">Sends rich embed cards when a new manga release is requested or acquired into Calibre.</p>
                 </div>
 
                 <div>
@@ -421,7 +448,7 @@
                             Test Generic
                         </button>
                     </div>
-                    <p class="text-[11px] text-slate-500 mt-1">Sends JSON event payloads for Gotify, Ntfy, Home Assistant, or Apprise.</p>
+                    <p class="text-[11px] text-slate-400 mt-1">Sends JSON event payloads for Gotify, Ntfy, Home Assistant, or Apprise.</p>
                 </div>
 
                 <div class="flex items-start gap-2.5">
@@ -443,7 +470,7 @@
         </div>
 
         <!-- Prioritized Release Groups Card -->
-        <div id="section-groups" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+        <div id="section-groups" data-settings-card="section-groups" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
                     <h3 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
@@ -472,9 +499,9 @@
                         {% if pg.notes %}
                         <p class="text-[11px] text-slate-400 mt-1">{{ pg.notes }}</p>
                         {% endif %}
-                        <span class="text-[10px] text-slate-500 mt-1 inline-block">{{ pg.release_count }} releases found</span>
+                        <span class="text-[10px] text-slate-400 mt-1 inline-block">{{ pg.release_count }} releases found</span>
                     </div>
-                    <button type="button" onclick="deletePrioritizedGroupSettings({{ pg.id }}, '{{ pg.name|escape }}')" title="Delete group" class="text-slate-500 hover:text-rose-400 p-1 transition-colors" aria-label="Delete group">
+                    <button type="button" onclick="deletePrioritizedGroupSettings({{ pg.id }}, '{{ pg.name|escape }}')" title="Delete group" class="text-slate-400 hover:text-rose-400 p-1 transition-colors" aria-label="Delete group">
                         <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                     </button>
                 </div>
@@ -493,7 +520,7 @@
         </div>
 
         <!-- Maintenance (always available: safe, re-fetchable cleanups only) -->
-        <div id="section-maintenance" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+        <div id="section-maintenance" data-settings-card="section-maintenance" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
             <h3 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
                 <i data-lucide="wrench" class="w-4 h-4 text-amber-400"></i>
                 Maintenance
@@ -573,12 +600,12 @@
                 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                     <label class="flex items-start gap-2 text-xs text-slate-300">
                         <input type="checkbox" id="setting-log-to-file" {% if settings.log_to_file == 'true' %}checked{% endif %} class="mt-0.5 rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-0">
-                        <span>Write rotating app log file<span class="block text-[10px] text-slate-500">Default off; Docker stdout already rotates.</span></span>
+                        <span>Write rotating app log file<span class="block text-[10px] text-slate-400">Default off; Docker stdout already rotates.</span></span>
                     </label>
                     <div>
                         <label for="setting-log-max-mb" class="block text-xs font-semibold text-slate-300 mb-1">Log file max size (MB)</label>
                         <input type="number" id="setting-log-max-mb" value="{{ settings.log_file_max_mb or '10' }}" min="1" max="100" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white">
-                        <p class="text-[10px] text-slate-500 mt-1">Rotates automatically; total ≈ max size × (backups+1).</p>
+                        <p class="text-[10px] text-slate-400 mt-1">Rotates automatically; total ≈ max size × (backups+1).</p>
                     </div>
                     <div>
                         <label for="setting-log-backups" class="block text-xs font-semibold text-slate-300 mb-1">Log file backups</label>
@@ -637,7 +664,7 @@
                     <div class="text-slate-400">DNS: <span class="text-slate-200">{{ (network_diagnostics.dns.resolvers if network_diagnostics and network_diagnostics.dns else [])|join(', ') or 'unknown' }}{% if network_diagnostics and network_diagnostics.dns and network_diagnostics.dns.docker_embedded_dns %} (Docker DNS){% endif %}</span></div>
                 </div>
                 <div id="network-speedtest-result" class="hidden text-[11px] text-slate-300 space-y-1"></div>
-                <p class="text-[10px] text-slate-500">Cloudflare caps a single speed-test request at 90 MB; larger runs are split into sequential rounds per connection. Speed units are MB/s (decimal).</p>
+                <p class="text-[10px] text-slate-400">Cloudflare caps a single speed-test request at 90 MB; larger runs are split into sequential rounds per connection. Speed units are MB/s (decimal).</p>
             </div>
 
             <!-- Release cache purge (task-41) -->
@@ -753,12 +780,12 @@
                     {% if series_alias_overrides %}
                     {% for alias in series_alias_overrides %}
                     <div class="py-1.5 flex items-center justify-between gap-2" data-alias-id="{{ alias.id }}">
-                        <span class="font-mono text-slate-300 break-all">{{ alias.source_series }} <span class="text-slate-500">→</span> {{ alias.target_name }}</span>
+                        <span class="font-mono text-slate-300 break-all">{{ alias.source_series }} <span class="text-slate-400">→</span> {{ alias.target_name }}</span>
                         <button type="button" onclick="removeSeriesAlias({{ alias.id }})" aria-label="Remove alias override {{ alias.source_series|e }}" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-rose-900/40 border border-slate-700 text-rose-300 text-[10px] font-bold">Remove</button>
                     </div>
                     {% endfor %}
                     {% else %}
-                    <p id="series-alias-empty" class="py-2 text-slate-500">No manual matches yet.</p>
+                    <p id="series-alias-empty" class="py-2 text-slate-400">No manual matches yet.</p>
                     {% endif %}
                 </div>
             </div>
@@ -787,11 +814,11 @@
                 <div id="attribution-summary" class="text-[11px] text-slate-400"></div>
                 <div class="overflow-x-auto">
                     <table class="w-full text-left text-[11px]">
-                        <thead class="text-slate-500 uppercase tracking-wider text-[10px]">
+                        <thead class="text-slate-400 uppercase tracking-wider text-[10px]">
                             <tr><th class="py-2 pr-2"></th><th class="py-2 pr-2">Release</th><th class="py-2 pr-2">Current → suggested</th><th class="py-2">Status</th></tr>
                         </thead>
                         <tbody id="attribution-rows" class="divide-y divide-slate-800/60">
-                            <tr><td colspan="4" class="py-4 text-center text-slate-500">Run the audit to check for mis-attributed releases.</td></tr>
+                            <tr><td colspan="4" class="py-4 text-center text-slate-400">Run the audit to check for mis-attributed releases.</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -800,7 +827,7 @@
 
         <!-- Advanced / Dangerous (opt-in: MANGATRAX_DEBUG_ACTIONS=1) -->
         {% if debug_actions_enabled %}
-        <div id="section-advanced" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+        <div id="section-advanced" data-settings-card="section-advanced" class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
             <h3 class="text-sm font-bold uppercase tracking-wider text-rose-300 flex items-center gap-2">
                 <i data-lucide="alert-triangle" class="w-4 h-4 text-rose-400"></i>
                 Advanced / Dangerous
@@ -857,11 +884,26 @@
             <!-- Sticky save bar: appears once the form is dirty (task-16).
                  The button is associated with the form via `form="settings-form"`,
                  so it saves from wherever the user has scrolled to. -->
-            <div id="settings-save-bar" class="hidden fixed bottom-5 right-5 z-40 items-center gap-3 bg-darkcard border border-brand-500/40 rounded-2xl px-4 py-3 shadow-2xl">
-                <span class="text-xs text-slate-300 font-medium flex items-center gap-1.5"><i data-lucide="pencil" class="w-3.5 h-3.5 text-amber-400"></i>Unsaved changes</span>
-                <button type="submit" form="settings-form" class="px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-md shadow-brand-600/30">
+            <div id="settings-save-bar" role="region" aria-label="Unsaved settings changes" class="hidden fixed bottom-5 right-3 sm:right-5 z-[45] items-center gap-2 bg-darkcard border border-brand-500/40 rounded-2xl px-3 py-2.5 shadow-2xl">
+                <span class="text-xs text-amber-300 font-medium flex items-center gap-1.5"><i data-lucide="pencil" class="w-3.5 h-3.5 text-amber-400"></i>Unsaved changes</span>
+                <button type="submit" form="settings-form" class="px-4 py-2 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-md shadow-brand-600/30">
                     <i data-lucide="save" class="w-3.5 h-3.5"></i>Save Settings
                 </button>
+                <button type="button" id="btn-settings-discard" onclick="discardSettingsChanges()" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors">
+                    Discard
+                </button>
+            </div>
+
+            <!-- In-app Stay/Discard confirmation (opened by the save bar's Discard button). -->
+            <div id="settings-discard-confirm" role="alertdialog" aria-labelledby="settings-discard-title" class="hidden items-start gap-3 bg-darkcard border border-rose-500/40 rounded-2xl shadow-2xl p-4">
+                <div class="flex-1">
+                    <p id="settings-discard-title" class="text-xs font-bold text-white">Discard unsaved changes?</p>
+                    <p class="text-[11px] text-slate-400 mt-1">Your edits will be lost and the page reloads with the saved settings.</p>
+                </div>
+                <div class="flex flex-col sm:flex-row gap-2 shrink-0">
+                    <button type="button" onclick="cancelDiscardSettings()" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold">Stay</button>
+                    <button type="button" onclick="confirmDiscardSettings()" class="px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold">Discard</button>
+                </div>
             </div>
         </div>
     </div>
@@ -1075,7 +1117,8 @@ async function saveSettings(e) {
         torbox_poll_seconds: document.getElementById('setting-torbox-poll-seconds').value,
         torbox_max_concurrent: document.getElementById('setting-torbox-max-concurrent').value,
         torbox_timeout_hours: document.getElementById('setting-torbox-timeout-hours').value
-    };
+    }; // blank qBittorrent password = unchanged: omit the key from the payload below.
+    if (!payload.qbit_password) { delete payload.qbit_password; }
 
     try {
         const res = await fetch('/api/settings', {
@@ -1085,6 +1128,10 @@ async function saveSettings(e) {
         });
         const data = await res.json();
         if (data.status === 'success') {
+            // Only a successful save clears the dirty state; a failed/offline save keeps the guard.
+            clearSettingsDirty();
+            const passInput = document.getElementById('setting-qbit-pass');
+            if (passInput) passInput.value = '';
             const storage = data.storage || {};
             const badPaths = Object.values(storage.paths || {}).filter(p => p && !p.writable);
             if (badPaths.length) {
@@ -1155,6 +1202,7 @@ async function pruneActivityNow() {
         if (!res.ok) { showToast(data.detail || 'Prune failed', 'error'); return; }
         const total = (data.deleted_old || 0) + (data.deleted_excess || 0);
         showToast(total ? `Pruned ${total} activity row(s); ${data.remaining} remain` : 'Nothing to prune', total ? 'success' : 'info');
+        suppressSettingsGuard(); // intentional post-action reload must not trip the unsaved-changes prompt
         setTimeout(() => location.reload(), 900);
     } catch (err) { showToast('Error: ' + err, 'error'); }
 }
@@ -1267,7 +1315,7 @@ async function auditVolumeRanges() {
     const container = document.getElementById('volume-range-rows');
     const summary = document.getElementById('volume-range-summary');
     if (!container) return;
-    container.innerHTML = '<p class="py-3 text-slate-500">Auditing releases...</p>';
+    container.innerHTML = '<p class="py-3 text-slate-400">Auditing releases...</p>';
     try {
         const res = await fetch('/api/maintenance/suspicious-volume-ranges');
         const data = await res.json();
@@ -1280,7 +1328,7 @@ async function auditVolumeRanges() {
             const checkbox = row.safe_to_repair
                 ? `<input type="checkbox" onchange="toggleVolumeRange(${row.id})" class="rounded border-slate-700 bg-slate-900 text-rose-500">`
                 : '<span class="text-slate-600">—</span>';
-            return `<div class="py-1.5 flex items-start gap-2"><span class="pt-0.5">${checkbox}</span><span class="flex-1 text-slate-300 break-all">${escapeHtml(row.title)}<br><span class="text-slate-500">${escapeHtml(row.series_name)} · stored ${escapeHtml((row.current_volumes||[]).join(', ') || '-')} → ${escapeHtml(row.suggestion)} · ${escapeHtml(row.reason)}</span></span></div>`;
+            return `<div class="py-1.5 flex items-start gap-2"><span class="pt-0.5">${checkbox}</span><span class="flex-1 text-slate-300 break-all">${escapeHtml(row.title)}<br><span class="text-slate-400">${escapeHtml(row.series_name)} · stored ${escapeHtml((row.current_volumes||[]).join(', ') || '-')} → ${escapeHtml(row.suggestion)} · ${escapeHtml(row.reason)}</span></span></div>`;
         }).join('') : '<p class="py-3 text-emerald-400">No suspicious volume ranges found.</p>';
     } catch (err) { container.innerHTML = `<p class="py-3 text-rose-300">Audit failed: ${escapeHtml(String(err))}</p>`; }
 }
@@ -1309,7 +1357,7 @@ async function removeSeriesAlias(id) {
         if (row) row.remove();
         const list = document.getElementById('series-alias-list');
         if (list && !list.querySelector('[data-alias-id]')) {
-            list.innerHTML = '<p id="series-alias-empty" class="py-2 text-slate-500">No manual matches yet.</p>';
+            list.innerHTML = '<p id="series-alias-empty" class="py-2 text-slate-400">No manual matches yet.</p>';
         }
         showToast('Manual series match removed', 'success');
     } catch (err) { showToast('Error: ' + err, 'error'); }
@@ -1318,7 +1366,7 @@ async function removeSeriesAlias(id) {
 async function auditSeriesAttribution() {
     const tbody = document.getElementById('attribution-rows');
     if (!tbody) return;
-    tbody.innerHTML = '<tr><td colspan="4" class="py-4 text-center text-slate-500">Auditing releases (read-only)...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" class="py-4 text-center text-slate-400">Auditing releases (read-only)...</td></tr>';
     try {
         const res = await fetch('/api/maintenance/series-attribution');
         const data = await res.json();
@@ -1334,8 +1382,8 @@ async function auditSeriesAttribution() {
                 return `<tr>
                     <td class="py-2 pr-2">${_attributionCheckbox(row, index)}</td>
                     <td class="py-2 pr-2 text-slate-300 font-mono break-all">${escapeHtml(row.title || '')}</td>
-                    <td class="py-2 pr-2 font-mono">${escapeHtml(row.current_series || '')} <span class="text-slate-500">→</span> ${escapeHtml(row.suggested_series || '')}</td>
-                    <td class="py-2">${row.safe_to_repair ? '<span class="text-amber-300">repairable</span>' : '<span class="text-rose-300">ambiguous</span>'} <span class="text-slate-500">${escapeHtml(row.reason || '')}</span></td>
+                    <td class="py-2 pr-2 font-mono">${escapeHtml(row.current_series || '')} <span class="text-slate-400">→</span> ${escapeHtml(row.suggested_series || '')}</td>
+                    <td class="py-2">${row.safe_to_repair ? '<span class="text-amber-300">repairable</span>' : '<span class="text-rose-300">ambiguous</span>'} <span class="text-slate-400">${escapeHtml(row.reason || '')}</span></td>
                 </tr>`;
             }).join('')
             : '<tr><td colspan="4" class="py-4 text-center text-emerald-400">No mis-attributed releases found.</td></tr>';
@@ -1485,6 +1533,7 @@ async function executeFullDataReset() {
         const data = await res.json();
         if (data.status === 'success') {
             showToast('Application data reset successfully! Reloading...', 'success');
+            suppressSettingsGuard(); // reset-then-redirect path suppresses the unsaved-changes prompt
             setTimeout(() => {
                 window.location.href = '/';
             }, 1200);
@@ -1515,6 +1564,7 @@ async function addPrioritizedGroupSettings() {
         const data = await res.json();
         if (data.status === 'success') {
             showToast(`Added prioritized group: ${name}`, 'success');
+            suppressSettingsGuard();
             setTimeout(() => location.reload(), 1000);
         } else {
             showToast(data.message || 'Error adding group', 'error');
@@ -1531,6 +1581,7 @@ async function deletePrioritizedGroupSettings(id, name) {
         const data = await res.json();
         if (data.status === 'success') {
             showToast(`Removed prioritized group: ${name}`, 'success');
+            suppressSettingsGuard();
             setTimeout(() => location.reload(), 1000);
         } else {
             showToast(data.message || 'Error removing group', 'error');
@@ -1540,7 +1591,146 @@ async function deletePrioritizedGroupSettings(id, name) {
     }
 }
 
-// --- In-page section navigation: sticky pills, scroll-spy, dirty save bar (task-16) ---
+// --- Settings dirty lifecycle (UI Phase 1): save bar + mt-save-open + beforeunload + Stay/Discard ---
+// The save bar is shown on the first input/change and only cleared after a
+// successful save (or an explicit discard). While it is visible the shell hides
+// the global Tasks widget via `body.mt-save-open` (Tasks/save-bar mutual exclusion).
+let _settingsDirty = false;
+let _settingsSuppressGuard = false;
+let _settingsGuardTimer = null;
+
+function showSettingsSaveBar() {
+    const saveBar = document.getElementById('settings-save-bar');
+    if (saveBar) {
+        saveBar.classList.remove('hidden');
+        saveBar.classList.add('flex');
+    }
+    document.body.classList.add('mt-save-open');
+    if (window.lucide) lucide.createIcons();
+}
+
+function hideSettingsSaveBar() {
+    const saveBar = document.getElementById('settings-save-bar');
+    if (saveBar) {
+        saveBar.classList.add('hidden');
+        saveBar.classList.remove('flex');
+    }
+    const confirm = document.getElementById('settings-discard-confirm');
+    if (confirm) {
+        confirm.classList.add('hidden');
+        confirm.classList.remove('flex');
+    }
+    document.body.classList.remove('mt-save-open');
+}
+
+function markSettingsDirty() {
+    _settingsDirty = true;
+    showSettingsSaveBar();
+}
+
+function clearSettingsDirty() {
+    _settingsDirty = false;
+    hideSettingsSaveBar();
+}
+
+// Called by the intentional post-action reloads so a successful action is not
+// blocked by the "unsaved changes" browser prompt (three reloads + reset redirect).
+function suppressSettingsGuard() {
+    _settingsSuppressGuard = true;
+    if (_settingsGuardTimer) clearTimeout(_settingsGuardTimer);
+    _settingsGuardTimer = setTimeout(function () { _settingsSuppressGuard = false; }, 4000);
+}
+
+window.addEventListener('beforeunload', function (event) {
+    if (!_settingsDirty || _settingsSuppressGuard) return undefined;
+    event.preventDefault();
+    event.returnValue = '';
+    return '';
+});
+
+function discardSettingsChanges() {
+    if (!_settingsDirty) return;
+    const confirm = document.getElementById('settings-discard-confirm');
+    if (confirm) {
+        confirm.classList.remove('hidden');
+        confirm.classList.add('flex');
+        const stay = confirm.querySelector('button');
+        if (stay) stay.focus();
+        if (window.lucide) lucide.createIcons();
+    }
+}
+
+function cancelDiscardSettings() {
+    const confirm = document.getElementById('settings-discard-confirm');
+    if (confirm) {
+        confirm.classList.add('hidden');
+        confirm.classList.remove('flex');
+    }
+    const discardBtn = document.getElementById('btn-settings-discard');
+    if (discardBtn) discardBtn.focus();
+}
+
+document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Escape') return;
+    const confirm = document.getElementById('settings-discard-confirm');
+    if (confirm && !confirm.classList.contains('hidden')) {
+        event.preventDefault();
+        cancelDiscardSettings();
+    }
+});
+
+function confirmDiscardSettings() {
+    // Discard = reset to server state by reloading with the guard suppressed.
+    suppressSettingsGuard();
+    clearSettingsDirty();
+    window.location.reload();
+}
+
+// --- Mobile collapsible section cards (first section open by default) ---
+function setSettingsCardCollapsed(card, collapsed) {
+    if (!card) return;
+    card.setAttribute('data-collapsed', collapsed ? '1' : '0');
+    const toggle = card.querySelector('.settings-card-toggle');
+    if (toggle) toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+}
+
+function expandSettingsCard(sectionId) {
+    const card = sectionId ? document.getElementById(sectionId) : null;
+    if (!card || !card.hasAttribute('data-settings-card')) return;
+    setSettingsCardCollapsed(card, false);
+}
+
+function initSettingsCollapsible() {
+    const cards = Array.from(document.querySelectorAll('[data-settings-card]'));
+    cards.forEach(function (card, index) {
+        const heading = card.querySelector('h3');
+        if (!heading || card.querySelector('.settings-card-head')) return;
+        const body = document.createElement('div');
+        body.className = 'settings-card-body space-y-4';
+        if (card.id) body.id = card.id + '-body';
+        const head = document.createElement('div');
+        head.className = 'settings-card-head';
+        heading.remove();
+        head.appendChild(heading);
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'settings-card-toggle';
+        toggle.setAttribute('aria-label', 'Toggle ' + String(heading.textContent || 'section').replace(/\s+/g, ' ').trim() + ' section');
+        if (body.id) toggle.setAttribute('aria-controls', body.id);
+        toggle.innerHTML = '<i data-lucide="chevron-down" class="w-4 h-4"></i>';
+        head.appendChild(toggle);
+        while (card.firstChild) body.appendChild(card.firstChild);
+        card.appendChild(head);
+        card.appendChild(body);
+        setSettingsCardCollapsed(card, index > 0);
+        toggle.addEventListener('click', function () {
+            setSettingsCardCollapsed(card, card.getAttribute('data-collapsed') !== '1');
+        });
+    });
+    if (window.lucide) lucide.createIcons();
+}
+
+// --- In-page section navigation: sticky pills, scroll-spy (task-16) ---
 (function initSettingsNavigation() {
     const links = Array.from(document.querySelectorAll('[data-settings-nav]'));
     const sections = links
@@ -1548,6 +1738,7 @@ async function deletePrioritizedGroupSettings(id, name) {
         .filter(Boolean);
     const activeClasses = ['bg-brand-500/15', 'text-brand-300', 'border-brand-500/40'];
     const idleClasses = ['text-slate-400', 'border-transparent'];
+    let activeSectionId = '';
 
     function setActive(sectionId) {
         links.forEach((link) => {
@@ -1556,6 +1747,14 @@ async function deletePrioritizedGroupSettings(id, name) {
             idleClasses.forEach((cls) => link.classList.toggle(cls, !isActive));
             if (isActive) {
                 link.setAttribute('aria-current', 'true');
+                // Mobile chip nav: keep the active chip in view (horizontal scroller only).
+                if (activeSectionId !== sectionId) {
+                    const scroller = link.parentElement;
+                    if (scroller && scroller.scrollWidth > scroller.clientWidth + 4) {
+                        try { link.scrollIntoView({ block: 'nearest', inline: 'center' }); } catch (err) { /* best effort */ }
+                    }
+                    activeSectionId = sectionId;
+                }
             } else {
                 link.removeAttribute('aria-current');
             }
@@ -1578,24 +1777,25 @@ async function deletePrioritizedGroupSettings(id, name) {
     }
     if (sections.length) setActive(sections[0].id);
 
-    // The sticky save bar appears as soon as the form is dirty, so the (single)
-    // save button stays reachable from any section of this long page.
-    const form = document.getElementById('settings-form');
-    const saveBar = document.getElementById('settings-save-bar');
-    if (form && saveBar) {
-        const showSaveBar = () => {
-            saveBar.classList.remove('hidden');
-            saveBar.classList.add('flex');
-            if (window.lucide) lucide.createIcons();
-        };
-        form.addEventListener('input', showSaveBar);
-        form.addEventListener('change', showSaveBar);
-        form.addEventListener('submit', () => {
-            saveBar.classList.add('hidden');
-            saveBar.classList.remove('flex');
+    // Clicking an anchor keeps the chip in view, expands a collapsed target card,
+    // then lets the native hash-scroll run (scroll-mt-24 keeps the header offset).
+    links.forEach((link) => {
+        link.addEventListener('click', function () {
+            const sectionId = link.getAttribute('data-settings-nav');
+            expandSettingsCard(sectionId);
+            setActive(sectionId);
         });
+    });
+
+    // Dirty state: set on the first edit, cleared only by a successful save or discard.
+    const form = document.getElementById('settings-form');
+    if (form) {
+        form.addEventListener('input', markSettingsDirty);
+        form.addEventListener('change', markSettingsDirty);
     }
 })();
+
+initSettingsCollapsible();
 
 // --- False fuzzy series matches (task-64) ---
 let _falseSeriesCandidates = [];
@@ -1611,7 +1811,7 @@ async function auditFalseSeriesMatches() {
         _falseSeriesCandidates = data.candidates || [];
         if (summary) summary.textContent = `${_falseSeriesCandidates.length} suspect release(s).`;
         if (rows) rows.innerHTML = _falseSeriesCandidates.length ? _falseSeriesCandidates.map(function (item) {
-            return `<label class="py-2 flex items-start gap-2"><input type="checkbox" class="false-series-check" value="${item.release_id}" ${item.can_repair ? '' : 'disabled'} onchange="updateFalseSeriesSelection()"><span class="min-w-0"><span class="block font-semibold text-slate-200">${falseSeriesEsc(item.title)}</span><span class="block text-slate-400">${falseSeriesEsc(item.stored_series)} → ${falseSeriesEsc(item.suggested_series)} <span class="text-slate-500">(${falseSeriesEsc(item.status)})</span></span></span></label>`;
+            return `<label class="py-2 flex items-start gap-2"><input type="checkbox" class="false-series-check" value="${item.release_id}" ${item.can_repair ? '' : 'disabled'} onchange="updateFalseSeriesSelection()"><span class="min-w-0"><span class="block font-semibold text-slate-200">${falseSeriesEsc(item.title)}</span><span class="block text-slate-400">${falseSeriesEsc(item.stored_series)} → ${falseSeriesEsc(item.suggested_series)} <span class="text-slate-400">(${falseSeriesEsc(item.status)})</span></span></span></label>`;
         }).join('') : '<p class="py-3 text-emerald-400">No false fuzzy series matches found.</p>';
         updateFalseSeriesSelection();
     } catch (err) { if (summary) summary.textContent = 'Audit failed: ' + err; }

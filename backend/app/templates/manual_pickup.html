@@ -23,9 +23,18 @@
     </div>
     {% endif %}
 
+    <div id="pickup-changed-bar" class="hidden mb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3 text-xs text-amber-200">
+        <span id="pickup-changed-text">Pickups changed on the server.</span>
+        <div class="flex items-center gap-2">
+            <button type="button" onclick="pickupReloadNow()" class="min-h-[44px] md:min-h-0 px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-100 font-semibold">Refresh</button>
+            <button type="button" onclick="pickupDiscardAndReload()" class="min-h-[44px] md:min-h-0 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/30 border border-slate-700 text-rose-200 font-semibold">Discard my edits and refresh</button>
+            <button type="button" onclick="hidePickupChangedBar()" class="min-h-[44px] md:min-h-0 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 font-semibold">Dismiss</button>
+        </div>
+    </div>
+
     <div class="space-y-4" id="manual-pickup-list">
     {% for pickup in pickups %}
-    <section class="manual-pickup-card bg-darkcard border border-slate-800 rounded-2xl p-4" data-pickup-id="{{ pickup.id }}" data-task-scope="{{ pickup.id }}">
+    <section class="manual-pickup-card bg-darkcard border border-slate-800 rounded-2xl p-4" data-pickup-id="{{ pickup.id }}" data-task-scope="{{ pickup.id }}" data-series-name="{{ pickup.series_name|e }}">
         <div class="flex flex-col lg:flex-row lg:items-start justify-between gap-3">
             <div class="min-w-0">
                 <h2 class="font-bold text-white break-words">{{ pickup.title }}</h2>
@@ -34,13 +43,13 @@
                 </p>
                 <p class="text-xs text-amber-300 mt-2 break-words" title="{{ pickup.reason }}">{{ pickup.reason }}</p>
                 <p class="pickup-error hidden text-xs text-rose-300 mt-1 break-words" role="alert"></p>
-                <p class="text-[11px] text-slate-500 mt-1">Status: <span class="pickup-status font-semibold">{{ pickup.status }}</span> · Expires: {{ pickup.expires_at or 'never' }}</p>
+                <p class="text-[11px] text-slate-400 mt-1">Status: <span class="pickup-status font-semibold">{{ pickup.status }}</span> · Expires: {{ pickup.expires_at or 'never' }}</p>
             </div>
             <div class="flex flex-wrap items-center gap-2 shrink-0">
-                <button type="button" onclick="pickupFetchAll({{ pickup.id }})" data-task-kind="torbox:pickup:fetch" data-task-scope="{{ pickup.id }}" class="px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold">Fetch whole torrent</button>
-                <button type="button" onclick="pickupRetry({{ pickup.id }})" data-task-kind="torbox:pickup:retry" data-task-scope="{{ pickup.id }}" class="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold">Retry strict mapping</button>
-                <button type="button" onclick="pickupEditSeries({{ pickup.id }})" class="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold">Edit series</button>
-                <button type="button" onclick="pickupDiscard({{ pickup.id }})" class="px-3 py-1.5 rounded-lg bg-rose-900/40 border border-rose-700/50 text-rose-300 text-xs font-semibold">Discard</button>
+                <button type="button" onclick="pickupFetchAll({{ pickup.id }})" data-task-kind="torbox:pickup:fetch" data-task-scope="{{ pickup.id }}" class="min-h-[44px] md:min-h-0 px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold">Fetch whole torrent</button>
+                <button type="button" onclick="pickupRetry({{ pickup.id }})" data-task-kind="torbox:pickup:retry" data-task-scope="{{ pickup.id }}" class="min-h-[44px] md:min-h-0 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold">Retry strict mapping</button>
+                <button type="button" onclick="pickupEditSeries({{ pickup.id }})" class="min-h-[44px] md:min-h-0 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold">Edit series</button>
+                <button type="button" onclick="pickupDiscard({{ pickup.id }})" class="min-h-[44px] md:min-h-0 px-3 py-1.5 rounded-lg bg-rose-900/40 border border-rose-700/50 text-rose-300 text-xs font-semibold">Discard</button>
             </div>
         </div>
 
@@ -50,29 +59,33 @@
                     <input type="checkbox" onchange="pickupToggleAll(this, {{ pickup.id }})" class="rounded border-slate-700 bg-slate-900">
                     Select all files
                 </label>
-                <div class="flex items-center gap-2">
-                    <input type="text" id="pickup-volumes-{{ pickup.id }}" value="{{ pickup.wanted_volumes|join(',') }}" placeholder="e.g. 1,2,3" class="w-40 bg-slate-950/70 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200" aria-label="Wanted volumes">
-                    <button type="button" onclick="pickupSaveVolumes({{ pickup.id }})" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-xs">Save volumes</button>
-                    <button type="button" onclick="pickupFetchSelected({{ pickup.id }})" data-task-kind="torbox:pickup:fetch" data-task-scope="{{ pickup.id }}" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold">Fetch selected</button>
+                <div class="flex flex-wrap items-center gap-2">
+                    <input type="text" id="pickup-volumes-{{ pickup.id }}" value="{{ pickup.wanted_volumes|join(',') }}" placeholder="e.g. 1,2,3" class="h-11 md:h-auto min-h-[44px] md:min-h-0 w-40 bg-slate-950/70 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200" aria-label="Wanted volumes">
+                    <button type="button" onclick="pickupSaveVolumes({{ pickup.id }})" class="min-h-[44px] md:min-h-0 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-xs">Save volumes</button>
+                    <button type="button" onclick="pickupFetchSelected({{ pickup.id }})" data-task-kind="torbox:pickup:fetch" data-task-scope="{{ pickup.id }}" class="min-h-[44px] md:min-h-0 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold">Fetch selected</button>
                 </div>
             </div>
             <div class="overflow-x-auto">
-                <table class="w-full text-xs">
+                <table class="w-full text-xs mt-table-cards">
                     <thead><tr class="text-slate-400 text-left"><th class="py-1 pr-2">Use</th><th class="py-1 pr-2">File</th><th class="py-1 pr-2">Size</th><th class="py-1 pr-2">Suggested volume</th><th class="py-1">Fetched</th></tr></thead>
                     <tbody>
                     {% for file in pickup.files %}
                     <tr class="border-t border-slate-800/60 pickup-file-row" data-file-index="{{ loop.index0 }}">
-                        <td class="py-1.5 pr-2"><input type="checkbox" class="pickup-file-check" data-pickup="{{ pickup.id }}" data-index="{{ loop.index0 }}" {% if file.fetched %}disabled{% endif %} onchange="pickupRefreshButton({{ pickup.id }})" {% if not file.fetched %}checked{% endif %}></td>
-                        <td class="py-1.5 pr-2 text-slate-200 break-all">{{ file.name }}</td>
-                        <td class="py-1.5 pr-2 text-slate-400">{{ '%.2f'|format((file.size or 0) / 1073741824) }} GiB</td>
-                        <td class="py-1.5 pr-2">
-                            <input type="number" step="0.1" min="0" class="pickup-file-volume w-20 bg-slate-950/70 border border-slate-700 rounded px-2 py-0.5 text-xs text-slate-200" data-pickup="{{ pickup.id }}" data-index="{{ loop.index0 }}" value="{{ file.suggested_volume if file.suggested_volume is not none else '' }}" onchange="pickupSaveMapping({{ pickup.id }})">
+                        <td data-label="Use" class="py-1.5 pr-2"><label class="inline-flex items-center justify-center min-h-[44px] min-w-[44px] md:min-h-0 md:min-w-0"><input type="checkbox" class="pickup-file-check w-5 h-5" data-pickup="{{ pickup.id }}" data-index="{{ loop.index0 }}" {% if file.fetched %}disabled{% endif %} onchange="pickupRefreshButton({{ pickup.id }})" {% if not file.fetched %}checked{% endif %} aria-label="Use {{ file.name }}"></label></td>
+                        <td data-label="File" class="py-1.5 pr-2 text-slate-200 break-all">{{ file.name }}</td>
+                        <td data-label="Size" class="py-1.5 pr-2 text-slate-400">{{ '%.2f'|format((file.size or 0) / 1073741824) }} GiB</td>
+                        <td data-label="Suggested volume" class="py-1.5 pr-2">
+                            <div class="flex flex-wrap items-center gap-1.5">
+                                <input type="number" step="0.1" min="0" class="pickup-file-volume h-11 md:h-auto min-h-[44px] md:min-h-0 w-24 bg-slate-950/70 border border-slate-700 rounded px-2 py-0.5 text-xs text-slate-200" data-pickup="{{ pickup.id }}" data-index="{{ loop.index0 }}" data-stored-volume="{{ file.suggested_volume if file.suggested_volume is not none else '' }}" value="{{ file.suggested_volume if file.suggested_volume is not none else '' }}" onchange="pickupSaveMapping({{ pickup.id }}, this)" aria-label="Suggested volume for {{ file.name }}">
+                                <button type="button" onclick="pickupRevertVolume({{ pickup.id }}, this)" class="min-h-[44px] md:min-h-0 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-[10px] text-slate-300" title="Revert this volume to the stored mapping">Revert</button>
+                                <span class="pickup-save-state text-[10px] text-slate-400" data-save-for="{{ loop.index0 }}" role="status" aria-live="polite"></span>
+                            </div>
                         </td>
-                        <td class="py-1.5 text-slate-400">{% if file.fetched %}<span class="text-emerald-400">yes</span>{% else %}no{% endif %}</td>
+                        <td data-label="Fetched" class="py-1.5 text-slate-400">{% if file.fetched %}<span class="text-emerald-400">yes</span>{% else %}no{% endif %}</td>
                     </tr>
                     {% endfor %}
                     {% if not pickup.files %}
-                    <tr><td colspan="5" class="py-3 text-slate-500">No file list was returned by Torbox; use “Fetch whole torrent”.</td></tr>
+                    <tr class="mt-table-empty"><td colspan="5" class="py-3 text-slate-400">No file list was returned by Torbox; use “Fetch whole torrent”.</td></tr>
                     {% endif %}
                     </tbody>
                 </table>
@@ -84,29 +97,84 @@
 </div>
 
 <script>
+let _pickupDirty = false;
+let _pickupPendingSaves = 0;
+let _pickupChangedSignature = '';
+let _pickupPollTimer = null;
+
+function _pickupSaveStateEl(input) {
+    const cell = input ? input.closest('td') : null;
+    const index = input ? input.dataset.index : '';
+    return cell ? cell.querySelector(`.pickup-save-state[data-save-for="${index}"]`) : null;
+}
+function _pickupSetSaveState(input, text, cls) {
+    const el = _pickupSaveStateEl(input);
+    if (!el) return;
+    el.textContent = text || '';
+    el.className = 'pickup-save-state text-[10px] ' + (cls || 'text-slate-400');
+}
 function pickupPayload(id) {
     const rows = Array.from(document.querySelectorAll(`.pickup-file-volume[data-pickup="${id}"]`));
     return rows.map(function (input) {
         return { index: parseInt(input.dataset.index, 10), volume: input.value === '' ? null : parseFloat(input.value) };
     });
 }
-async function pickupSaveMapping(id) {
-    const res = await fetch(`/api/torbox/manual-pickups/${id}/map`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mapping: pickupPayload(id) }),
-    });
-    if (!res.ok) { if (window.showToast) showToast((await res.json().catch(() => ({}))).detail || 'Could not save mapping', 'error'); }
+async function pickupSaveMapping(id, input) {
+    if (input) {
+        const raw = String(input.value || '').trim();
+        if (raw !== '') {
+            const value = Number(raw);
+            if (!isFinite(value) || value < 0) {
+                _pickupSetSaveState(input, 'Enter a positive number', 'text-rose-300');
+                return;
+            }
+        }
+    }
+    _pickupDirty = true;
+    _pickupPendingSaves += 1;
+    if (input) _pickupSetSaveState(input, 'saving…', 'text-slate-400');
+    try {
+        const res = await fetch(`/api/torbox/manual-pickups/${id}/map`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mapping: pickupPayload(id) }),
+        });
+        if (!res.ok) {
+            if (window.showToast) showToast((await res.json().catch(() => ({}))).detail || 'Could not save mapping', 'error');
+            if (input) _pickupSetSaveState(input, 'not saved', 'text-rose-300');
+            return;
+        }
+        if (input) {
+            input.dataset.storedVolume = input.value;
+            _pickupSetSaveState(input, 'saved', 'text-emerald-400');
+            setTimeout(function () { _pickupSetSaveState(input, '', 'text-slate-400'); }, 1500);
+        }
+        if (window.refreshManualPickupBadge) window.refreshManualPickupBadge();
+    } finally {
+        _pickupPendingSaves = Math.max(0, _pickupPendingSaves - 1);
+        _pickupDirty = _pickupPendingSaves > 0;
+    }
+}
+function pickupRevertVolume(id, button) {
+    const cell = button ? button.closest('td') : null;
+    const input = cell ? cell.querySelector('.pickup-file-volume') : null;
+    if (!input) return;
+    input.value = input.dataset.storedVolume || '';
+    pickupSaveMapping(id, input);
 }
 async function pickupSaveVolumes(id) {
     const raw = (document.getElementById(`pickup-volumes-${id}`) || {}).value || '';
     const volumes = raw.split(',').map(function (value) { return parseFloat(value.trim()); }).filter(function (value) { return !isNaN(value); });
     if (!volumes.length) { if (window.showToast) showToast('Enter at least one volume', 'error'); return; }
+    _pickupDirty = true;
     const res = await fetch(`/api/torbox/manual-pickups/${id}/volumes`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ volumes: volumes }),
     });
-    if (res.ok) { if (window.showToast) showToast('Volumes saved', 'success'); }
-    else if (window.showToast) { showToast((await res.json().catch(() => ({}))).detail || 'Could not save volumes', 'error'); }
+    if (res.ok) {
+        if (window.showToast) showToast('Volumes saved', 'success');
+        _pickupDirty = false;
+        if (window.refreshManualPickupBadge) window.refreshManualPickupBadge();
+    } else if (window.showToast) { showToast((await res.json().catch(() => ({}))).detail || 'Could not save volumes', 'error'); }
 }
 function pickupSelectedIndexes(id) {
     return Array.from(document.querySelectorAll(`.pickup-file-check[data-pickup="${id}"]:checked`))
@@ -151,6 +219,7 @@ async function pickupPostFetch(id, payload) {
             else if (task.result && task.result.failed) { errorEl.textContent = `${task.result.failed} file(s) failed to fetch; mapping kept — adjust and retry.`; errorEl.classList.remove('hidden'); }
             else { errorEl.textContent = ''; errorEl.classList.add('hidden'); }
         }
+        if (window.refreshManualPickupBadge) window.refreshManualPickupBadge();
         MangaTasks.poll();
     });
 }
@@ -166,6 +235,7 @@ async function pickupRetry(id) {
             if (task.status !== 'success') { errorEl.textContent = task.error || 'Strict retry failed; mapping kept — correct the volumes and retry.'; errorEl.classList.remove('hidden'); }
             else { errorEl.textContent = ''; errorEl.classList.add('hidden'); }
         }
+        if (window.refreshManualPickupBadge) window.refreshManualPickupBadge();
         MangaTasks.poll();
     });
 }
@@ -175,12 +245,16 @@ async function pickupDiscard(id) {
     if (!res.ok) { if (window.showToast) showToast('Discard failed', 'error'); return; }
     const card = document.querySelector(`.manual-pickup-card[data-pickup-id="${id}"]`);
     if (card) card.remove();
+    if (window.refreshManualPickupBadge) window.refreshManualPickupBadge();
     if (window.showToast) showToast('Manual pickup discarded', 'success');
 }
+let _pickupMatchPickupId = null;
 function pickupEditSeries(id) {
     const card = document.querySelector(`.manual-pickup-card[data-pickup-id="${id}"]`);
-    const title = card ? (card.querySelector('h2') || {}).textContent : '';
-    openPickupMatch(title || '');
+    const stored = card ? String(card.dataset.seriesName || '').trim() : '';
+    const title = card ? String((card.querySelector('h2') || {}).textContent || '').trim() : '';
+    _pickupMatchPickupId = id;
+    openPickupMatch(stored || title || '');
 }
 let _pickupMatchSource = '';
 let _pickupMatchItems = [];
@@ -200,7 +274,7 @@ function openPickupMatch(source) {
     document.getElementById('pickup-match-search').value = '';
     document.getElementById('pickup-match-new-title').value = '';
     document.getElementById('pickup-match-error').classList.add('hidden');
-    document.getElementById('pickup-match-list').innerHTML = '<p class="p-4 text-center text-slate-500 text-[11px]">Loading Calibre series...</p>';
+    document.getElementById('pickup-match-list').innerHTML = '<p class="p-4 text-center text-slate-400 text-[11px]">Loading Calibre series...</p>';
     modal.classList.remove('hidden');
     modal.classList.add('flex');
     loadPickupMatchSuggestions('');
@@ -230,7 +304,7 @@ async function loadPickupMatchSuggestions(search) {
 function searchPickupMatch() { loadPickupMatchSuggestions(document.getElementById('pickup-match-search').value.trim()); }
 function renderPickupMatchList() {
     const list = document.getElementById('pickup-match-list');
-    if (!_pickupMatchItems.length) { list.innerHTML = '<p class="p-4 text-center text-slate-500 text-[11px]">No Calibre series found. Create a new title below.</p>'; return; }
+    if (!_pickupMatchItems.length) { list.innerHTML = '<p class="p-4 text-center text-slate-400 text-[11px]">No Calibre series found. Create a new title below.</p>'; return; }
     list.innerHTML = _pickupMatchItems.map(function (item) {
         const selected = item.id === _pickupMatchSelected;
         return `<button type="button" onclick="selectPickupMatch(${JSON.stringify(item.id)})" class="w-full text-left px-3 py-2 ${selected ? 'bg-amber-500/15 border-l-2 border-amber-400' : 'hover:bg-slate-800/60'}">
@@ -253,10 +327,99 @@ async function submitPickupMatch() {
         const data = await res.json();
         if (!res.ok) { errorEl.textContent = data.detail || 'Match failed'; errorEl.classList.remove('hidden'); return; }
         closePickupMatch();
-        if (window.showToast) showToast(`Matched to '${data.target.name}'`, 'success');
+        if (window.showToast) showToast(`Matched to '${data.target.name}' — releases re-keyed; this pickup still shows its torrent title`, 'success');
+        if (window.refreshManualPickupBadge) window.refreshManualPickupBadge();
     } catch (err) { errorEl.textContent = 'Error: ' + err; errorEl.classList.remove('hidden'); }
     finally { submit.disabled = false; }
 }
+
+// --- UX-028: non-destructive auto-refresh, dirty guard, badge sync ---
+function showPickupChangedBar() {
+    const bar = document.getElementById('pickup-changed-bar');
+    if (!bar) return;
+    bar.classList.remove('hidden');
+    bar.setAttribute('role', 'status');
+    bar.setAttribute('aria-live', 'polite');
+}
+function hidePickupChangedBar() {
+    const bar = document.getElementById('pickup-changed-bar');
+    if (bar) bar.classList.add('hidden');
+}
+function pickupHasFocusedInput() {
+    const active = document.activeElement;
+    const list = document.getElementById('manual-pickup-list');
+    if (!active || !list || !list.contains(active)) return false;
+    return ['INPUT', 'TEXTAREA', 'SELECT'].indexOf(active.tagName) !== -1;
+}
+function pickupModalOpen() {
+    const modal = document.getElementById('pickup-match-modal');
+    return !!(modal && !modal.classList.contains('hidden'));
+}
+function pickupTaskRunning() {
+    const tasks = (window.MangaTasks && window.MangaTasks.tasks) || [];
+    return tasks.some(function (task) {
+        return task && task.active && String(task.kind || '').indexOf('torbox:pickup:') === 0;
+    });
+}
+function pickupBusy() {
+    return pickupHasFocusedInput() || _pickupDirty || _pickupPendingSaves > 0 || pickupModalOpen() || pickupTaskRunning();
+}
+function pickupDiscardAndReload() {
+    _pickupDirty = false;
+    _pickupPendingSaves = 0;
+    window.location.reload();
+}
+function pickupReloadNow() {
+    if (pickupModalOpen() || pickupTaskRunning()) {
+        if (window.showToast) showToast('Finish the open dialog or running pickup task before refreshing', 'info');
+        return;
+    }
+    if ((_pickupDirty || _pickupPendingSaves > 0) && !confirm('Discard unsaved volume changes and refresh?')) return;
+    location.reload();
+}
+function _pickupSignature(pickups) {
+    return (pickups || []).map(function (p) {
+        return [p.id, p.status, p.updated_at, p.error, (p.files || []).length, p.series_name, p.wanted_json].join('|');
+    }).join(';');
+}
+async function pollPickupChanges() {
+    if (document.hidden) return;
+    try {
+        const res = await fetch('/api/torbox/manual-pickups');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const pickups = data.pickups || [];
+        const signature = _pickupSignature(pickups);
+        if (_pickupChangedSignature && signature !== _pickupChangedSignature) {
+            showPickupChangedBar();
+            if (window.refreshManualPickupBadge) window.refreshManualPickupBadge();
+        }
+        _pickupChangedSignature = signature;
+        if (window.mtPollOk) mtPollOk();
+    } catch (err) {
+        if (window.mtPollFail) mtPollFail();
+    }
+}
+function startPickupPolling() {
+    _pickupChangedSignature = '';
+    pollPickupChanges();
+    if (_pickupPollTimer) clearInterval(_pickupPollTimer);
+    _pickupPollTimer = setInterval(pollPickupChanges, 15000);
+    document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) pollPickupChanges();
+    });
+}
+document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('.pickup-file-volume').forEach(function (input) {
+        input.addEventListener('input', function () { _pickupDirty = true; });
+    });
+    startPickupPolling();
+});
+window.addEventListener('beforeunload', function (event) {
+    if (!_pickupDirty && _pickupPendingSaves === 0) return;
+    event.preventDefault();
+    event.returnValue = '';
+});
 </script>
 
 <div id="pickup-match-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm items-center justify-center p-4">

@@ -4,6 +4,15 @@
 
 {% block content %}
 <div class="space-y-6">
+<style>
+.prioritized-mobile-bar { position: sticky; }
+@media (max-width: 767px) {
+  .prioritized-mobile-bar { top: 4rem; z-index: 30; }
+  .prioritized-status-filters { display: none; flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .prioritized-status-filters.mt-open { display: flex; }
+  .prioritized-status-filters > a { flex: 0 0 auto; }
+}
+</style>
 
     <!-- Header & Controls -->
     <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
@@ -34,7 +43,7 @@
             </div>
 
             <!-- Status Filter Pills -->
-            <div class="flex items-center gap-1.5 bg-slate-900/60 p-1 rounded-xl border border-slate-800">
+            <div id="prioritized-status-filters" class="prioritized-status-filters flex items-center gap-1.5 bg-slate-900/60 p-1 rounded-xl border border-slate-800">
                 <a href="/prioritized?view={{ current_view }}" 
                    class="px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors {% if not current_status %}bg-slate-700 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
                     All
@@ -81,8 +90,8 @@
             <form onsubmit="addPrioritizedGroup(event)" class="flex items-center gap-2 w-full md:w-auto">
                 <input type="text" id="newGroupName" placeholder="Group name (e.g. danke-Empire)" required
                        class="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-400 w-full sm:w-48">
-                <input type="text" id="newGroupNotes" placeholder="Notes (optional)" 
-                       class="hidden sm:inline-block bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-400 w-36">
+                <input type="text" id="newGroupNotes" placeholder="Notes (optional)" aria-label="Group notes (optional)"
+                       class="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-amber-400 w-full sm:w-36">
                 <button type="submit" class="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1 transition-colors whitespace-nowrap shadow-sm">
                     <i data-lucide="plus" class="w-3.5 h-3.5"></i>
                     Add Group
@@ -104,7 +113,7 @@
                 </button>
             </div>
             {% else %}
-            <p class="text-xs text-slate-500 italic py-1">
+            <p class="text-xs text-slate-400 italic py-1">
                 No release groups prioritized yet. Add groups above to filter this page!
             </p>
             {% endfor %}
@@ -112,11 +121,12 @@
     </div>
 
     <!-- Quick Search Filter Bar -->
-    <div class="bg-darkcard border border-slate-800 rounded-xl p-3 flex items-center gap-3 shadow-md">
+    <div id="prioritizedMobileControls" class="prioritized-mobile-bar bg-darkcard border border-slate-800 rounded-xl p-3 flex items-center gap-3 shadow-md">
         <i data-lucide="search" class="w-4 h-4 text-slate-400"></i>
         <input type="text" id="prioritizedSearchInput" onkeyup="filterPrioritized()" placeholder="Filter prioritized releases by series name or release title..." 
                class="bg-transparent border-0 text-sm text-slate-100 placeholder-slate-500 focus:outline-none w-full">
-        <span id="matchCounter" class="text-xs text-slate-500 font-mono whitespace-nowrap"></span>
+        <button type="button" id="prioritized-filter-toggle" class="mt-mobile-only shrink-0 px-2.5 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs font-semibold text-slate-200" aria-expanded="false" aria-controls="prioritized-status-filters" onclick="togglePrioritizedFilters(this)">Filters</button>
+        <span id="matchCounter" class="text-xs text-slate-400 font-mono whitespace-nowrap"></span>
     </div>
 
     {% if current_view != 'flat' %}
@@ -158,9 +168,9 @@
         <button onclick="loadMoreSeries()" id="btn-load-more-series" disabled class="px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95 disabled:opacity-60 disabled:cursor-wait">
             <i data-lucide="chevrons-down" class="w-4 h-4 text-amber-400"></i>
             <span id="load-more-series-label">Load More Series</span>
-            <span class="text-slate-500">(<span id="deferred-series-count">0</span> remaining)</span>
+            <span class="text-slate-400">(<span id="deferred-series-count">0</span> remaining)</span>
         </button>
-        <span id="prioritized-series-showing" class="block text-[11px] text-slate-500 mt-2">Showing 0 of 0 series</span>
+        <span id="prioritized-series-showing" class="block text-[11px] text-slate-400 mt-2">Showing 0 of 0 series</span>
     </div>
 
     {% else %}
@@ -169,7 +179,7 @@
     <!-- ========================================== -->
     <div class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl" id="flatReleasesTable">
         <div class="overflow-x-auto">
-            <table class="w-full text-left border-collapse text-xs">
+            <table class="mt-table-cards w-full text-left border-collapse text-xs">
                 <thead>
                     <tr class="bg-slate-900 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
                         <th class="py-3.5 px-4 w-12 text-center">Cover</th>
@@ -185,7 +195,7 @@
                         {% include "partials/flat_release_row_chunk.html" %}
                     {% else %}
                     <tr id="flat-loading-skeleton" class="animate-pulse">
-                        <td colspan="6" class="py-8 text-center text-xs text-slate-500 font-medium">
+                        <td colspan="6" class="mt-table-empty py-8 text-center text-xs text-slate-400 font-medium">
                             <div class="inline-flex items-center gap-2">
                                 <i data-lucide="loader-2" class="w-4 h-4 animate-spin text-amber-400"></i>
                                 <span>Loading prioritized releases...</span>
@@ -200,9 +210,9 @@
             <button onclick="loadMoreFlat()" id="btn-load-more-flat" disabled class="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold inline-flex items-center gap-2 shadow-md hover:border-slate-600 transition-all active:scale-95 disabled:opacity-60 disabled:cursor-wait">
                 <i data-lucide="chevrons-down" class="w-4 h-4 text-amber-400"></i>
                 <span id="load-more-flat-label">Load More Releases</span>
-                <span class="text-slate-500">(<span id="deferred-flat-count">0</span> remaining)</span>
+                <span class="text-slate-400">(<span id="deferred-flat-count">0</span> remaining)</span>
             </button>
-            <span id="prioritized-flat-showing" class="block text-[11px] text-slate-500 mt-2">Showing 0 of 0 releases</span>
+            <span id="prioritized-flat-showing" class="block text-[11px] text-slate-400 mt-2">Showing 0 of 0 releases</span>
         </div>
     </div>
     {% endif %}
@@ -320,10 +330,10 @@ async function fetchNextSeriesBatch() {
             const searchValue = (document.getElementById('prioritizedSearchInput')?.value || '').trim();
             const hasFilters = Boolean(currentStatus || searchValue);
             container.innerHTML = `
-                <div class="bg-darkcard border border-amber-500/20 rounded-2xl p-12 text-center text-slate-500">
+                <div class="bg-darkcard border border-amber-500/20 rounded-2xl p-12 text-center text-slate-400">
                     <i data-lucide="inbox" class="w-12 h-12 mx-auto mb-3 opacity-40"></i>
                     <p class="text-sm font-semibold">No prioritized manga releases found matching current filters.</p>
-                    <p class="text-[11px] text-slate-500 mt-1">Try a different search term, status filter, or prioritize more release groups in Settings.</p>
+                    <p class="text-[11px] text-slate-400 mt-1">Try a different search term, status filter, or prioritize more release groups in Settings.</p>
                     ${hasFilters ? '<button type="button" onclick="clearPrioritizedFilters()" class="mt-3 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors">Clear filters</button>' : ''}
                 </div>
             `;
@@ -388,7 +398,7 @@ async function fetchNextFlatBatch() {
         if (isFirstFlatBatch && data.count === 0) {
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="6" class="py-12 text-center text-slate-500">
+                    <td colspan="6" class="mt-table-empty py-12 text-center text-slate-400">
                         No releases found from prioritized groups matching the selected filter.
                     </td>
                 </tr>
@@ -426,6 +436,13 @@ async function fetchNextFlatBatch() {
 }
 
 function loadMoreFlat() { fetchNextFlatBatch(); }
+
+function togglePrioritizedFilters(btn) {
+    const box = document.getElementById('prioritized-status-filters');
+    if (!box) return;
+    const open = box.classList.toggle('mt-open');
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
 
 window.addEventListener('DOMContentLoaded', () => {
     if (currentView === 'flat') {

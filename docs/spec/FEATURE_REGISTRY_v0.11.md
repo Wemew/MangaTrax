@@ -1,0 +1,493 @@
+# MangaTrax Feature Registry — v0.11 (consensus voting sheet)
+
+**Purpose.** Every feature and behaviour claim in the design specification, one line each, with a
+stable ID. The expert panel votes **AGREE** or **DISAGREE** per line. A line is a claim about what the
+code does **today**, expressed so that it can be checked against the implementation — it is not a
+statement that the behaviour is desirable (PARTIAL/VESTIGIAL features are still claims).
+
+**Voting rules.**
+1. Vote on the claim as written. If the behaviour is missing/incorrect, vote DISAGREE and cite the
+   file:line evidence and the corrected sentence.
+2. Agreeing to a claim does not mean approving a defect. Defects are tracked in the open-questions
+   sections of each part and in Part 0 §7.
+3. A claim may be reworded to be more precise, but it may not be dropped: every row must have a
+   claim that all five experts accept.
+4. Implicit agreement = silence only if a reviewer explicitly states "no disagreements in this
+   section". The reviewer must report per-section counts.
+
+**Current counts:** REL 44 · SER 94 · DL 84 · OPS 98 · UI 137 — **457 total**.
+
+---
+
+## REL
+
+- **REL-001** — `/releases` renders a shell with status filters and a view switch and always lazy-loads its rows via the fragment APIs (server-rendered lists are empty by design).
+- **REL-002** — Releases are grouped by a *display* series key derived from metadata/Calibre matching, while actions use the separate *stable* series name; complete-batch expansion and Calibre/staging ownership reconciliation are computed in memory on this read path and are not persisted by it.
+- **REL-003** — The flat view lists release rows in a 6-column table with server-side status/search/sort filtering and HTML-fragment pagination.
+- **REL-004** — Paging is explicit "Load More" (8 series / 50 rows per batch), each series card shows at most 10 releases with a "Show all N" expander, and the remaining counters come from a server-computed total.
+- **REL-005** — Releases search is debounced 300 ms, sent server-side (`title|series_name|release_group` for flat; display/stable/raw/romaji/synopsis for groups), and also filters already-rendered DOM client-side.
+- **REL-006** — Three sort modes exist (`updated` status-tier+recency, `post_date` normalized provider date with created/updated fallback, `series` A–Z); within a card, releases are finally ordered by supersede flag then revision.
+- **REL-007** — `/prioritized` is the same two-view UI restricted to series having at least one release from a prioritized group, plus an inline group manager.
+- **REL-008** — Prioritized groups support list/add(notes, priority)/delete; add upserts by case-sensitive name; every change invalidates the grouped cache.
+- **REL-009** — Prioritized matching is case-insensitive set membership over `release_groups_json` (any group qualifies), and ordering/priority uses the highest-priority matching group from that set.
+- **REL-010** — `/api/prioritized/flat_rows` returns prioritized rows without `search`, `sort` or `total`, and reports `has_more` as `len(rows)==limit`.
+- **REL-011** — `/discovery` is server-rendered with page-size 12/24/48/96 (default 24), clamped page numbers, a page indicator, and a separate Blacklisted table tab.
+- **REL-012** — Discovery shows deduped volume-1/unnumbered/(complete) releases that are not in Calibre/in staging, not monitored-tracked, not blacklisted and not ignored, preferring rows with cover/description/MangaUpdates data.
+- **REL-013** — Discovery tag filtering is server-side include/exclude over a `"|tag|"`-denormalized text column with any/all include semantics and an autocomplete backed by `/api/tags`; the UI loses the filters when paginating.
+- **REL-014** — Discovery sort offers newest/post_date/series/relevance, where relevance only differs when include-tags exist, and pagination links omit the sort parameter.
+- **REL-015** — Tracking a discovered series resolves the stable key (Calibre/tracked name beats AniList title), creates/updates `series_tracking`, sets the release(s) to `REQUESTED` verbatim, re-keys legacy names, and notifies.
+- **REL-016** — Blacklisting upserts the series, sets all its releases to `BLACKLISTED`, unmonitors it; unblacklisting deletes the entry and demotes only `BLACKLISTED` rows to `DISCOVERY`.
+- **REL-017** — Fetch-info pulls MangaUpdates synopsis/URL/cover on demand, caches them, and returns the values without changing status.
+- **REL-018** — Automated status writes go through `resolve_status`: a blank incoming value never clears, IGNORED/BLACKLISTED vetoes are absolute, incoming IN_CALIBRE always wins and IN_CALIBRE is never downgraded to IN_STAGING; otherwise the higher rank wins, and an equal-rank incoming REQUESTED can replace a stored IN_CALIBRE. Explicit user and support/repair paths write their target status deliberately.
+- **REL-019** — Ignore writes `IGNORED` verbatim and Unignore writes `REQUESTED` verbatim (bypassing precedence), both with audit events.
+- **REL-020** — `POST /api/releases/{id}/status` exists with a 5-value enum and verbatim writes but has no UI caller in this repository.
+- **REL-021** — A release can be manually sent to the configured engine; derived state (failed/in_calibre/in_staging/downloading/waiting_inflight/downloaded/not_downloaded) gates the button and is polled in place every 1.5 s; IN_STAGING returns 409.
+- **REL-022** — "Different series" re-keys exactly one release to a chosen Calibre series, a typed title, or a detach-to-Discovery target, preserving user-veto statuses, without creating a global alias.
+- **REL-023** — `/feeds` supports adding RSS/HTML feeds (name, URL, interval, auto-download), live-testing a URL, toggling enabled state, deleting, and shows last check status/error.
+- **REL-024** — Feed type selects a provider from a fixed registry (rss, html/html_scraper, nyaa/nyaa_scraper/nyaa_manga); unknown types fail only that feed; providers raise `ProviderFetchError` when the source cannot be fetched or parsed, except that RSS/HTML providers return an empty list when their configured URL is rejected by the SSRF guard.
+- **REL-025** — The Nyaa crawler paginates `?f=0&c=3_1&s=id&o=desc&p=N`, retries transient failures (including empty response bodies) with backoff/Retry-After, spaces page fetches by at least 1 s, treats only an HTTP 404 or a parsed page with zero torrent rows as genuine end-of-results, and records an explicit stop reason.
+- **REL-026** — Feed polling is serialized by a lock, manual polls run on a daemon thread with a status endpoint and a persisted background task, interval polls run on the worker thread, and failures are per-feed rather than global.
+- **REL-027** — The per-feed `check_interval_minutes` value is stored and displayed but never used; all enabled feeds poll on the global `feed_check_interval_minutes`.
+- **REL-028** — Explicit chapter-only titles, light novels and JPEG XL releases are discarded before storage; JPEG XL discards and scheduler-side chapter discards are audited, while provider-level chapter/LN filtering is silent.
+- **REL-029** — A marker-less trailing chapter number is discarded only when the title-minus-number names an already-known series, with "Mob Psycho 100"-style numbered series protected and every discard audited.
+- **REL-030** — The parser extracts series key, volume sets/ranges, complete flag, ordered release-group set, authors, publisher, revision and chapter diagnostics from a release title, and ignores format/publisher words as groups.
+- **REL-031** — Year-range collected batches are expanded to a full volume set only from authoritative metadata that reports a finished count for that same series; otherwise they stay volume-less, visible and retried.
+- **REL-032** — Complete-series expansion and missing-volume/status reconciliation happen in memory on reads and are persisted only by the worker/maintenance pass, using staged volumes as owned.
+- **REL-033** — Light-novel rows are persisted (`is_light_novel`) and excluded from releases lists, counts, grouped views, discovery, search and wishlist, with a separate audit/ignore/delete maintenance tool.
+- **REL-034** — Media typing (`media_type`) marks non-manga/jpegxl rows without deleting them or touching status, and a single tracked-media predicate hides them everywhere.
+- **REL-035** — Auto-download fires only on new/transitioned REQUESTED rows when global+feed gates and the engine are ready, subtracts in-flight/staged volumes, stores `PENDING_DEDUPE` when nothing remains, and audits each decision.
+- **REL-036** — The polite backfill honors start page/max pages/delay, persists last page for resume, reports its stop reason, aborts with `error` (never a fake success) on a persistent fetch failure, and is stoppable via `/api/backfill/stop`.
+- **REL-037** — Series refresh runs provider-metadata → Calibre-info → reconcile → expansion → Nyaa search over primary+alternate titles, skipping spinoff releases whose identity is not the target's, and returns per-phase summaries.
+- **REL-038** — Settings can preview and delete cached release rows (skipping active downloads) with an audit entry; status/volume/download/blacklist/tracker-link/prioritized-group writes invalidate the 5 s grouped cache, while tag, release-detail, series-link and cover-only writes do not (bounded by the 5 s TTL).
+- **REL-039** — Nyaa base URLs resolve as per-feed `config.base_url`, then the `nyaa_base_url` setting (seeded from `MANGATRAX_NYAA_BASE_URL`), then `https://nyaa.si`; saving the setting repoints only the exact seeded feed, never user feeds.
+- **REL-040** — Webhook notifications for feed scans are sent only for automatic polls and only when the poll produced new requests/transitions/submissions; manual polls are silent.
+- **REL-041** — `GET /api/releases/grouped` dumps all grouped releases with no pagination/filtering and has no consumer in this repository.
+- **REL-042** — `GET /api/search` performs alias-aware unified search over tracked series + releases but is not consumed by any page in this repository.
+- **REL-043** — `GET /api/releases/series_releases` re-derives the full group list with a search (bypassing the grouped cache), matches `series_key`/`series_name` case-insensitively, slices the requested releases, and ignores `prioritized_only`/`sort`; its only caller is the "Show all" handler on `/releases`, while the same button rendered on `/prioritized` has no handler defined on that page and is inert.
+- **REL-044** — `GET /api/prioritized/releases` returns up to 500 prioritized rows (optionally filtered by status) with no pagination or total field, post-sorted by group priority.
+
+## SER
+
+- **SER-001** — `GET /` renders the dashboard hero with a green "Calibre Connected (N Series • M Books)" badge when `metadata.db` is readable and an amber "Calibre DB Not Found" badge otherwise, using the live cached `get_library_summary()` result.
+- **SER-002** — The Overview KPI row shows five counters sourced from `get_dashboard_stats()`: `is_monitored=1` trackers, REQUESTED releases, IN_CALIBRE releases, DOWNLOADING releases, and the discovery count.
+- **SER-003** — The Overview shows an Active Downloader queue of at most five torrent cards only when the degraded-safe `_build_downloader_status(1.0)` returns torrents.
+- **SER-004** — The Overview wanted list is built from `get_pending_requests(limit=10)`, renders at most 8 cards, and its section badge shows the length of that 10-row fetch (min(total,10)), not the true pending total.
+- **SER-005** — The Overview recent-activity panel renders the 10 newest `activity_logs` rows with event chips and timezone-converted timestamps.
+- **SER-006** — `GET /series` returns a shell whose table body initially contains a loading skeleton and no rows, with the total series count rendered server-side.
+- **SER-007** — `GET /api/series/rows` returns JSON with `status`, `offset`, `count`, `total`, `has_more` and server-rendered table-row HTML, supporting `monitored_only`, `offset`, `limit` (1–200) and `search`.
+- **SER-008** — `POST /api/series/{id}/toggle` flips `series_tracking.is_monitored` and returns the new boolean, returning HTTP 200 even for an unknown id.
+- **SER-009** — A series row renders a cover image only when the newest release row for that series has a non-empty `cover_url`, and clicking it opens the shared lightbox.
+- **SER-010** — The series link modal validates `website_url` as an empty string or absolute http(s) URL and persists it to `series_tracking.website_url` without verifying the series exists.
+- **SER-011** — The series "Owned" column displays `series_tracking.book_count` for Calibre-linked series and a "Not linked — Match to Calibre series" button otherwise; it never displays `owned_volumes_json`.
+- **SER-012** — The series "Latest Vol" column displays `series_tracking.latest_index`, which is the Calibre max `series_index` raised to the max owned bundle volume when applicable.
+- **SER-013** — Series rows render up to four provider-tag chips with a `+N` overflow indicator and tooltip, using the shared `tag_display` Jinja global.
+- **SER-014** — The per-series Backfill button posts `{"max_pages": 3}` to `/api/series/{id}/backfill`, starts the 3-phase background refresh and leaves the page usable while progress appears in the global backfill banner/task panel.
+- **SER-015** — The series row blacklist button posts `/api/blacklist`, which also sets that tracker `is_monitored=0` and marks its releases `BLACKLISTED`.
+- **SER-016** — The series page Sync Calibre button calls the synchronous `POST /api/calibre/sync`, then shows the returned summary toast and reloads after 1.5 s.
+- **SER-017** — The series search box filters only rows already loaded into the DOM (by lowercased name/authors/publisher/tags) and never sends the server-side `search` or `monitored_only` parameters.
+- **SER-018** — Series rows load in 50-row batches via `/api/series/rows`; after each batch the page schedules the next fetch 60 ms later while `has_more` is true (the whole library is fetched without scrolling). An IntersectionObserver triggers the same fetch, and the Load More button (hidden by default) is revealed only when a batch fetch errors.
+- **SER-019** — The match-to-Calibre modal searches `/api/calibre/series` without a `source` parameter (so results are name-ordered, not similarity-ranked) and POSTs `{calibre_series_id}` to `/api/series/{id}/match-calibre`, which merges/links trackers and re-keys releases while preserving release statuses.
+- **SER-020** — The Series page is reached from the desktop "Library" dropdown and the mobile "Library" group, and the parent nav item is highlighted when `active_page == 'series'`.
+- **SER-021** — `CalibreMangaScanner` reads Calibre's `metadata.db` through a read-only URI (`mode=ro&immutable=1` when supported, `mode=ro` fallback) with `query_only` and a bounded busy timeout, and never writes to the Calibre database.
+- **SER-022** — `get_library_summary()` returns `{available: true, db_path, total_books, total_series, total_authors}` when the library is readable, otherwise `{available: false, ...}` with no guaranteed `db_path`; it caches per DB path keyed by file mtime.
+- **SER-023** — `get_all_series()` returns per series: id, name, book count, latest index (max Calibre series_index), concatenated authors, first publisher, concatenated tags and the resolved owned-volume list.
+- **SER-024** — The Calibre volume map expands bundle titles so that a `v01-02` book contributes both volumes 1 and 2, and indexes each set by lower-case name, normalized name, Calibre id and dual-title parts.
+- **SER-025** — Standalone Calibre books with a parseable series title are exposed as synthetic series with `series_id = book.id + 1000000` and `book_count = 1`.
+- **SER-026** — `GET /api/calibre/test` contains the requested path within the configured Calibre/default/staging roots, returning 403 for escapes and otherwise the scanner summary.
+- **SER-027** — `POST /api/calibre/sync` runs the Calibre scan synchronously, returns the sync result together with a persisted task whose progress/status are recorded, and rejects concurrent runs by skipping rather than erroring.
+- **SER-028** — The background worker triggers a Calibre sync whenever `calibre_sync_interval_minutes` (default 15) has elapsed since the last sync.
+- **SER-029** — The worker's first action is the legacy series-key repair followed by an initial Calibre sync, and neither can prevent the web UI from serving.
+- **SER-030** — `GET /api/calibre/status` returns `{in_progress, initial_sync_done, last_sync}` without blocking, and drives the global sync banner via 3-second polling.
+- **SER-031** — Calibre sync upserts every series into `series_tracking` with `is_monitored=1` on insert, never overwriting non-empty authors/publisher/tags, never blanking `website_url`/`owned_volumes_json`, and never changing `is_monitored` on an existing row.
+- **SER-032** — After a sync batch, trackers without a `calibre_series_id` are auto-linked: a unique exact candidate wins, fuzzy matching via `CalibreSeriesIndex.match(threshold=0.90)` accepts only scores strictly above 0.90, and multiple exact candidates are left unlinked.
+- **SER-033** — After sync, previously wanted releases whose missing volumes are now in Calibre are promoted to `IN_CALIBRE` (or `IN_STAGING`) through the precedence model, audited `REQUEST_RESOLVED`, and webhook-notified when acquired.
+- **SER-034** — Release reconciliation after sync skips provably-stable IN_CALIBRE rows, is bounded by `MANGATRAX_RECONCILE_BATCH_SIZE` (default 2000) with a rotating cursor over up to 5000 releases in status-tier/recency order, then filtered to active statuses, and persists only rows whose missing volumes or status changed.
+- **SER-035** — After a successful sync the scheduler attempts to expand unexpanded complete-series releases, and failure of that expansion is logged rather than propagated.
+- **SER-036** — `GET /api/calibre/series` returns the Calibre series picker list with optional substring filtering and optional `difflib` similarity ranking when `source` is supplied, falling back to synced tracker rows when the live library is unavailable.
+- **SER-037** — `link_tracked_series` re-keys the source tracker's releases to the Calibre name, merges duplicate trackers (MAX monitored, union owned volumes), deletes redundant trackers, registers an alias override when the names differ, and never changes release statuses or vetoes.
+- **SER-038** — `GET /api/series/link-audit` returns read-only `{proposed, count}` proposals for unlinked trackers matching a Calibre series at threshold 0.90, and no template in the app calls it.
+- **SER-039** — `POST /api/series/link-repair` is a dry-run unless `confirm:true`, and its confirmed path auto-links unlinked trackers while passing no Calibre volume map.
+- **SER-040** — `normalize_text` lowercases, applies NFKD, replaces dashes/colons/slashes with spaces, strips remaining punctuation and collapses whitespace, and is the comparison primitive used across matching, aliases and overrides.
+- **SER-041** — `split_series_candidate_parts` is the single implementation for splitting titles on `|`, `/`, en/em dashes, spaced hyphen, `//` and `;`, used by the scanner, matcher, metadata clients, DB grouping and search.
+- **SER-042** — `CalibreSeriesIndex.match()` applies exact normalized lookup, then substring containment requiring length ratio ≥ 0.70 and query length ≥ 6, then fuzzy scoring above the threshold on rare-token/3-gram candidates only.
+- **SER-043** — Fuzzy series matches whose similarity rests only on a shared generic suffix are rejected by `_fuzzy_title_head_agrees` and logged as "Rejected fuzzy series match".
+- **SER-044** — Matching adds colon-split parts and cumulative colon prefixes as candidates so a long subtitle can match a shorter Calibre series name without weakening whole-title rules.
+- **SER-045** — `resolve_series_identity` prefers user alias override, then Calibre scanner, then Calibre-origin tracker, then typed tracker, then AniList canonical/romaji as lookup bridges, then reverse alias claims, and only then the parsed name as stable key.
+- **SER-046** — A manual-match alias override is consulted before any AniList/Calibre identity resolution, matched by normalized raw name and by parse-shape candidates/cleaned source, and its target becomes the stable key.
+- **SER-047** — A release whose raw name is an AniList alias of exactly one tracked series resolves to that series' stable name, with Calibre-claimed aliases preferred; multi-claim aliases keep the parsed name.
+- **SER-048** — A metadata entry reached only through a delimiter/parent fallback is rejected as identity evidence, and delimiter parts are accepted only when they resolve to the same AniList id.
+- **SER-049** — During a targeted parent refresh, a crawled release whose parsed/AniList identity differs from the target is audited `SPINOFF_SKIPPED` and never stored or auto-downloaded.
+- **SER-050** — `detect_series_titles` builds refresh search titles from the requested name, delimiter/parenthesis parts and the AniList entry's own aliases/synonyms only, never harvesting names from stored releases.
+- **SER-051** — `series_name_candidates` returns deduped plausible spellings covering the parsed primary, bracket form and contents, cleaned display, underscore-stripped form, colon parts and cleaned-for-matching variant.
+- **SER-052** — Release parsing expands explicit volume ranges into every individual volume, detects complete-series titles, exposes chapter diagnostics without applying the discard policy, and recovers bracket/brace/underscore series names.
+- **SER-053** — The startup legacy repair re-keys only releases whose stored AniList-style name is unambiguously claimed by one tracked series (or by a provable bidirectional Calibre duplicate), is idempotent and audits `SERIES_KEYS_REPAIRED`.
+- **SER-054** — `POST /api/discovery/track` resolves the stable key, inserts/updates a monitored tracker, sets the release status to REQUESTED, re-keys legacy names and audits `SERIES_TRACKED`.
+- **SER-055** — `get_series_templates_map()` returns normalized-name → `{series_name, authors, publisher, tags}` including alias-override sources that resolve to an existing target template.
+- **SER-056** — `POST /api/series/{id}/backfill` returns 404 for an unknown tracker and otherwise starts the 3-phase refresh for the tracker's name with a persisted task.
+- **SER-057** — `POST /api/series/backfill` starts the same 3-phase refresh for any non-blank name of 1–500 characters, defaulting `max_pages` to 3.
+- **SER-058** — The refresh job runs metadata → Calibre → Nyaa crawl in one background daemon, mirrors progress from `app_settings.backfill_progress` into the persisted task, and clears `is_backfilling` in a finally block.
+- **SER-059** — Phase 1 force-refreshes AniList (MangaUpdates fallback), writes only enrichment/cover data, keeps cached values and reports a skip when providers fail, and audits `SERIES_METADATA_REFRESHED`.
+- **SER-060** — Phase 2 re-reads one series from Calibre and updates its Calibre id, book count, latest index, owned volumes and non-empty metadata/website fields, skipping cleanly when Calibre or the series is unavailable.
+- **SER-061** — Phase 3 crawls Nyaa for the detected titles at `max_pages` each, processes results with the target-identity guard and chapter/light-novel filters, and returns `partial` status when only the crawl fails.
+- **SER-062** — After the refresh phases, missing volumes and statuses are recomputed for that series' non-vetoed releases only.
+- **SER-063** — A total-volume or book-count change detected during a refresh triggers complete-series expansion scoped to the refreshed series.
+- **SER-064** — During a refresh, new REQUESTED releases are auto-downloaded per policy minus owned/staged/in-flight volumes, and duplicate volumes are parked as `PENDING_DEDUPE`.
+- **SER-065** — Per-series refresh and historical backfill share one in-process `is_backfilling` flag, and a refresh requested while another backfill runs is reported as `in_progress` but still creates a task that can be marked success by the other job's completion.
+- **SER-066** — AniList queries are rate-limited to 90 per 60 s with 429/Retry-After cooldowns, authoritative results are cached under search-term/canonical/romaji keys, and a forced refresh keeps cached values when the provider fails.
+- **SER-067** — The cosmetic display title is the AniList canonical English title only for authoritative cache rows (`source='anilist'` with canonical title) and otherwise the stable matching key, and it never determines matching.
+- **SER-068** — MangaUpdates supplies synopsis/URL fallback with cleaned description text and derives `total_volumes`/status from the series status string, caching results only when a description exists.
+- **SER-069** — The cover cache validates every redirect hop against the SSRF guard, enforces a 5 MB cap and 7-second timeout, verifies raster magic bytes, writes atomically, and never raises to callers.
+- **SER-070** — `GET /api/covers` serves a cached file with a 10-day cache header or returns a built-in SVG placeholder with HTTP 200, always tagging cache hits as `image/jpeg` because cache filenames are `.jpg`.
+- **SER-071** — The provider-tag refresh task scans up to 1000 releases, AniList-enriches distinct untagged series, persists tags onto all their releases and the tracker, and returns updated/skipped/failed counters.
+- **SER-072** — Tag display shows genres first then rank, hides spoilers, dedupes by normalized name, and limits chips to 4 for series and 3 for the dashboard with overflow count and tooltip.
+- **SER-073** — `GET /api/tags` returns the union of metadata-cache genres/tags and denormalized release/series tags, spoilers excluded, ranked exact→prefix→substring→count, limited to 1–50.
+- **SER-074** — `GET /api/search` returns tracked-series hits with stable key, display title, match reason and matched alias plus LIKE-escaped release hits, and no first-party template consumes it.
+- **SER-075** — `GET /api/maintenance/series-aliases` lists overrides and `DELETE /api/maintenance/series-aliases/{id}` deletes one (404 if absent), invalidating the grouped cache; only the DELETE is used by the UI.
+- **SER-076** — A manual awaiting-series match persists an alias override for the source and each distinct parse-shape candidate, re-keys matching releases, routes downloads and audits `SERIES_MANUALLY_MATCHED`.
+- **SER-077** — The false-series audit is read-only, scans the newest 2000 releases, flags rows whose stored series no longer matches the title under the fixed matcher, and disables repair for IGNORED/BLACKLISTED rows.
+- **SER-078** — The false-series repair requires `confirm:true`, preserves IGNORED/BLACKLISTED statuses, re-keys selected rows to their parsed series, recomputes status otherwise, and audits `FALSE_SERIES_MATCH_REPAIRED`.
+- **SER-079** — The attribution audit scans all releases under tracked series, proposes identity-resolved own series, marks multi-part raw-only identities ambiguous (unrepairable), and runs as a persisted task via a GET endpoint.
+- **SER-080** — The attribution repair applies only `safe_to_repair` selected rows (max 200 ids), changes only `series_name`, is idempotent and audits `SERIES_ATTRIBUTION_REPAIRED`.
+- **SER-081** — The suspicious-volume-range audit flags chapter-scale/all-≥100 stored volumes or titles that now parse chapter-only, exempts explicit volume markers, and marks only chapter-only reclassifications repairable.
+- **SER-082** — The volume-range repair clears phantom volumes/chapter state for safe rows, sets them IGNORED, skips unsafe rows, silently truncates ids to 200 and audits `CHAPTER_RANGE_REPAIRED`.
+- **SER-083** — The release-cache preview/clear path is series/status scoped, requires confirmation, never touches trackers/Calibre, keeps DOWNLOADING/QUEUED rows, and records a persisted task plus audit row.
+- **SER-084** — `POST /api/maintenance/clear` accepts only the three safe enum actions, performs them, and audits `MAINTENANCE_CLEARED` without requiring the debug flag.
+- **SER-085** — `POST /api/debug/action` is 403 unless `MANGATRAX_DEBUG_ACTIONS=1`; its `normalize-english-titles` action now runs the guarded stable-key repair, and `reset-all-data` clears trackers/releases/caches and re-runs a Calibre sync.
+- **SER-086** — Blacklisting un-monitors the tracker and marks its releases BLACKLISTED, unblacklisting restores only BLACKLISTED rows to DISCOVERY, and automated writes can never lift IGNORED/BLACKLISTED.
+- **SER-087** — The storage probe really writes and deletes a temp file in downloads/staging, persists uid/errno diagnostics in `app_settings.storage_health_json`, and its warning banners render only on Settings and Downloads (plus `/health`).
+- **SER-088** — The global Calibre-sync banner appears on non-auth pages while a sync is in progress or before the initial sync completes, polls `/api/calibre/status` every 3 seconds, and reloads the page when indexing finishes.
+- **SER-089** — The global historical-backfill banner polls `/api/backfill/status` every 2.5 seconds, displays the progress text and offers a Stop button that requests a graceful stop.
+- **SER-090** — The global Tasks panel polls `/api/tasks`, shows persisted progress/message/ETA/error for series-domain jobs, and disables matching action buttons while a task of the same kind/scope runs; it exposes no working cancel control (the Cancel branch never renders because `/api/tasks` omits `cancellable`).
+- **SER-091** — On narrow viewports the Series table scrolls horizontally, the mobile nav exposes Series under Library with 44 px rows, and the series row icon buttons rely on `title` without `aria-label` (the a11y test scans only top-level templates, not partials).
+- **SER-092** — `MangaDatabase.get_series_by_id()` exists but has no caller in the application or tests.
+- **SER-093** — Ownership used for missing-volume and IN_STAGING decisions is Calibre-owned volumes UNION staged volumes, bundle-expanded per book and based on a 60 s cached staged-ownership map.
+- **SER-094** — False-series audit suggests the fixed Calibre match when one exists, but repair re-keys selected releases to their title-parsed series, so the suggested and applied series names can differ.
+
+## DL
+
+- **DL-001** — Selecting `torbox` in settings makes `build_downloader` return a `TorboxDownloader`, and any unknown `downloader_engine` value falls back to `qbit` with a warning.
+- **DL-002** — `QBitClient.test_connection` returns a structured failure for disabled/unconfigured/auth-failed downloaders and caches a successful/failed result for at most 8 seconds.
+- **DL-003** — Submitting to qBittorrent posts to `/api/v2/torrents/add` with category `manga`, tag `mangatrax` and the configured savepath, and a body containing `Fails` is treated as failure.
+- **DL-004** — Pause, resume and delete routes return `{"status":"success"}` only when the underlying qBittorrent call succeeds, and delete uses `deleteFiles=false`.
+- **DL-005** — qBittorrent selective download skips non-wanted volumes with `filePrio=0`, always skips `.txt/.nfo/.url/.html/.lnk`, keeps unparseable non-ancillary files, and reports `single_archive` instead of splitting a one-archive torrent.
+- **DL-006** — Every 30 seconds the scheduler applies selective download to bundles that are still DOWNLOADING and whose missing-volume set is smaller than the bundle volume set.
+- **DL-007** — The `DownloaderClient` protocol and `QBitDownloader` adapter have no production callers and are exercised only by tests.
+- **DL-008** — `POST /api/downloader/configure` persists `qbit_url/username/password/enabled/category/tags` (password only when supplied) and returns a fresh connection test in the same response.
+- **DL-009** — A `TorboxDownloader`'s repr/str never contains the API key, and all Torbox error messages are built from the request path only (never the `token=` URL).
+- **DL-010** — Torbox HTTP 401/403/429/404/409 outcomes map to distinct typed `DownloaderError` subclasses, and 429 honours a Retry-After value clamped to 0-600 seconds.
+- **DL-011** — A release whose only identifier is a Nyaa `/view/<id>` link is submitted by deriving `<base>/download/<id>.torrent`, and a fetched body is rejected unless it is bencoded with a `4:info` key.
+- **DL-012** — Before submitting, the client calls `checkcached`; a cached torrent is reported as `ready`/`cached=True`, while auth and rate-limit errors from that probe abort the submit.
+- **DL-013** — Magnet submissions use multipart/form-data with a `magnet` field, and `.torrent` submissions upload the validated bytes; the resulting `downloader_id` is the torrent id (or `queued:<id>`).
+- **DL-014** — A queued Torbox submission persists `downloader_id="queued:<id>"` and is promoted to the real torrent id (audited once as `TORBOX_PROMOTED`) when Torbox assigns it.
+- **DL-015** — A Torbox torrent is only `ready` when `download_present` is explicitly true; `download_finished`/processing states are reported as `processing` and never fetched.
+- **DL-016** — The Torbox poller waits `max(5, torbox_poll_seconds)` seconds while busy and 15-30 seconds when idle, and a submit wakes it immediately.
+- **DL-017** — Submission is refused when the number of active (non-queued) Torbox downloads is at or above `torbox_max_concurrent`, and any active row older than `torbox_timeout_hours` is marked FAILED with a message that says the release stays REQUESTED for retry.
+- **DL-018** — In strict mode the planner returns `skip` for an empty wanted set, returns `zip` for a fully-needed torrent with <=20 files when the estimated total size is unknown or <=90 % of the configured cap (streaming enforces the cap in the unknown-size case), and raises `DownloaderFileError` for a missing file list, any unmappable name, or any absent wanted volume.
+- **DL-019** — Torrent file names are mapped to volumes using volume/range markers with `Part N` stripped, and only when nothing matches does the last bare number (excluding years and 480/720/1080/2160) become the volume.
+- **DL-020** — With `torbox_strict_volume_selection=false`, unmappable names or a subset that equals all files fall back to the whole-torrent zip.
+- **DL-021** — A per-file fetch makes 3 attempts total (re-requesting a fresh `requestdl` link each time and sleeping 1 s then 2 s between attempts) for 429/503 and 403/404/410/416 responses, and persistent failure reports the attempt count.
+- **DL-022** — A whole-torrent zip fetch extracts with zip-slip/symlink/absolute-path rejection, removes partial output on failure, and raises when the archive contains no files.
+- **DL-023** — Files larger than 16 MiB are fetched as multiple HTTP ranges (2-8 connections) that are assembled, byte-verified and atomically renamed, with automatic single-stream fallback when the server ignores Range.
+- **DL-024** — Any file or archive above `torbox_max_download_gb` is rejected with its size and the cap before a download link is requested.
+- **DL-025** — A permanent Torbox failure stores a reason with attempt count and UTC time, sets FAILED, cleans `.part` remnants, and deletes the remote torrent when `torbox_delete_on_failure` is true.
+- **DL-026** — A strict-selection failure creates a `torbox_manual_pickups` row and sets the release to MANUAL_PICKUP instead of FAILED, provided manual pickup is enabled and under the cap.
+- **DL-027** — After a successful fetch the release becomes COMPLETED with `download_files_json`, is routed immediately, has inventory refreshed, and the remote torrent is deleted when `torbox_delete_after_download` is true.
+- **DL-028** — Ready releases are handed to a bounded `torbox-fetch` executor and the same release is never fetched twice concurrently.
+- **DL-029** — The Torbox retry route refuses IN_STAGING releases and non-Torbox engines, rate-limits to one retry per 5 seconds per release, and cancels the stale remote job before re-submitting with freshly resolved missing volumes.
+- **DL-030** — Removing a FAILED Torbox row performs no remote call and only clears local submission state; removing any other row attempts a remote cancel and always clears local state.
+- **DL-031** — Clear-failed removes every FAILED Torbox row locally with per-item progress and never waits on remote deletes.
+- **DL-032** — `POST /api/releases/{id}/download` sends the release to the configured engine using `resolve_release_missing_volumes` and refuses IN_STAGING releases with 409.
+- **DL-033** — `release_download_state` maps download/routed/status columns to downloading, downloaded, in_staging, in_calibre, failed, waiting_inflight or not_downloaded with `can_download`/`can_retry`/`terminal` flags.
+- **DL-034** — `/downloads/manual-pickup` lists only active pickups with per-file volume mapping inputs, fetch/retry/edit-series/discard actions; it has no control that changes the pickup's own series_name.
+- **DL-035** — The pickup list API returns decoded `files` plus active count, and `include_finished=1` includes completed/discarded/expired pickups.
+- **DL-036** — Saving a file's volume updates its `suggested_volume`/`volumes` and `mapping_source="manual"` in the pickup's `files_json`.
+- **DL-037** — Saving corrected pickup volumes rewrites `releases.volumes_json`, `missing_vols_json` and `download_wanted_json`, and the pickup's `wanted_json`, so the correction is honoured by strict retry.
+- **DL-038** — A pickup fetch runs as a background task and marks each successfully fetched file `fetched=true`, setting pickup status `completed` (none left) or `partial`.
+- **DL-039** — Strict retry plans against the pickup's corrected `wanted_json` (falling back to release missing volumes) and fetches only the matching file indexes.
+- **DL-040** — Discarding a pickup attempts a remote delete, marks the pickup `discarded` and the release FAILED.
+- **DL-041** — New holds are refused once the number of active pickups is at or above `torbox_manual_pickup_max_items` (0 = unlimited), and the 5-minute sweep expires past-due holds by removing the remote torrent and failing the release.
+- **DL-042** — `/api/downloads/status` never raises, clamps its socket budget to 1.5 s default / 5 s max, reports `disabled`/`degraded` states, and attaches the persisted inventory copy without scanning on read.
+- **DL-043** — Torbox status is served from a 1-second last-good cache with single-flight rebuilds, stale serving up to 30 seconds, and a bounded speed history for the sparkline.
+- **DL-044** — Check-now returns 409 unless Torbox is the active engine; otherwise it runs one poll pass and returns fresh counters.
+- **DL-045** — The diagnostics endpoint returns a readiness checklist, recent auto-download decisions and a last-poll hint explaining a zero-result poll.
+- **DL-046** — Routing tags and moves only files whose series resolves to a template; unresolved files stay in downloads and are summarised as awaiting Calibre.
+- **DL-047** — Staging destinations are always the flat root; an identical name+size is skipped and a same-name different-size file is renamed with a `(2)` suffix.
+- **DL-048** — Flatten moves every nested staged file to the root, deletes same-name/same-size nested duplicates, leaves `.part` files untouched and prunes emptied directories.
+- **DL-049** — Prune removes only empty directories, never follows symlinks, and skips directories belonging to in-flight downloads (or recently modified when the busy lookup is unavailable).
+- **DL-050** — Archive conversion during routing only happens when `convert_archives_to_cbz` is true, and a conversion failure records a failed document instead of moving the file.
+- **DL-051** — A file with a previous volume can inherit that volume's filename/title pattern with the number replaced, and unsafe naming cases are flagged as needing manual intervention.
+- **DL-052** — The awaiting-Calibre scan is read-only and groups unparseable/unmatched `.cbz` files by parsed series with counts and volumes.
+- **DL-053** — Matching an awaiting series creates alias overrides (including parse-shape candidates), re-keys matching releases, and immediately re-runs routing.
+- **DL-054** — "Process Downloads" runs both the routing pass and the legacy staging auto-tag and reports combined counts; it is a foreground request, not a background task.
+- **DL-055** — The legacy staging auto-tagger only injects ComicInfo.xml into staged CBZs that lack one and derives series/volume from the parsed filename alone.
+- **DL-056** — The worker loop runs inventory+routing every 45 seconds, auto-tag+routing every 5 minutes when `auto_tag` is on, and stale-release reconcile every 5 minutes.
+- **DL-057** — Template resolution order is exact normalized key, parse-shape candidates, cleaned key, then a unique difflib match ≥0.86 that is rejected when two candidates are within 0.05.
+- **DL-058** — The raw inventory scan is depth-limited to root entries plus their direct files, caps at 200 entries, and persists to `app_settings.downloads_inventory_json` with a scan timestamp.
+- **DL-059** — Inventory state is `partial` if any partial file exists, else `unmatched` without a parseable CBZ/series, else `ready` when the series resolves to a template, else `awaiting_calibre`.
+- **DL-060** — The cleanup audit lists duplicate entries (same CBZ name+size signature), entries entirely present in staging, and entries whose volumes are all in Calibre's explicit owned volumes.
+- **DL-061** — Clearing raw inventory requires `confirm=true` plus a valid mode, re-audits before deleting, never deletes the last copy, and revalidates containment/symlinks for every path.
+- **DL-062** — Per-row raw delete requires confirm, re-validates the entry against the current inventory, prunes emptied parents and refreshes the inventory.
+- **DL-063** — The failed-documents list returns only `status='failed'` rows with detected type, matched release, retryability and convertibility.
+- **DL-064** — The failure scan records invalid `.cbz`, unconvertible/convertible archives, ebooks and unrecognised files, clears rows for now-valid `.cbz`, and skips temp/hidden/symlink entries.
+- **DL-065** — Failed-document retry requires a matched release with a download URL that is not IN_CALIBRE/IGNORED/BLACKLISTED, and marks the row retried with an incremented attempt count.
+- **DL-066** — Failed-document convert runs the archive converter in a background task, clears the failure row on success and immediately re-runs routing.
+- **DL-067** — Failed-document delete validates the path, removes the file, prunes empty parents, marks the row deleted, and then reconciles releases; delete-all requires `confirm=true`.
+- **DL-068** — The converter rejects traversal/absolute/symlink/oversized entries, caps entries and total size, atomically renames a validated temp zip, and deletes the source only on success.
+- **DL-069** — Staging groups are keyed by ComicInfo `Series` (falling back to the parsed filename then "Unknown Series") and a group retag rewrites only `Series`, then links/merges or re-keys the series.
+- **DL-070** — Staging duplicate audit only lists files whose parsed volumes are all in Calibre's explicit owned volume set and never infers ownership from book counts.
+- **DL-071** — Purging staging duplicates requires confirm (for all), accepts exact relatives or unique bare filenames, and promotes a release to IN_CALIBRE only when no recorded staged copy or verified duplicate remains.
+- **DL-072** — The ComicInfo audit classifies each staged CBZ as ok/repairable/ambiguous/unknown_series/missing_series/untagged/invalid_comicinfo/unreadable and is strictly read-only.
+- **DL-073** — Repair resolves every requested file before writing, rewrites only audit-proven changes for the named files (max 200), and reports repaired/unchanged/skipped/failed counts.
+- **DL-074** — Manual tagging writes only supplied fields, creates `Title`/`Manga` defaults only for a new ComicInfo, replaces malformed XML, and optionally renames the staged file after validation.
+- **DL-075** — Per-file delete accepts only a verified staging scan entry or an awaiting-downloads file, re-validates path/symlink/existence immediately before removal, prunes empty parents and then reconciles releases.
+- **DL-076** — ComicInfo rewrite preserves every non-ComicInfo zip entry with its original ZipInfo, writes exactly one ComicInfo.xml, swaps atomically and returns true only on success.
+- **DL-077** — ComicInfo values are formatted Calibre-style: title `Series vNN` (contiguous bundles `v01-03`, gaps `v01, v03`), authors joined with ` & `, tags with `, `, volume as `28`/`1.5`.
+- **DL-078** — Volumes present in staging are merged into Calibre-owned volumes for release matching, cached for 60 seconds and invalidated after staging mutations.
+- **DL-079** — A volume already DOWNLOADING or COMPLETED (not in Calibre) for the same series is excluded from auto-download, the release is parked as PENDING_DEDUPE, and the 60-second sweep retries it when the reservation clears.
+- **DL-080** — Auto-download only fires for new/transitioning REQUESTED releases when the global and feed toggles are on, the engine is ready, a URL exists and at least one missing volume is not reserved.
+- **DL-081** — A COMPLETED release whose recorded files are gone is kept if a copy is found (raw/staging), promoted to IN_CALIBRE when the matched Calibre book count covers the highest wanted volume, and reset to IDLE with `DOWNLOAD_FILES_MISSING` only when nothing matches.
+- **DL-082** — `resolve_release_missing_volumes` prefers a persisted `releases.download_wanted_json` over the stored missing list, which overrides a fresh matcher computation; every correction path (manual-pickup volume edits, retries, dedupe) must write `download_wanted_json`.
+- **DL-083** — The release-download paths submit qBittorrent torrents with the literal category `manga` and tag `mangatrax` regardless of the `qbit_category`/`qbit_tags` settings; `qbit_category` is only used to filter the live downloader status list and `qbit_tags` is stored but unused.
+- **DL-084** — `GET /api/downloader/queue` exists but has no template caller (dead API surface); the Downloads page polls `/api/downloads/status` and the engine-specific endpoints instead.
+
+## OPS
+
+- **OPS-001** — The Docker image is python:3.11-slim with curl, gosu, p7zip-full and unar installed and installs backend/requirements.txt (which includes authlib).
+- **OPS-002** — When started as root the entrypoint remaps appuser to PUID/PGID (default 1000), chowns only when it finds a mis-owned file, and drops privileges via gosu appuser before exec; otherwise it execs the command directly.
+- **OPS-003** — Both compose files publish 8082:8080, mount /calibre read-only plus /staging, /downloads and ./data, cap Docker json-file logs at 10 MB × 5, and drop all capabilities.
+- **OPS-004** — GET /health returns status, auth_mode, storage, logs and network, and each block is individually exception-shielded so /health never returns 5xx because a probe failed.
+- **OPS-005** — The container HEALTHCHECK curls http://localhost:8080/health every 30 s with a 5 s timeout, 10 s start period and 3 retries, and /health is auth-exempt.
+- **OPS-006** — The FastAPI lifespan performs only a storage probe and scheduler.start() before yielding; no Calibre scan, series-key repair or initial sync runs before the app serves.
+- **OPS-007** — Shutdown calls scheduler.stop(), which clears the running flag, wakes and joins the worker and Torbox threads with 2 s timeouts, and shuts the fetch executor without waiting.
+- **OPS-008** — An invalid or incomplete authentication configuration is logged critically and terminates the process with exit code 1 instead of serving unauthenticated.
+- **OPS-009** — Environment variables seed app_settings only when the table is newly created, plus a fixed INSERT OR IGNORE subset, so env changes after first start do not alter existing values.
+- **OPS-010** — MANGATRAX_AUTH_MODE accepts exactly none, basic and oidc, defaults to none, and an unknown value is rejected by AuthConfig.validate().
+- **OPS-011** — The auth middleware allows /auth/*, /static/*, /favicon.ico, /health and /healthz; in oidc mode unauthenticated HTML requests get 302 to /auth/login?next=... and /api/* gets JSON 401, while in basic mode every unauthenticated request (HTML and API) gets 401 with a Basic challenge.
+- **OPS-012** — Basic credentials are compared with secrets.compare_digest for both username and password, and a failed attempt returns 401 with a Basic WWW-Authenticate challenge.
+- **OPS-013** — /auth/login performs authorization-code + PKCE S256 with random state and nonce, a 600 s HMAC-signed state cookie (HttpOnly, SameSite=Lax) and redirect_uri built only from MANGATRAX_PUBLIC_URL.
+- **OPS-014** — /auth/callback verifies the state cookie and state value, requires the PKCE verifier, exchanges the code, validates the ID token, sets the HttpOnly session cookie and deletes the state cookie.
+- **OPS-015** — /auth/logout always clears the session cookie and redirects to the IdP end_session_endpoint with post_logout_redirect_uri=PUBLIC_URL when the provider advertises one.
+- **OPS-016** — In oidc mode with MANGATRAX_BASIC_PASS set, HTTP Basic is accepted as break-glass, a wrong Basic attempt re-challenges instead of redirecting, and /auth/login returns a 401 Basic challenge instead of 503 when the IdP is unreachable.
+- **OPS-017** — Session and OIDC-state cookies use a base64url(JSON).base64url(HMAC-SHA256) token that binds version, purpose, issue time and expiry and is verified in constant time.
+- **OPS-018** — ID-token signature and JWKS validation is delegated to Authlib and fails closed with AuthProviderUnavailable when Authlib is missing, while iss, aud, exp, iat/nbf skew, nonce and sub are additionally checked explicitly.
+- **OPS-019** — Successful Basic authentications and OIDC requests JIT-upsert a users row keyed on subject, normally throttled to once per 300 s per identity, except the OIDC callback which forces an upsert on every login; existing non-empty profile fields are never blanked.
+- **OPS-020** — The middleware sets a per-request actor ContextVar that log_activity() uses as its default actor, background work passes actor="scheduler", and the logs page displays that actor.
+- **OPS-021** — Cross-origin unsafe requests are rejected with 403 only when auth is enabled, MANGATRAX_CSRF_PROTECT is truthy and MANGATRAX_PUBLIC_URL is set; requests without Origin/Referer are allowed.
+- **OPS-022** — Every response carries X-Content-Type-Options, X-Frame-Options, X-XSS-Protection and Referrer-Policy, added by the outermost middleware so auth 401/302/403 responses are covered.
+- **OPS-023** — The users-table read helpers get_user and get_all_users have no caller in the application and there is no users API or admin UI.
+- **OPS-024** — /healthz is listed as an auth-exempt path but no /healthz route is registered; only /health exists.
+- **OPS-025** — security.validate_public_url rejects non-http(s), embedded credentials, blocked hostnames and all loopback/private/link-local/metadata/multicast/reserved literals, and in strict mode re-checks every resolved address and fails closed on DNS errors.
+- **OPS-026** — Directory settings and the /api/calibre/test probe reject NUL bytes, ".." segments, relative paths, over-long paths and symlink escapes, requiring the resolved path to stay inside allowed roots.
+- **OPS-027** — Only absolute http(s) URLs can be stored as website_url or rendered through the safe_url filter, so javascript:, data:, file: and vbscript: values are rejected at save and at render.
+- **OPS-028** — SQL LIKE wildcards in user search terms are escaped by escape_like/like_contains and callers append ESCAPE '\', so a term is always matched literally.
+- **OPS-029** — POST /api/debug/action returns 403 unless MANGATRAX_DEBUG_ACTIONS=1 and validates its action against a closed enum of six debug actions.
+- **OPS-030** — reset-all-data deletes releases, tracked series, blacklist, activity logs, metadata cache, feeds and prioritized groups, clears the cover cache, resets the backfill state keys in app_settings, and leaves users, most settings, background_tasks, alias overrides, manual pickups and download failures intact.
+- **OPS-031** — purge-non-manga deletes only releases whose media_type is an explicit non-manga value, keeping manga, unknown and NULL rows, and audits the purge.
+- **OPS-032** — The normalize-english-titles debug action now runs the guarded idempotent re-key repair instead of renaming series keys to AniList English titles.
+- **OPS-033** — POST /api/maintenance/clear accepts only clear-cover-cache, clear-discovery and clear-descriptions, is not debug-gated, and writes one MAINTENANCE_CLEARED audit row with actor, action and count.
+- **OPS-034** — GET /api/settings returns every app_settings row and replaces a non-empty torbox_api_key with the mask placeholder.
+- **OPS-035** — POST /api/settings rejects unknown keys with 400, validates each known field, persists each provided value with set_setting(str(value)) and returns {status, storage}.
+- **OPS-036** — The Torbox API key is masked in HTML and JSON and a saved mask/blank value is ignored, while qbit_password is returned in plaintext by GET /api/settings and rendered into the settings form.
+- **OPS-037** — Saving a downloads_dir equal (realpath, case-insensitive) to staging_dir is rejected with 400.
+- **OPS-038** — When MANGATRAX_PATH_ROOTS is set, calibre_path, staging_dir and downloads_dir saves are rejected if they resolve outside those roots; when unset only traversal/NUL/relative/symlink checks apply.
+- **OPS-039** — Storage health is proven by creating and deleting a temp file in downloads_dir and staging_dir, reports per-path exists/is_dir/writable/uid/gid/errno/free_bytes, and is persisted to storage_health_json and reused while the configured paths are unchanged.
+- **OPS-040** — Saving settings audits SETTINGS_UPDATED, repoints only the exact seeded Nyaa feed when nyaa_base_url changes, reconfigures file logging for log_* keys, and re-probes storage plus runs one inventory/routing pass for path keys.
+- **OPS-041** — app_settings also holds non-writable internal keys (media_filter_applied, jpegxl_filter_applied, ln_release_backfill_done, storage_health_json, last_speedtest_json, activity_last_prune_at, backfill_status/progress/last_page, torbox_last_poll_at) that POST /api/settings cannot set.
+- **OPS-042** — schemas.SETTINGS_KEYS lists 37 keys, is referenced nowhere, and already omits several keys that SettingsUpdateRequest accepts.
+- **OPS-043** — /settings renders nine in-page sections with a sticky scrollable section nav, a dirty-state sticky save bar, and the Maintenance card plus all safe audits visible without the debug flag.
+- **OPS-044** — /api/calibre/test contains the requested path to {calibre_path, CALIBRE_DIR, staging_dir} and returns 403 for a path outside those roots.
+- **OPS-045** — /api/calibre/status returns in_progress, initial_sync_done and last_sync without blocking.
+- **OPS-046** — /api/downloader/configure writes qbit_* settings directly (bypassing SettingsUpdateRequest validation), audits DOWNLOADER_CONFIGURED, and then tests the connection.
+- **OPS-047** — /api/downloader/test and /api/downloader/torbox/test accept transient credentials, and a submitted Torbox key equal to the mask falls back to the saved key.
+- **OPS-048** — With log_to_file=true exactly one named RotatingFileHandler writes DATA_DIR/logs/mangatrax.log with maxBytes=log_file_max_mb MiB and backupCount=log_file_backups, and disabling removes it.
+- **OPS-049** — Activity rows store event_type, message, details, UTC created_at and a resolved actor (explicit → ContextVar → "system"), with no severity column.
+- **OPS-050** — Activity pruning deletes rows older than activity_retention_days, then the lowest-id rows above activity_max_rows, then truncates the WAL checkpoint, and runs on the first worker tick and at most every 6 hours.
+- **OPS-051** — POST /api/logs/prune runs the same retention math as a recorded logs:prune task and returns deleted_old, deleted_excess, remaining, checkpointed plus task_id and task.
+- **OPS-052** — /logs server-renders the newest 150 activity rows with event-type and actor chips, a client-side substring filter and a Prune now button, and has no pagination, server-side filtering or auto-refresh.
+- **OPS-053** — run_in_background inserts a background_tasks row before submitting to a 3-worker ThreadPoolExecutor, registers an in-process cancel event only when cancellable, audits start/finish/failure/cancel and always clears its in-memory maps.
+- **OPS-054** — TaskReporter writes progress at most every 0.5 s unless progress moved ≥1 point, the message changed or force=True, and clamps progress_pct to 0–100.
+- **OPS-055** — _recorded_task creates a task row, runs the work synchronously, marks it success with a stored result JSON and 100 %, or failed with the exception text, and audits both transitions.
+- **OPS-056** — GET /api/tasks accepts active(0/1), kind and limit(1–200) and returns status, active_count and serialized tasks with elapsed_seconds, active, result, remaining and eta_seconds.
+- **OPS-057** — GET /api/tasks/{id} returns the serialized task or 404.
+- **OPS-058** — POST /api/tasks/{id}/cancel returns 404 for unknown tasks and 409 when the task has no live in-process cancel flag, otherwise sets the event and returns cancelling=true.
+- **OPS-059** — The global task panel's Cancel button never renders because serialize_task does not emit a cancellable field, and tags:refresh is the only cancellable kind.
+- **OPS-060** — background_tasks.prune()/prune_background_tasks() are defined but never called, so the background_tasks table grows without any retention.
+- **OPS-061** — The scheduler runs one daemon worker thread with a 10 s sleep, re-reads interval settings each tick, and shields the whole tick in a single try/except: a job exception is logged and the remainder of that tick's jobs are skipped, while the loop itself continues.
+- **OPS-062** — Calibre sync runs every calibre_sync_interval_minutes (default 15) under a non-blocking _calibre_sync_lock, so a manual and an automatic sync can never overlap.
+- **OPS-063** — Feed polling runs every feed_check_interval_minutes (default 60) under a non-blocking _feed_check_lock, and a concurrent call returns skipped=true instead of running twice.
+- **OPS-064** — The manual Poll Feeds action starts a daemon thread and returns immediately, with running/result state held only in memory and polled via a status endpoint.
+- **OPS-065** — The auto-tag job runs every 300 s only when auto_tag is exactly "true" and both tags staged CBZs and routes eligible raw downloads into staging.
+- **OPS-066** — An inventory + tag/move routing pass runs every 45 s so finished downloads become visible and eligible for staging without user action.
+- **OPS-067** — Every 300 s, COMPLETED releases whose recorded files no longer exist are reconciled: re-pointed at a found copy, promoted to IN_CALIBRE when the matched Calibre book count covers the highest wanted volume, or otherwise reset to IDLE with DOWNLOAD_FILES_MISSING.
+- **OPS-068** — Every 300 s, past-due Torbox manual pickups are expired with a best-effort remote delete.
+- **OPS-069** — The activity-log prune job runs on the first worker tick and then at most every 6 hours (21600 s).
+- **OPS-070** — Every 60 s, auto-downloads suppressed by in-flight dedupe are retried in batches of at most 50.
+- **OPS-071** — Every 30 s, active downloads are checked and no-longer-wanted torrent files are filtered out.
+- **OPS-072** — A separate Torbox poller thread polls at torbox_poll_seconds (default 5) when busy and backs off to min(30, max(15, 3× the floor)) when idle, and can be woken immediately.
+- **OPS-073** — The worker's first action performs the legacy series-key repair and, when metadata.db exists, the initial Calibre sync, both exception-shielded, exactly once per process.
+- **OPS-074** — The polite backfill worker runs in a daemon thread from start_page to backfill_max_pages (0 = unlimited) with backfill_delay_seconds between requests and persists backfill_status, backfill_progress and backfill_last_page.
+- **OPS-075** — /api/backfill/start returns in_progress when a backfill is already running, /stop signals it to stop, and /status reads the persisted backfill settings.
+- **OPS-076** — /api/maintenance/refresh-tags starts a cancellable tags:refresh background task that backfills AniList genres/tags for at most the first 1000 releases lacking tags.
+- **OPS-077** — The suspicious-volume-range audit scans all releases and the repair clears volumes/range, sets status IGNORED, and only repairs rows the audit marked safe_to_repair.
+- **OPS-078** — The series-attribution audit reports releases whose own title parses to a different tracked series and marks ambiguous multi-part titles as not repairable; repair re-keys only selected, safe rows.
+- **OPS-079** — False fuzzy series-match audit is read-only and repair requires confirm=true, accepts at most 500 release ids, and re-keys every selected existing release to its title-parsed series while preserving veto statuses (selection is not re-validated against the audit list).
+- **OPS-080** — Light-novel cleanup requires confirm=true, an action of ignore or delete, and at most 500 ids, and delete removes database rows only, never files.
+- **OPS-081** — Series alias overrides are listed via GET /api/maintenance/series-aliases and deleted by id via DELETE, which returns 404 for an unknown id and invalidates the grouped cache.
+- **OPS-082** — Release-cache preview and clear use the same series/status filters, always skip DOWNLOADING/QUEUED rows, require confirm=true, and audit RELEASES_CLEARED with the skipped-active count.
+- **OPS-083** — Network diagnostics are read-only /proc, /sys, cgroup, resolv.conf, TCP and route facts with heuristic warnings, perform no network I/O, never raise, and appear in both /health and Settings.
+- **OPS-084** — The speedtest is restricted to the fixed Cloudflare endpoint, caps bytes at 1 GB and connections at 8, splits >90 MB requests into sequential rounds, enforces a global 60 s rate limit, and persists a trimmed result.
+- **OPS-085** — Discord and generic webhook deliveries for NEW_REQUEST, ACQUIRED, FEED_SCAN and DOWNLOAD_PROCESSED use a 5 s timeout, structurally validate the URL, and never raise to callers.
+- **OPS-086** — Automatic feed-scan notifications are suppressed when webhook_feed_scan_notifications is "false" and processed-batch notifications when webhook_processed_notifications is "false", and manual polls never notify.
+- **OPS-087** — `init_db` creates and migrates exactly 13 tables idempotently on one connection; on a first run it explicitly commits twice — after the conditional one-time LN backfill (`database.py:936`, only when the marker is absent) and a final commit at `:995` — and once on later runs, so the schema work is not one atomic transaction. Tables: series_tracking, series_blacklist, releases, prioritized_groups, feeds, activity_logs, users, app_settings, manga_metadata_cache, series_alias_overrides, background_tasks, torbox_manual_pickups and download_failures.
+- **OPS-088** — Upgrade migrations are PRAGMA-table_info-guarded ALTER TABLE additions plus idempotent in-place data backfills, with no migration version table.
+- **OPS-089** — Every database operation opens a new SQLite connection with timeout=10 s, Row factory, WAL journal mode (falling back to DELETE) and foreign_keys=ON, and no table declares a foreign-key constraint.
+- **OPS-090** — On a fresh database the app seeds 41 app_settings keys (39 defaults plus filter_non_manga and media_filter_applied; startup passes later add jpegxl_filter_applied and ln_release_backfill_done for 43 total), one built-in Nyaa RSS feed, and four prioritized groups.
+- **OPS-091** — The LN/chapter-only/JPEGXL re-typing pass is gated by media_filter_applied and filter_non_manga; a separate JPEGXL-only pass gated by jpegxl_filter_applied runs regardless of filter_non_manga; neither deletes rows or writes status, and after the markers are set filter_non_manga has no further runtime effect.
+- **OPS-092** — get_setting, set_setting and get_all_settings each open a new SQLite connection per call, so settings reads are not cached.
+- **OPS-093** — Timestamps are resolved through app_timezone → TZ → Europe/Copenhagen → host zone by the localtime/localdate Jinja filters, and an invalid IANA name silently falls back to Europe/Copenhagen.
+- **OPS-094** — Durable state is the ./data volume (mangatrax.db plus -wal, covers, logs); there is no backup, restore, export or VACUUM path, and the only WAL maintenance is a truncate checkpoint during activity pruning.
+- **OPS-095** — `POST /api/settings/test-webhook` performs real outbound Discord and/or generic webhook test posts (10 s timeout), returns per-channel `{success,message}` results plus an overall status, and is the only settings endpoint that exercises webhook URLs.
+- **OPS-096** — `POST /api/calibre/sync` creates a persisted task and waits for the whole scan, but its UI trigger has no `data-task-kind` binding, so the button cannot be disabled or reattached across reloads (it has no data-task-kind binding).
+- **OPS-097** — `download_status='QUEUED'` is a tolerated legacy value that current code never writes: qBittorrent submission writes DOWNLOADING directly, Torbox slot-queueing is encoded in `downloader_id='queued:<n>'` plus `torbox_progress_json.phase`, and QUEUED survives only in read filters.
+- **OPS-098** — reset-all-data re-seeds five prioritized groups (danke-Empire, LuCirAn, 1stKind, TenmaLand, Stick) that differ from the four groups seeded on a fresh database (danke-Empire, 1R0N, Lu自主规制, a-sloth).
+
+## UI
+
+- **UI-001** — The app shell is dark-only (`html.dark`, `#0b0f19` background) with no light-theme styles.
+- **UI-002** — A sticky 64px header (`h-16`, `sticky top-0 z-40`) is present on every page and holds the brand, navigation and user/mobile controls only.
+- **UI-003** — The brand block links to `/` and shows the product name, "Bundles & qBit" badge and "Calibre & BookOrbit Monitor" subtitle.
+- **UI-004** — The desktop nav renders exactly five `data-nav-item` top-level items in the order Overview, Library, Discover, Downloads, System.
+- **UI-005** — A sixth flat "Manual Pickup" nav link renders between Downloads and System, has no active state, and its `#nav-manual-pickup-count` badge is never populated.
+- **UI-006** — Library/Discover/System dropdowns open on click, close on outside click and Escape, restore focus to the trigger on Escape, and keep `aria-expanded` in sync.
+- **UI-007** — The auth user menu (actor name, mode, Sign out) renders only when `auth_mode != 'none'`.
+- **UI-008** — A mobile hamburger toggles a grouped mobile menu whose 10 links each have `min-h-[44px]` and which closes on outside click and Escape.
+- **UI-009** — A top page-progress bar animates on internal anchor clicks and completes on `pageshow`, but does not appear for button-triggered reloads.
+- **UI-010** — Toasts render bottom-right, auto-dismiss after 4s, differentiate success/error/info, and have no `aria-live`/`role` and no message escaping.
+- **UI-011** — A floating Tasks panel polls `/api/tasks?active=0&limit=20` every 1.5 s on every page and renders up to 12 tasks with progress, ETA and error; its Cancel branch exists but never renders because `/api/tasks` never emits a `cancellable` field.
+- **UI-012** — Buttons carrying `data-task-kind` are disabled and show live progress while a matching persisted task runs.
+- **UI-013** — Clicking a cover opens a global lightbox with close button, backdrop click and Escape dismissal; the trigger is not keyboard-focusable.
+- **UI-014** — The Calibre sync banner appears only while `in_progress` or `initial_sync_done === false`, polls every 3s while running, and is dismissible with auto-reload on completion.
+- **UI-015** — The backfill banner appears on any page while a backfill runs, polls every 2.5s, shows progress text, and offers Stop Backfill.
+- **UI-016** — The backfill setup modal accepts start page and max pages, shows a resume hint when `last_page > 1`, and is reachable only from the Discovery page.
+- **UI-017** — Blacklisting from a row/card posts `/api/blacklist`, toasts, and fades/removes the item or reloads as fallback.
+- **UI-018** — Ignoring a release dims its row/card and disables the ignore button; unignoring reloads the page.
+- **UI-019** — The shared per-series backfill action posts `/api/series/backfill` with `max_pages:3`, toasts, and starts the global backfill banner if accepted.
+- **UI-020** — In oidc mode unauthenticated HTML requests are redirected to `/auth/login?next=...` and `/api/*` receives 401 JSON; in basic mode both receive a 401 Basic challenge; the header hides auth UI in `none` mode.
+- **UI-021** — Every link, button, input, select, textarea and summary gets a 2px rose `:focus-visible` outline with 2px offset.
+- **UI-022** — Custom dark scrollbars, a `.break-words-anywhere` utility and a shimmer cover placeholder exist in the global stylesheet.
+- **UI-023** — Tailwind (cdn.tailwindcss.com) and Lucide (`unpkg … @latest`) are loaded from CDNs with no local fallback assets.
+- **UI-024** — Templates use a `slate-850` colour that is not defined in the Tailwind config, so those hover/gradient utilities have no effect.
+- **UI-025** — The footer shows "MangaTrax v1.0.0", the zero-lock strapline and a GitHub link.
+- **UI-026** — `base.html` defines a `{% block scripts %}` hook that no page template overrides.
+- **UI-027** — `#nav-manual-pickup-count` exists in the header but no code ever sets its text or removes `hidden`.
+- **UI-028** — The dashboard hero shows a green Calibre-connected chip with series/book counts or an amber not-found chip.
+- **UI-029** — The dashboard shows five KPI cards, each linking to the matching filtered page.
+- **UI-030** — The dashboard shows up to five active torrents with progress, speed, state and size, linking to `/downloads`.
+- **UI-031** — The dashboard shows up to eight wanted releases as cards with cover, bundle/volume badge, feed, tag chips, missing volumes and Download.
+- **UI-032** — The dashboard Download button posts the download endpoint, toasts, and reloads the page after 1.5s.
+- **UI-033** — The dashboard lists the ten latest activity rows with colour-coded event badge and local timestamp, linking to `/logs`.
+- **UI-034** — The dashboard computes a manual-pickup count but never renders it.
+- **UI-035** — The Series page renders a seven-column table fed by `/api/series/rows` in 50-row pages.
+- **UI-036** — Each series row has a monitoring toggle that posts `/api/series/{id}/toggle` and reloads after 0.8s.
+- **UI-037** — Series search is a client-side filter over currently loaded rows with a dedicated no-match empty state and Clear search.
+- **UI-038** — The Series page auto-fetches successive 50-row pages via a self-scheduled timeout and an IntersectionObserver, while also rendering a hidden "Load More Series" button.
+- **UI-039** — "Sync Calibre" exists only on the Series page and runs a synchronous POST `/api/calibre/sync` with spinner, toast and reload.
+- **UI-040** — Each series row has a link-editor modal that saves `website_url` through `/api/series/{id}/link`.
+- **UI-041** — Unlinked series rows show "Not linked — Match to Calibre series", which opens a Calibre search modal and links/merges via `/api/series/{id}/match-calibre`.
+- **UI-042** — Each series row offers Backfill, Edit link and Blacklist actions plus a clickable cover and optional external link.
+- **UI-043** — `series.html` defines a local `blacklistSeries()` that is never called (rows use the shared global function).
+- **UI-044** — `series.html` supports server-rendered rows, but `/series` always passes an empty list so only the JS path is used.
+- **UI-045** — Releases offers a Group-by-Series vs Flat view switch implemented as full-page links carrying `?view=`.
+- **UI-046** — Releases renders seven status filter pills as full-page links; using one drops the current sort and search.
+- **UI-047** — Releases search debounces 300ms, resets pagination, and refetches server-side, while a second client-side filter hides loaded nodes and reports "N matches".
+- **UI-048** — Releases sort select refetches in place and writes `?sort=` with `history.replaceState`.
+- **UI-049** — Both Releases views render a disabled Load More button from first paint with remaining/"Showing X of Y" counts, retry-on-error, and a fixed sticky duplicate.
+- **UI-050** — Releases series cards show cover, romaji, In-Calibre/Discovery chip, totals, completion chips, release count, Track/Backfill/Blacklist, volume coverage grid and optional synopsis.
+- **UI-051** — Series cards cap releases at 10 and offer "Show all N releases", which pages the remaining rows into the accordion and removes itself when exhausted.
+- **UI-052** — Release download updates the state chip/button in place and polls `/api/releases/{id}/state` every 1.5s while non-terminal, without reloading the page.
+- **UI-053** — Each release row/card offers Ignore (dims the row) and Unignore (reloads).
+- **UI-054** — A per-release modal can move the release to another Calibre series, a new title, or detach it to Discovery.
+- **UI-055** — A release-group chip can be added to Prioritized Groups with one click from Releases, Prioritized and Discovery.
+- **UI-056** — A "Track" button on series cards posts `/api/discovery/track` and reloads.
+- **UI-057** — An empty Releases result shows the exact copy "No manga series found matching current filters." with a Clear filters button.
+- **UI-058** — Releases/prioritized code branches on `series-card-deferred` and `flat-row-deferred` classes that no server chunk ever emits.
+- **UI-059** — Prioritized shows group pills with release counts and per-pill remove buttons plus a quick add-group form.
+- **UI-060** — The prioritized group-notes input is hidden below the `sm` breakpoint.
+- **UI-061** — Prioritized reuses the Releases view switcher and status pills, with no sort control.
+- **UI-062** — Prioritized search is client-side over loaded cards/rows and reports "N matches".
+- **UI-063** — Prioritized Load More uses `/api/prioritized/cards` (8) and `/api/prioritized/flat_rows` (50) with the shared `updateLoadMoreUi` helper and sticky control.
+- **UI-064** — An empty prioritized result shows the exact copy "No prioritized manga releases found matching current filters." with Clear filters.
+- **UI-065** — Prioritized contains the same dead deferred-class branches as Releases.
+- **UI-066** — Discovery has two client-side tabs (Discovered, Blacklisted) implemented by class rewriting, not ARIA tabs, and not reflected in the URL.
+- **UI-067** — The Discovery search input both filters loaded cards on input and submits a server GET form on Enter.
+- **UI-068** — Discovery has an include/exclude tag picker with autocomplete from `/api/tags`, removable chips and Apply/Clear, without arrow-key navigation.
+- **UI-069** — Discovery's visible sort select navigates immediately and can conflict with the tag picker's hidden sort state.
+- **UI-070** — Discovery paginates server-side, but its page links carry only `page`, `page_size` and `q`, dropping tag filters and sort.
+- **UI-071** — Each discovery card has Track Series and Blacklist buttons that post their endpoints, toast, and reload after 0.6s.
+- **UI-072** — Each discovery card shows a truncated MangaUpdates synopsis with a Fetch button that updates the text and MangaUpdates link in place.
+- **UI-073** — The MangaUpdates link falls back to a MangaUpdates search URL when no stored URL exists.
+- **UI-074** — Discovery's Blacklisted tab provides manual add, search and per-row Unblock/Restore.
+- **UI-075** — The global backfill setup modal is opened only by the Discovery page's "Polite Backfill" button.
+- **UI-076** — Discovery cards and Releases rows expose the same one-click "prioritize this release group" action.
+- **UI-077** — Feeds renders a table of name, type, enabled, URL, auto-download, interval, last-check and actions.
+- **UI-078** — Each feed has an On/Off toggle that posts `/api/feeds/{id}/toggle` and reloads after 0.8s.
+- **UI-079** — The Add Feed modal collects name, type, interval, URL and auto-download, offers Test Feed Live, and has no selector/config fields for HTML scrapers.
+- **UI-080** — Deleting a feed uses native `confirm()` and reloads after 0.8s.
+- **UI-081** — "Poll Feeds" exists only on the Feeds page, starts the async feed check, polls status every 1.5s up to 15 minutes, toasts the result and reloads.
+- **UI-082** — The Downloads page starts with an auto-download diagnostics card that loads on page load and can be refreshed.
+- **UI-083** — The Downloads page shows an amber banner with the manual-pickup count and an "Open Manual Pickup" link when pickups exist.
+- **UI-084** — The Downloads page has a downloader status card with an in-app Configure panel (URL/user/password/enabled) and Save & Test.
+- **UI-085** — The Downloads page lists raw downloads awaiting a Calibre series with per-file Delete and a Match series action.
+- **UI-086** — The Downloads page has a Failed documents card supporting scan, list, retry, convert, per-row delete and delete-all with an armed confirmation.
+- **UI-087** — The Downloads queue table renders six columns and per-row Torbox retry/remove or qBittorrent pause/resume/delete controls.
+- **UI-088** — Torbox queues auto-refresh every 1s while active (5s idle), while qBittorrent queues do not auto-refresh at all.
+- **UI-089** — "Clear failed" on the Torbox queue requires a second click on the same button, then posts clear-failed and removes rows.
+- **UI-090** — "Check now" on the Torbox queue posts `/api/downloads/torbox/poll` and refreshes the queue.
+- **UI-091** — The raw downloads inventory table shows name/files/size/age/series/state/matched release with Manual match and Delete actions.
+- **UI-092** — Raw cleanup audits duplicates and already-present copies, previews them, and requires confirmation before clearing.
+- **UI-093** — Rescan, Prune empty folders and Flatten staging each post their endpoint, toast a summary and refresh in place.
+- **UI-094** — A second "Tag & move now" button duplicates the header "Process Downloads" action; the header carries `data-task-kind="downloads:process"`, but `/api/staging/tag` is a foreground request that creates no persisted task, so neither button ever gets task-panel reattachment or busy state (the spinner is local JS only).
+- **UI-095** — Staging files are grouped in `<details>` blocks per series whose open/closed state persists in localStorage and can be filtered to "needs naming intervention".
+- **UI-096** — Staging file rows offer Preview/Tag, Fix naming (prefilled) and two-step Delete.
+- **UI-097** — Staging duplicate cleanup audits, presents selectable rows, shows an inline confirm, purges via a background task and reports totals.
+- **UI-098** — The ComicInfo `<Series>` audit table shows per-field diffs, status badges and selectable rows, and repairs only selected files.
+- **UI-099** — The Preview/Manual Tag modal loads the current ComicInfo, edits seven fields (staged filename, Series, Volume, Title, Writer, Publisher, Genre), saves, toasts and reloads.
+- **UI-100** — The staging series-match modal searches Calibre or accepts a new title, then retags/links the group through a background task.
+- **UI-101** — The Downloads page is a single long page with no tabs or in-page navigation across eight card sections (auto-download diagnostics, awaiting series, failed documents, active queue, raw inventory, staging directory, staging cleanup, ComicInfo audit), plus the downloader-config card, a conditional pickup banner and modals.
+- **UI-102** — Manual Pickup shows quota/expiry, pickup cards, and a no-pickups empty state.
+- **UI-103** — Manual Pickup supports "Fetch whole torrent" and "Fetch selected", both task-watched with inline error text; the server fetches every un-fetched file individually and uses the whole-torrent zip only when the pickup has no file list at all.
+- **UI-104** — Manual Pickup supports Retry strict mapping with a task watch and inline failure text that says the mapping is kept.
+- **UI-105** — Manual Pickup's "Edit series" opens the shared match modal seeded from the card title.
+- **UI-106** — Manual Pickup volume mapping auto-saves per file on change and has a separate wanted-volumes save action.
+- **UI-107** — Manual Pickup Discard confirms, posts discard and removes the card.
+- **UI-108** — The Manual Pickup page has no refresh control or polling for new pickups.
+- **UI-109** — Logs renders the 150 newest activity rows with event-type and actor badges, details and local timestamps.
+- **UI-110** — Logs search is client-side over the 150 rendered rows and shows a dedicated no-match state.
+- **UI-111** — "Prune now" posts `/api/logs/prune`, toasts deleted counts and reloads after 0.8s.
+- **UI-112** — Logs has no pagination, date/level/actor filtering, export or auto-refresh.
+- **UI-113** — Settings has a sticky nine-anchor section nav with scroll-spy and `aria-current`, whose Advanced anchor is dead when debug actions are disabled.
+- **UI-114** — Settings is one ~45-field form with a single save and a sticky "Unsaved changes" bar; there is no per-section save, discard or leave warning.
+- **UI-115** — Settings can test the Calibre path via `/api/calibre/test` and toasts the series/book counts or the error.
+- **UI-116** — Settings configures downloader URL/user/password/category/tags and can test the connection with a status badge.
+- **UI-117** — Settings configures engine (qbit/Torbox), Torbox key/retention/concurrency/timeouts and can test both downloaders.
+- **UI-118** — Settings edits downloads/staging paths with inline not-writable warnings and six pipeline toggles.
+- **UI-119** — Settings edits Calibre/feed intervals, backfill defaults and the application timezone.
+- **UI-120** — Settings edits the Nyaa base URL, and saving it migrates the seeded feed.
+- **UI-121** — Settings configures Discord and generic/Apprise webhooks with per-target test buttons and two notification toggles.
+- **UI-122** — Settings manages prioritized groups (add, count display, delete) independently of the Prioritized page.
+- **UI-123** — Settings Maintenance exposes cache/discovery/description cleanup, log pruning and rotation, network diagnostics/speedtest, release-cache clearing, tag refresh, and volume-range/false-series/light-novel/alias/attribution audits and repairs.
+- **UI-124** — Network diagnostics can be copied as JSON and a bounded speedtest can be run with task binding.
+- **UI-125** — The Advanced/Danger-Zone section (purge non-manga, repair re-keyed names, two-step full data reset) renders only when `MANGATRAX_DEBUG_ACTIONS=1`.
+- **UI-126** — The qBittorrent password is written into the HTML `value=` attribute on both Settings and Downloads, while the Torbox key is masked server-side.
+- **UI-127** — The Settings add-group inputs live inside the main settings form, so pressing Enter triggers Save Settings rather than Add Group.
+- **UI-128** — Most page-level list-fetch failures are only logged to `console.error`, leaving a skeleton or stale list; Releases turns its Load More button into "Retry loading" and Series reveals its hidden Load More button, so those two pages do have a retry path.
+- **UI-129** — Destructive actions use three different confirmation idioms: native `confirm()`, click-again armed buttons, and inline confirm boxes.
+- **UI-130** — Many inline handlers interpolate server-provided names with HTML escaping only (e.g. `onclick="blacklistSeriesGlobal('{{ s.name|escape }}')"`).
+- **UI-131** — Most mutating actions refresh by full-page reload; only release downloads, live queues, task panel and some downloads actions update in place.
+- **UI-132** — Cover images use `/api/covers` with `loading="lazy"`, `decoding="async"`, a shimmer placeholder and an SVG fallback.
+- **UI-133** — Server-readable filters live in the URL, but many links/pagination drop subsets and client-side filters never appear in the URL.
+- **UI-134** — The visual language is a rose brand scale, three dark surfaces, slate text, rounded-xl/2xl cards, uppercase 10–11px labels and Lucide icons.
+- **UI-135** — Typography uses the Tailwind system sans stack with page titles at `text-2xl` and many labels at 9–11px; no custom or fluid font.
+- **UI-136** — Purpose-built empty states exist for the main lists, but there is no page-level error state or styled 404/500 page.
+- **UI-137** — `data-task-kind` is a UI/backend contract: a button's kind must match a task kind the backend actually emits. The header "Process Downloads" button declares `downloads:process`, but `/api/staging/tag` creates no persisted task, so no task of that kind ever exists and the duplicate "Tag & move now" button has no binding at all.
+

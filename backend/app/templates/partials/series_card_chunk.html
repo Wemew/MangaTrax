@@ -258,11 +258,11 @@
                     </button>
                     {% endif %}
                     {% if r.status != 'IGNORED' %}
-                    <button type="button" onclick="ignoreReleaseGlobal({{ r.id }}, this)" title="Ignore this specific release batch" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-amber-300 border border-slate-700 text-xs flex items-center transition-colors">
+                    <button type="button" onclick="ignoreReleaseGlobal({{ r.id }}, this)" title="Ignore this specific release batch" aria-label="Ignore this release batch" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-amber-300 border border-slate-700 text-xs flex items-center transition-colors">
                         <i data-lucide="eye-off" class="w-3.5 h-3.5"></i>
                     </button>
                     {% else %}
-                    <button type="button" onclick="unignoreReleaseGlobal({{ r.id }}, this)" title="Un-ignore and restore release" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-700 text-xs flex items-center transition-colors">
+                    <button type="button" onclick="unignoreReleaseGlobal({{ r.id }}, this)" title="Un-ignore and restore release" aria-label="Un-ignore and restore release" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-700 text-xs flex items-center transition-colors">
                         <i data-lucide="eye" class="w-3.5 h-3.5"></i>
                     </button>
                     {% endif %}

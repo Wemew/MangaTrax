@@ -19,37 +19,40 @@
 
         <div class="flex items-center gap-3">
             <div class="relative w-full sm:w-64">
-                <i data-lucide="search" class="w-4 h-4 text-slate-500 absolute left-3 top-2.5"></i>
-                <input type="text" id="series-search" oninput="filterSeries()" placeholder="Search manga series..." class="w-full bg-darkcard border border-slate-700/80 rounded-xl pl-9 pr-4 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 transition-colors">
+                <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-2.5"></i>
+                <input type="text" id="series-search" oninput="onSeriesSearchInput()" aria-label="Search tracked series" autocomplete="off" placeholder="Search manga series..." class="w-full min-h-[44px] md:min-h-0 bg-darkcard border border-slate-700/80 rounded-xl pl-9 pr-4 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 transition-colors">
             </div>
-            <button type="button" onclick="triggerCalibreSync()" id="btn-sync-calibre" aria-label="Sync Calibre library" title="Scan Calibre library for manga series & owned volumes" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-2 transition-colors active:scale-95 disabled:opacity-60 disabled:cursor-wait shrink-0">
+            <button type="button" onclick="triggerCalibreSync()" id="btn-sync-calibre" aria-label="Sync Calibre library" title="Scan Calibre library for manga series & owned volumes" class="min-h-[44px] md:min-h-0 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-2 transition-colors active:scale-95 disabled:opacity-60 disabled:cursor-wait shrink-0">
                 <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-brand-400" id="icon-calibre-sync"></i>
                 <span>Sync Calibre</span>
             </button>
         </div>
     </div>
 
+    <!-- UX-021 server-side search result summary (hidden outside search mode) -->
+    <p id="series-result-count" class="hidden text-[11px] text-slate-400" aria-live="polite"></p>
+
     <!-- Series Table -->
     <div class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
         <div class="overflow-x-auto">
-            <table class="w-full text-left border-collapse text-xs">
+            <table class="w-full text-left border-collapse text-xs mt-table-cards">
                 <thead>
                     <tr class="bg-slate-900/80 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
-                        <th class="py-3.5 px-4 w-12 text-center">Status</th>
-                        <th class="py-3.5 px-4">Series Name</th>
-                        <th class="py-3.5 px-4">Author(s)</th>
-                        <th class="py-3.5 px-4 text-center">Owned</th>
-                        <th class="py-3.5 px-4 text-center">Latest Vol</th>
-                        <th class="py-3.5 px-4">Tags / Genres</th>
-                        <th class="py-3.5 px-4 text-right">Actions</th>
+                        <th scope="col" class="py-3.5 px-4 w-12 text-center">Status</th>
+                        <th scope="col" class="py-3.5 px-4">Series Name</th>
+                        <th scope="col" class="py-3.5 px-4">Author(s)</th>
+                        <th scope="col" class="py-3.5 px-4 text-center">Owned</th>
+                        <th scope="col" class="py-3.5 px-4 text-center">Latest Vol</th>
+                        <th scope="col" class="py-3.5 px-4">Tags / Genres</th>
+                        <th scope="col" class="py-3.5 px-4 text-right">Actions</th>
                     </tr>
                 </thead>
-                <tbody id="series-table-body" class="divide-y divide-slate-800/60">
+                <tbody id="series-table-body" class="divide-y divide-slate-800/60" aria-busy="true">
                     {% if series_list %}
                         {% include "partials/series_table_row_chunk.html" %}
                     {% else %}
                     <tr id="series-loading-skeleton" class="animate-pulse">
-                        <td colspan="7" class="py-8 text-center text-xs text-slate-500 font-medium">
+                        <td colspan="7" class="mt-table-empty py-8 text-center text-xs text-slate-400 font-medium">
                             <div class="inline-flex items-center gap-2">
                                 <i data-lucide="loader-2" class="w-4 h-4 animate-spin text-brand-400"></i>
                                 <span>Loading tracked series...</span>
@@ -69,10 +72,10 @@
     </div>
 
     <!-- Friendly empty state shown when the search filter matches nothing (task-16) -->
-    <div id="series-filter-empty" class="hidden bg-darkcard border border-slate-800 rounded-2xl p-12 text-center text-slate-500">
+    <div id="series-filter-empty" class="hidden bg-darkcard border border-slate-800 rounded-2xl p-12 text-center text-slate-400">
         <i data-lucide="search-x" class="w-12 h-12 mx-auto mb-3 opacity-40"></i>
         <p class="text-sm font-semibold">No manga series match your search.</p>
-        <p class="text-[11px] text-slate-500 mt-1">Try a different title or clear the search to see your whole Calibre library.</p>
+        <p class="text-[11px] text-slate-400 mt-1">Try a different title or clear the search to see your whole Calibre library.</p>
         <button type="button" onclick="clearSeriesFilters()" class="mt-3 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors">Clear search</button>
     </div>
 
@@ -105,9 +108,103 @@ let isLoadingSeriesRows = false;
 let hasMoreSeriesRows = true;
 let isFirstSeriesBatch = true;
 
+// UX-021: server-side search state (300 ms debounce + AbortController)
+let seriesSearchMode = false;
+let seriesSearchQuery = '';
+let seriesSearchTimer = null;
+let seriesSearchController = null;
+let seriesSearchRequestId = 0;
+let seriesScrollObserver = null;
+let seriesRowsNearViewport = false;
+
+function seriesSearchInput() {
+    return document.getElementById('series-search');
+}
+
+function setSeriesSearchUrl(query) {
+    try {
+        const url = new URL(window.location.href);
+        if (query) {
+            url.searchParams.set('search', query);
+        } else {
+            url.searchParams.delete('search');
+        }
+        history.replaceState(null, '', url.pathname + (url.search || '') + (url.hash || ''));
+    } catch (err) {
+        /* URL state is best-effort; server search still works without it. */
+    }
+}
+
+function setSeriesResultCount(text) {
+    const el = document.getElementById('series-result-count');
+    if (!el) return;
+    if (text) {
+        el.textContent = text;
+        el.classList.remove('hidden');
+    } else {
+        el.textContent = '';
+        el.classList.add('hidden');
+    }
+}
+
+function setSeriesBusy(busy) {
+    const tbody = document.getElementById('series-table-body');
+    if (tbody) tbody.setAttribute('aria-busy', busy ? 'true' : 'false');
+}
+
+function disconnectSeriesScroll() {
+    if (seriesScrollObserver) {
+        seriesScrollObserver.disconnect();
+        seriesScrollObserver = null;
+    }
+}
+
+function connectSeriesScroll() {
+    disconnectSeriesScroll();
+    const container = document.getElementById('load-more-series-container');
+    if (!container || seriesSearchMode || !('IntersectionObserver' in window)) return;
+    seriesScrollObserver = new IntersectionObserver((entries) => {
+        if (seriesSearchMode) return;
+        seriesRowsNearViewport = entries.some(function (entry) { return entry.isIntersecting; });
+        if (!seriesRowsNearViewport) return;
+        const deferred = document.querySelectorAll('.series-row-deferred');
+        if (deferred.length > 0) loadMoreSeriesRows();
+        else fetchNextSeriesRows();
+    }, { rootMargin: '300px' });
+    seriesScrollObserver.observe(container);
+}
+
+function setupSeriesScroll() {
+    connectSeriesScroll();
+}
+
+function seriesSearchLoadingRow(message) {
+    return `<tr id="series-search-loading" class="animate-pulse">
+        <td colspan="7" class="mt-table-empty py-8 text-center text-xs text-slate-400 font-medium">
+            <div class="inline-flex items-center gap-2">
+                <i data-lucide="loader-2" class="w-4 h-4 animate-spin text-brand-400"></i>
+                <span>${message}</span>
+            </div>
+        </td>
+    </tr>`;
+}
+
+function showSeriesSearchRetry(message) {
+    const tbody = document.getElementById('series-table-body');
+    if (!tbody) return;
+    tbody.innerHTML = `<tr>
+        <td colspan="7" class="mt-table-empty py-10 text-center text-xs text-slate-400">
+            <p class="mb-2">${message}</p>
+            <button type="button" onclick="retrySeriesSearch()" class="min-h-[44px] px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold">Retry loading series</button>
+        </td>
+    </tr>`;
+}
+
 async function fetchNextSeriesRows() {
+    if (seriesSearchMode) return;
     if (isLoadingSeriesRows || !hasMoreSeriesRows) return;
     isLoadingSeriesRows = true;
+    setSeriesBusy(true);
 
     const container = document.getElementById('load-more-series-container');
     if (container && !isFirstSeriesBatch) container.style.display = 'block';
@@ -116,6 +213,7 @@ async function fetchNextSeriesRows() {
         const url = `/api/series/rows?offset=${seriesRowsOffset}&limit=${seriesRowsLimit}`;
         const res = await fetch(url);
         const data = await res.json();
+        if (seriesSearchMode) return;
 
         const tbody = document.getElementById('series-table-body');
         const skeleton = document.getElementById('series-loading-skeleton');
@@ -124,12 +222,13 @@ async function fetchNextSeriesRows() {
         if (isFirstSeriesBatch && data.count === 0) {
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="7" class="py-12 text-center text-slate-500">
+                    <td colspan="7" class="mt-table-empty py-12 text-center text-slate-400">
                         No manga series found in Calibre library.
                     </td>
                 </tr>
             `;
             hasMoreSeriesRows = false;
+            setSeriesBusy(false);
             if (container) container.style.display = 'none';
             return;
         }
@@ -147,28 +246,33 @@ async function fetchNextSeriesRows() {
         if (countEl) countEl.innerText = remaining;
 
         if (window.lucide) lucide.createIcons();
-
-        const query = (document.getElementById('series-search')?.value || '').trim();
-        if (query) {
-            filterSeries();
-        }
+        setSeriesBusy(false);
 
         if (!hasMoreSeriesRows) {
             if (container) container.style.display = 'none';
-        } else {
+        } else if (!seriesSearchMode) {
             if (container) container.style.display = 'block';
-            setTimeout(fetchNextSeriesRows, 60);
+            if (seriesRowsNearViewport) setTimeout(fetchNextSeriesRows, 60);
         }
     } catch (err) {
         console.error("Error loading series rows:", err);
+        setSeriesBusy(false);
         const btn = document.getElementById('btn-load-more-series');
         if (btn) btn.classList.remove('hidden');
+        const tbody = document.getElementById('series-table-body');
+        if (tbody && !document.getElementById('series-load-retry')) {
+            const row = document.createElement('tr');
+            row.id = 'series-load-retry';
+            row.innerHTML = '<td colspan="7" class="mt-table-empty py-6 text-center text-xs text-slate-400">Couldn\'t load series. <button type="button" class="underline text-brand-400 hover:text-brand-300" onclick="document.getElementById(\'series-load-retry\').remove(); fetchNextSeriesRows();">Retry</button></td>';
+            tbody.appendChild(row);
+        }
     } finally {
         isLoadingSeriesRows = false;
     }
 }
 
 function loadMoreSeriesRows(batchSize = 50) {
+    if (seriesSearchMode) return;
     const deferred = document.querySelectorAll('.series-row-deferred');
     if (deferred.length > 0) {
         let count = 0;
@@ -191,6 +295,7 @@ function loadMoreSeriesRows(batchSize = 50) {
     }
 }
 
+// Client-side fallback filter (kept for already-loaded rows; server search is the primary path).
 function filterSeries() {
     const q = (document.getElementById('series-search')?.value || '').toLowerCase().trim();
     const rows = document.querySelectorAll('.series-row');
@@ -226,31 +331,153 @@ function filterSeries() {
 }
 
 function clearSeriesFilters() {
-    const input = document.getElementById('series-search');
+    const input = seriesSearchInput();
     if (input) input.value = '';
-    filterSeries();
+    exitSeriesSearch();
     if (input) input.focus();
 }
 
-// Auto-trigger infinite scroll for series table
-function setupSeriesScroll() {
+function onSeriesSearchInput() {
+    const input = seriesSearchInput();
+    const query = (input ? input.value : '').trim();
+    if (seriesSearchTimer) {
+        clearTimeout(seriesSearchTimer);
+        seriesSearchTimer = null;
+    }
+    // A result for the previous query must never land after the input changed.
+    if (seriesSearchController) {
+        seriesSearchController.abort();
+        seriesSearchController = null;
+        seriesSearchRequestId += 1;
+    }
+    if (!query) {
+        exitSeriesSearch();
+        return;
+    }
+    seriesSearchTimer = setTimeout(() => {
+        seriesSearchTimer = null;
+        runSeriesSearch(query);
+    }, 300);
+}
+
+async function runSeriesSearch(query) {
+    const q = (query || '').trim();
+    if (!q) {
+        exitSeriesSearch();
+        return;
+    }
+    seriesSearchMode = true;
+    seriesSearchQuery = q;
+    disconnectSeriesScroll();
     const container = document.getElementById('load-more-series-container');
-    if (container && 'IntersectionObserver' in window) {
-        const obs = new IntersectionObserver((entries) => {
-            if (entries[0].isIntersecting) {
-                loadMoreSeriesRows();
-            }
-        }, { rootMargin: '300px' });
-        obs.observe(container);
+    if (container) container.style.display = 'none';
+    const loadMoreBtn = document.getElementById('btn-load-more-series');
+    if (loadMoreBtn) loadMoreBtn.classList.add('hidden');
+    const emptyEl = document.getElementById('series-filter-empty');
+    if (emptyEl) emptyEl.classList.add('hidden');
+    if (seriesSearchController) seriesSearchController.abort();
+    const controller = new AbortController();
+    seriesSearchController = controller;
+    const requestId = ++seriesSearchRequestId;
+    setSeriesSearchUrl(q);
+    setSeriesResultCount(`Searching for “${q}”…`);
+    setSeriesBusy(true);
+    const tbody = document.getElementById('series-table-body');
+    if (tbody) tbody.innerHTML = seriesSearchLoadingRow('Searching series…');
+    try {
+        const url = `/api/series/rows?offset=0&limit=${seriesRowsLimit}&search=${encodeURIComponent(q)}`;
+        const res = await fetch(url, { signal: controller.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (requestId !== seriesSearchRequestId || !seriesSearchMode) return;
+        const skeleton = document.getElementById('series-loading-skeleton');
+        if (skeleton) skeleton.remove();
+        if (tbody) tbody.innerHTML = data.html || '';
+        seriesRowsOffset = data.count || 0;
+        hasMoreSeriesRows = false;
+        isFirstSeriesBatch = false;
+        if (window.lucide) lucide.createIcons();
+        if ((data.count || 0) === 0) {
+            setSeriesResultCount('0 series match');
+            if (emptyEl) emptyEl.classList.remove('hidden');
+        } else {
+            setSeriesResultCount(`${data.total || data.count} series match`);
+        }
+        setSeriesBusy(false);
+    } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        if (requestId !== seriesSearchRequestId) return;
+        setSeriesResultCount('Search failed');
+        showSeriesSearchRetry('Could not load series for this search.');
+        setSeriesBusy(false);
+    } finally {
+        if (seriesSearchController === controller) seriesSearchController = null;
+    }
+}
+
+function retrySeriesSearch() {
+    const input = seriesSearchInput();
+    const q = (input ? input.value : seriesSearchQuery).trim();
+    if (q) {
+        runSeriesSearch(q);
+    } else {
+        exitSeriesSearch();
+    }
+}
+
+function exitSeriesSearch() {
+    const wasSearching = seriesSearchMode;
+    if (seriesSearchTimer) {
+        clearTimeout(seriesSearchTimer);
+        seriesSearchTimer = null;
+    }
+    if (seriesSearchController) {
+        seriesSearchController.abort();
+        seriesSearchController = null;
+    }
+    seriesSearchRequestId += 1;
+    seriesSearchMode = false;
+    seriesSearchQuery = '';
+    setSeriesResultCount('');
+    setSeriesSearchUrl('');
+    const emptyEl = document.getElementById('series-filter-empty');
+    if (emptyEl) emptyEl.classList.add('hidden');
+    const container = document.getElementById('load-more-series-container');
+    if (container) container.style.display = '';
+    if (wasSearching) {
+        const tbody = document.getElementById('series-table-body');
+        if (tbody) tbody.innerHTML = '';
+        seriesRowsOffset = 0;
+        hasMoreSeriesRows = true;
+        isFirstSeriesBatch = true;
+        fetchNextSeriesRows();
+        connectSeriesScroll();
+    } else {
+        // No server search was active: restore any client-side hiding.
+        filterSeries();
     }
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-    const existingRows = document.querySelectorAll('#series-table-body .series-row');
-    if (existingRows.length === 0) {
-        fetchNextSeriesRows();
+    let initialSearch = '';
+    try {
+        initialSearch = (new URLSearchParams(window.location.search).get('search') || '').trim();
+    } catch (err) {
+        initialSearch = '';
     }
-    setupSeriesScroll();
+    const input = seriesSearchInput();
+    if (input && initialSearch) input.value = initialSearch;
+    const existingRows = document.querySelectorAll('#series-table-body .series-row');
+    if (initialSearch) {
+        runSeriesSearch(initialSearch);
+    } else {
+        if (existingRows.length === 0) {
+            fetchNextSeriesRows();
+        } else {
+            setSeriesBusy(false);
+        }
+        setupSeriesScroll();
+    }
 });
 
 async function toggleMonitored(seriesId) {
@@ -384,7 +611,7 @@ function openSeriesCalibreMatch(seriesId, name, button) {
     if (!modal) return;
     document.getElementById('series-calibre-match-title').textContent = `Match '${name || ''}' to Calibre series`;
     document.getElementById('series-calibre-match-search').value = name || '';
-    document.getElementById('series-calibre-match-list').innerHTML = '<p class="p-4 text-center text-slate-500 text-[11px]">Searching Calibre…</p>';
+    document.getElementById('series-calibre-match-list').innerHTML = '<p class="p-4 text-center text-slate-400 text-[11px]">Searching Calibre…</p>';
     document.getElementById('series-calibre-match-error').classList.add('hidden');
     modal.classList.remove('hidden');
     modal.classList.add('flex');
@@ -405,7 +632,7 @@ async function searchSeriesCalibreMatch() {
         list.innerHTML = _seriesCalibreItems.length ? _seriesCalibreItems.map(function (item) {
             const id = item.id || item.series_id;
             return `<button type="button" onclick="selectSeriesCalibreMatch(${JSON.stringify(id)})" class="w-full text-left px-3 py-2 hover:bg-slate-800/60"><span class="block text-xs font-semibold text-white">${seriesCalibreEsc(item.name || item.series_name)}</span><span class="block text-[10px] text-slate-400">${item.book_count || 0} book(s)</span></button>`;
-        }).join('') : '<p class="p-4 text-center text-slate-500 text-[11px]">No Calibre series found.</p>';
+        }).join('') : '<p class="p-4 text-center text-slate-400 text-[11px]">No Calibre series found.</p>';
     } catch (err) { list.innerHTML = '<p class="p-4 text-center text-rose-300 text-[11px]">Could not load Calibre series.</p>'; }
 }
 function selectSeriesCalibreMatch(id) { _seriesCalibreTarget = id; }

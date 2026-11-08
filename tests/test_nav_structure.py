@@ -75,10 +75,9 @@ def test_five_top_level_items():
     items = re.findall(r'data-nav-item="([a-z]+)"', nav)
     assert items == ["overview", "library", "discover", "downloads", "system"], items
 
-    # Overview + Downloads are direct links; Library/Discover/System are dropdowns.
+    # Overview is a direct link; Library/Discover/Downloads/System are dropdowns.
     assert '<a href="/" data-nav-item="overview"' in nav, "Overview link missing"
-    assert '<a href="/downloads" data-nav-item="downloads"' in nav, "Downloads link missing"
-    for name in ("library", "discover", "system"):
+    for name in ("library", "discover", "downloads", "system"):
         item = _nav_item(nav, name)
         assert "<button" in item, (name, item)
         assert "data-dropdown-trigger" in item, (name, item)
@@ -98,6 +97,7 @@ def test_dropdown_contract():
     expected_children = {
         "library": ["/series", "/releases", "/prioritized"],
         "discover": ["/discovery", "/feeds"],
+        "downloads": ["/downloads", "/downloads/manual-pickup"],
         "system": ["/logs", "/settings"],
     }
     for name, hrefs in expected_children.items():
@@ -122,6 +122,7 @@ def test_dropdown_contract():
     assert "active_page in ['series', 'releases', 'prioritized']" in nav
     assert "active_page in ['discovery', 'feeds']" in nav
     assert "active_page in ['logs', 'settings']" in nav
+    assert "request.url.path.startswith('/downloads/manual-pickup')" in nav
     # Amber treatment for Prioritized is preserved.
     assert "text-amber-400" in _nav_item(nav, "library")
     print("    [PASSED] every dropdown: button trigger + aria + correct child links.")
@@ -186,9 +187,9 @@ def test_header_button_audit():
     source = _source()
     header = _segment(source, "<header", "</header>")
     buttons = re.findall(r"<button\b", header)
-    # 3 nav dropdown triggers + user menu trigger + mobile menu trigger.
-    assert len(buttons) == 5, f"unexpected header buttons: {len(buttons)}"
-    for trigger in ("nav-menu-library", "nav-menu-discover", "nav-menu-system", "nav-menu-user"):
+    # 4 nav dropdown triggers + user menu trigger + mobile menu trigger + command palette trigger.
+    assert len(buttons) == 7, f"unexpected header buttons: {len(buttons)}"
+    for trigger in ("nav-menu-library", "nav-menu-discover", "nav-menu-downloads", "nav-menu-system", "nav-menu-user"):
         assert 'aria-controls="%s"' % trigger in header, trigger
     assert 'id="btn-mobile-menu"' in header
     # The mobile menu must not list action buttons either.
@@ -271,7 +272,7 @@ def test_mobile_menu():
     assert 'aria-expanded="false"' in hamburger
     assert 'aria-controls="mobile-menu"' in hamburger
     assert 'aria-label="Open navigation menu"' in hamburger
-    assert 'onclick="toggleMobileMenu()"' in hamburger
+    assert 'onclick="toggleMobileMenu(' in hamburger
 
     for heading in ("Library", "Discover", "System"):
         assert ">%s<" % heading in mobile, heading
@@ -295,8 +296,8 @@ def test_dropdown_js():
     source = _source()
     assert "function toggleDropdown(trigger)" in source
     assert "function closeAllDropdowns(" in source
-    assert "function toggleMobileMenu()" in source
-    assert "function closeMobileMenu()" in source
+    assert "function toggleMobileMenu(" in source
+    assert "function closeMobileMenu(" in source
     # Outside-click closes; Escape closes and returns focus to the trigger.
     assert "event.target.closest('[data-dropdown-menu]')" in source
     assert "event.key !== 'Escape'" in source
