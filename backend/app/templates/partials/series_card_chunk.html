@@ -115,7 +115,7 @@
                 <div class="flex flex-wrap gap-1.5">
                     {% for v in group.all_volumes %}
                     {% set is_missing = v in group.missing_volumes %}
-                    <span class="px-2 py-0.5 rounded-md text-[11px] font-bold border transition-all {% if is_missing %}bg-amber-500/15 text-amber-300 border-amber-500/40 shadow-sm shadow-amber-950/20{% else %}bg-emerald-500/10 text-emerald-300 border-emerald-500/30{% endif %}"
+                    <span class="vol-badge vol-spine px-2 py-0.5 text-[11px] font-mono font-semibold border transition-all {% if is_missing %}vol-spine-wanted{% else %}vol-spine-owned{% endif %}"
                           title="Volume {{ v|int if v == v|int else v }} - {% if is_missing %}Wanted in Calibre{% else %}Already in Library{% endif %}">
                         Vol {{ v|int if v == v|int else v }}
                         {% if not is_missing %}

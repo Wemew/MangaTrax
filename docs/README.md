@@ -19,6 +19,7 @@ releases.
 | Path | Contents |
 |---|---|
 | [`design/spec-parts/`](design/spec-parts/) | Modular domain specifications (00 overview, 01 releases, 02 series, 03 downloads, 04 platform, 05 UI). `APP_DESIGN_SPEC.md` is the consolidated authoritative version. |
+| [`design/BRAND_IDENTITY.md`](design/BRAND_IDENTITY.md) | Sumi Ink & Hanko visual identity — palette, typography, logo/favicon, card/spine rules and constraint mapping |
 | [`design/CORRECTIONS_ROUND1.md`](design/CORRECTIONS_ROUND1.md) | Record of the round-1 corrections applied between v0.9 and v0.10 |
 | [`design/reviews/`](design/reviews/) | Expert review evidence for each specification consensus round |
 | [`ui/DESIGN_VALIDATION_LOG.md`](ui/DESIGN_VALIDATION_LOG.md) | UI design rounds, overlapping aspect assignments and final sign-off |

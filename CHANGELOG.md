@@ -7,6 +7,16 @@ semantic versioning.
 ## [Unreleased]
 
 ### Changed
+- **Visual identity — “Sumi Ink & Hanko”:** neutral Sumi Carbon surfaces replace the blue-slate
+  palette, Space Grotesk / Plus Jakarta Sans / JetBrains Mono are loaded for display, UI and
+  technical data, and a CSS screentone layer adds print texture without image assets.
+- **Brand mark:** custom tankōbon-spine SVG logo and inline data-URI favicon replace the placeholder
+  Lucide tile; the header badge now shows the release version instead of “Bundles & qBit”.
+- **Card de-noising:** Discovery top badges are neutral except volume-1/complete and the prioritized
+  VIP star; the MangaUpdates synopsis is a quiet left-rule catalog entry rather than a framed
+  box-in-box; the MangaUpdates link is a neutral metadata chip.
+- **Tankōbon volume badges** on Release cards: monospace labels with sharp left spine borders —
+  muted emerald for owned volumes, high-contrast amber for wanted volumes.
 - **Documentation consolidated:** final design/registry/consensus/UI documents now live at the top
   of `docs/` with an index; modular specification parts moved to `docs/design/parts/`, review
   evidence to `docs/design/reviews/` and `docs/ui/reviews/`.
