@@ -11,7 +11,7 @@ review (any behavioural change must update the affected claim and registry line)
 > **Sign-off.** Round 1 (v0.9) produced 445 claims and 5 non-unanimous reviews (38 claim corrections,
 > 12 new claims, Part 0 rewrite). Round 2 (v0.10) returned 4 AGREE and 1 conditional DISAGREE (two
 > one-sentence fixes). Round 3 (v0.11) returned **5/5 AGREE on all 457 claims** and on Part 0.
-> Signatures and evidence: `docs/DESIGN_CONSENSUS_LOG.md`, `docs/spec/reviews/round3_*.md`.
+> Signatures and evidence: `docs/DESIGN_CONSENSUS_LOG.md`, `docs/design/reviews/round3_*.md`.
 >
 > **How to read.** Part 0 is the system synthesis (architecture, data model, workflows, invariants).
 > Parts 1–5 are the domain specifications, each ending with its consensus checklist. The registry is
@@ -96,7 +96,7 @@ precise enough that the expert panel can vote on each individual behaviour claim
 4. Disagreements are resolved by amending the claim or the implementation description; the round
    repeats until **all five experts** sign off on **all claims**.
 5. The signed-off document is copied to `docs/APP_DESIGN_SPEC.md` and
-   `docs/app_design_spec_v1.0/` with the consensus log.
+   `docs/archive/v1.0/` with the consensus log.
 
 ---
 
@@ -574,7 +574,7 @@ changing any related area.
 
 > **Consensus note.** Version 1.0 is only valid together with `DESIGN_CONSENSUS_LOG.md`, which
 > records each round, each disagreement, the resolution, and the five signatures. The archived copy
-> is `docs/app_design_spec_v1.0/`; the working copy is this `docs/` tree.
+> is `docs/archive/v1.0/`; the working copy is this `docs/` tree.
 
 
 ---
@@ -587,7 +587,7 @@ changing any related area.
 
 **Scope (3 lines).**
 1. In scope: the four HTML pages `/releases`, `/prioritized`, `/discovery`, `/feeds`, every JSON endpoint they (or their JS) call, and the machinery behind them — feed providers, Nyaa crawler, parser/detection filters, status precedence, prioritized-group matching, caches and backfill.
-2. Evidence base: the real implementation (`backend/app/*`, `backend/app/providers/*`, `backend/app/templates/*`, `tests/*`) rather than `PROJECT.md`, citing `path:line` for every non-obvious claim; behaviors that are broken/dead are marked PARTIAL/VESTIGIAL rather than smoothed over.
+2. Evidence base: the real implementation (`backend/app/*`, `backend/app/providers/*`, `backend/app/templates/*`, `tests/*`) rather than `docs/archive/development/PROJECT.md`, citing `path:line` for every non-obvious claim; behaviors that are broken/dead are marked PARTIAL/VESTIGIAL rather than smoothed over.
 3. Out of scope except as cross-domain contracts: deep UI/UX auditing (EXPERT-5), Calibre scanning internals (Series domain), the downloader/Torbox pipeline (Downloads domain), and auth/OIDC internals (Platform domain).
 
 Terminology used throughout: **stable matching key** = `releases.series_name` / `series_tracking.name` (Calibre name or user-typed name, used for matching/grouping/tagging); **display title** = cosmetic AniList canonical/English title resolved at render time; **wishlist** = rows with `status='REQUESTED'`; **prioritized group** = a row in `prioritized_groups` matched by *set membership* against a release's group set; **tracked view** = the filtered release list defined by `tracked_media_clause()` + light-novel exclusion.
@@ -1568,7 +1568,7 @@ There are exactly two names (`database.py:310-328`):
 * **stable matching key** — persisted in `series_tracking.name` and `releases.series_name`; equal to the Calibre library name when the series is in Calibre, else the user-typed name. Matching, grouping, dedupe, templates and ComicInfo tagging all key off it. External metadata must never rewrite it.
 * **display title** — cosmetic; AniList canonical English only when the cached metadata row is authoritative (`source=='anilist'` and non-empty canonical), else the stable key (`database.py:331-357`). Resolved at render time (`get_display_title`, grouped builder, search) and never fed back into a lookup.
 
-The historical defect this model fixes is documented in `PROJECT.md:157-164`: AniList renamed series ("Dungeon Meshi" → "Delicious in Dungeon") and broke Calibre matching/ComicInfo. The repair for already-corrupted rows is SER-053.
+The historical defect this model fixes is documented in `docs/archive/development/PROJECT.md:157-164`: AniList renamed series ("Dungeon Meshi" → "Delicious in Dungeon") and broke Calibre matching/ComicInfo. The repair for already-corrupted rows is SER-053.
 
 #### 2.4.2 Normalization and candidate generation
 
@@ -2030,7 +2030,7 @@ All routes are behind the auth middleware (`main.py:240-267`); POST/DELETE are a
 
 **Q7 — Automatic re-key/merge is not audited.** `link_tracked_series` and `auto_link_tracked_series` write no `activity_logs` row (no `log_activity` in `database.py:1872-2085`), and `sync_calibre_series` calls auto-link inline (`:1864-1869`). Users cannot see when the periodic sync silently renamed a series or re-keyed releases; only manual actions (`SERIES_MANUALLY_MATCHED`, `SERIES_KEYS_REPAIRED`) are auditable.
 
-**Q8 — API surfaces with no UI, and docs that imply otherwise.** `GET /api/search` (M2 feature 17; `PROJECT.md:41`), `GET /api/series/link-audit`, `POST /api/series/link-repair`, `GET /api/maintenance/series-aliases` have no consumer in `backend/app/templates` (verified by grep). The Series page search is a client-side substring filter, so AniList alias search is unreachable for interactive users. Should the redesign wire these up or drop them?
+**Q8 — API surfaces with no UI, and docs that imply otherwise.** `GET /api/search` (M2 feature 17; `docs/archive/development/PROJECT.md:41`), `GET /api/series/link-audit`, `POST /api/series/link-repair`, `GET /api/maintenance/series-aliases` have no consumer in `backend/app/templates` (verified by grep). The Series page search is a client-side substring filter, so AniList alias search is unreachable for interactive users. Should the redesign wire these up or drop them?
 
 **Q9 — `/series` search strategy.** The API supports server-side `search` (name/authors/publisher) and `monitored_only` (`main.py:1526-1533`; `database.py:2104-2113`), but the page never sends either; instead it keeps auto-fetching all pages while filtering locally (`series.html:151-161,194-233`). On a large Calibre library this means many requests per search and a lag until the matching page arrives. Was the API surface built for a planned server-side search UI?
 
@@ -2165,7 +2165,7 @@ SER-094 — False-series audit suggests the fixed Calibre match when one exists,
 ## 1. Scope
 
 **Scope.** This document specifies the acquisition half of MangaTrax: release → download engine (qBittorrent or Torbox) → raw `downloads_dir` → tag/move into flat `staging_dir` → Calibre import, plus everything the Downloads page and Manual Pickup page expose (queues, inventory, failed documents, staging groups, duplicates, ComicInfo audit/repair, manual tagging, per-file delete).
-Every statement below is derived from the current implementation (`backend/app/**`, `backend/app/templates/**`, `tests/**`) at commit `86a7bd8`; where `PROJECT.md`/`README.md` disagree the code wins.
+Every statement below is derived from the current implementation (`backend/app/**`, `backend/app/templates/**`, `tests/**`) at commit `86a7bd8`; where `docs/archive/development/PROJECT.md`/`README.md` disagree the code wins.
 Feature IDs are `DL-001` … `DL-081`; each ID appears once in the inventory table (§2) and once as a checkable claim in the consensus checklist (§9).
 
 ---
@@ -3780,7 +3780,7 @@ Everything below is evidence-based and is **not** a specification claim.
 
 **R-7 — `/health` is a liveness probe wearing a readiness badge.** It always reports `status:"ok"` (`auth.py:1165-1166`), does no DB read/write check, and only reports storage writability best-effort. Docker's HEALTHCHECK therefore cannot detect a broken DB, a stalled scheduler thread, or an exhausted disk; a container whose scheduler thread died (unhandled `BaseException`, or `stop()` mid-flight) still reports healthy.
 
-**R-8 — No backup/restore and no schema version.** There is no migration version table, no `VACUUM`, no backup API/CLI/route (grep of `backup`, `VACUUM` in `backend/app`). Durability depends on the operator backing up the `./data` volume, and the docs (PROJECT.md/README) do not describe a backup procedure. Combined with the startup re-parse backfills (which rewrite `release_group` for every row on every boot, `database.py:603-624`), a bad release of MangaTrax can mutate all historical rows with no version marker to detect it.
+**R-8 — No backup/restore and no schema version.** There is no migration version table, no `VACUUM`, no backup API/CLI/route (grep of `backup`, `VACUUM` in `backend/app`). Durability depends on the operator backing up the `./data` volume, and the docs (docs/archive/development/PROJECT.md/README) do not describe a backup procedure. Combined with the startup re-parse backfills (which rewrite `release_group` for every row on every boot, `database.py:603-624`), a bad release of MangaTrax can mutate all historical rows with no version marker to detect it.
 
 **R-9 — 13 tables with no foreign keys and no per-user isolation.** `users` exists only for audit attribution; no table has an owner/user column, so multi-user OIDC deployments share one mutable state and every authenticated user is effectively an administrator (no roles/claims checks anywhere in `auth.py`). Deleting a series row does not cascade (no FK), which the platform relies on implicitly.
 

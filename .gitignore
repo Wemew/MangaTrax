@@ -39,12 +39,24 @@ test_run_data/
 htmlcov/
 scratch/
 
+# Local test/sandbox artifacts (never commit)
+.qa_tmp/
+.tmp-test/
+.dsh-tmp/
+calibre-*/
+tmp/
+mytemp/
+*.log
+*.tmp
+
 # Environment & IDE
 .env
 .idea/
 .vscode/
 *.swp
 *.swo
+.DS_Store
+Thumbs.db
 
 # Agent run artifacts (local only)
 .agents/

@@ -477,6 +477,21 @@ MangaTrax logs in two places:
 
 ---
 
+## 📚 Documentation
+
+* [docs/README.md](docs/README.md) — documentation index and reading order.
+* [docs/APP_DESIGN_SPEC.md](docs/APP_DESIGN_SPEC.md) — complete application design specification
+  (every feature, route, background job, setting and workflow) with
+  [the 457-claim feature registry](docs/FEATURE_REGISTRY.md) and
+  [the expert consensus log](docs/DESIGN_CONSENSUS_LOG.md).
+* [docs/UI_ENHANCEMENT_SPEC.md](docs/UI_ENHANCEMENT_SPEC.md) and
+  [docs/UI_ENHANCEMENT_SUMMARY.md](docs/UI_ENHANCEMENT_SUMMARY.md) — the v1.1.0 UI design and release
+  summary.
+* [CHANGELOG.md](CHANGELOG.md) — release history.
+* [docs/archive/](docs/archive/README.md) — historical plans and drafts (not authoritative).
+
+---
+
 ## 📄 License
 
 MIT License. See [LICENSE](LICENSE) for details.

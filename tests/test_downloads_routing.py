@@ -448,7 +448,7 @@ def test_manual_process_endpoint_and_ui():
         assert 'id="setting-downloads-dir"' in settings_html
         assert "same drive" in settings_html.lower()
         assert "downloads_dir: document.getElementById('setting-downloads-dir')" in settings_html
-        plan_doc = open(os.path.join(BASE_DIR, "TORBOX_INTEGRATION_PLAN.md"), encoding="utf-8").read()
+        plan_doc = open(os.path.join(BASE_DIR, "docs", "archive", "development", "TORBOX_INTEGRATION_PLAN.md"), encoding="utf-8").read()
         assert "DOWNLOADS_DIR" in plan_doc and "STAGING_DIR" in plan_doc
         assert "import_dir" not in plan_doc, "plan doc still contradicts the routing model"
         print("    [PASSED] manual endpoint tags/moves known series, leaves unknown, UI+plan docs updated.")

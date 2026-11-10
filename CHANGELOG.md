@@ -4,6 +4,22 @@ All notable changes to MangaTrax are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 semantic versioning.
 
+## [Unreleased]
+
+### Changed
+- **Documentation consolidated:** final design/registry/consensus/UI documents now live at the top
+  of `docs/` with an index; modular specification parts moved to `docs/design/parts/`, review
+  evidence to `docs/design/reviews/` and `docs/ui/reviews/`.
+- **Historical material archived:** `PROJECT.md`, `FEATURE_RECOMMENDATIONS.md`, `TEST_INFRA.md`,
+  `TEST_READY.md` and `TORBOX_INTEGRATION_PLAN.md` moved to `docs/archive/development/`; v0.9–v0.11
+  spec drafts to `docs/archive/spec-drafts/`; an immutable v1.0 snapshot is kept in
+  `docs/archive/v1.0/`.
+- **Removed duplicates:** the duplicated `docs/app_design_spec_v1.0/` tree and
+  `docs/ui/UI_ENHANCEMENT_SPEC_v1.0.md` copy (the signed tree is preserved in git tag `v1.1.0`).
+- **`.gitignore` hardened** for local test/sandbox artifacts (`.qa_tmp/`, `.tmp-test/`,
+  `.dsh-tmp/`, `calibre-*/`, live logs, temp files, OS/editor files); development scratch
+  directories and Python caches are cleaned from the working tree.
+
 ## [1.1.0] — 2026-11-08 — First UI update
 
 ### Added
@@ -54,7 +70,7 @@ semantic versioning.
 ### Documentation
 - `docs/APP_DESIGN_SPEC.md` v1.0 — complete application design specification with
   `docs/FEATURE_REGISTRY.md` (457 unanimously agreed claims) and archived copy under
-  `docs/app_design_spec_v1.0/`.
+  `docs/archive/v1.0/`.
 - `docs/UI_ENHANCEMENT_SPEC.md` v1.0 and `docs/ui/DESIGN_VALIDATION_LOG.md` — 5/5 expert design
   sign-off after three validation rounds, plus QA passes 1–3.
 - `docs/UI_ENHANCEMENT_SUMMARY.md` — user-facing summary of this release.

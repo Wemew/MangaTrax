@@ -3,7 +3,7 @@
 **Objective:** all five experts agree on **all features and all workings** of MangaTrax before the
 finalized spec is saved and UI work begins.
 **Final artefacts:** `docs/APP_DESIGN_SPEC.md` (v1.0, 793 KB) + `docs/FEATURE_REGISTRY.md`
-(457 claims) + archive `docs/app_design_spec_v1.0/`.
+(457 claims) + archive `docs/archive/v1.0/`.
 **Rule:** a round closes only when every expert returns `AGREE` with zero blocking disagreements.
 
 ## Round 1 — v0.9 (445 claims, 5 independent reviews)
@@ -17,7 +17,7 @@ finalized spec is saved and UI work begins.
 | expert-ui | DL + OPS + registry + Part 0 | DISAGREE | 6 claim blockers (OPS-061/067/087; UI-011/099/101) + 5 Part 0 corrections |
 
 **Resolution:** 38 claims reworded, 12 new claims added (445 → 457), Part 0 rewritten, prose defects
-fixed. Record: `docs/spec/CORRECTIONS_ROUND1.md`; evidence: `docs/spec/reviews/round1_*.md`. The full
+fixed. Record: `docs/design/CORRECTIONS_ROUND1.md`; evidence: `docs/design/reviews/round1_*.md`. The full
 feedback set from every reviewer was distributed to the whole panel for round 2.
 
 ## Round 2 — v0.10 (457 claims)
