@@ -29,6 +29,7 @@ from app.downloader.torbox import TorboxDownloader
 from app.tagger import cbz_tagger, series_audit
 from app.tagger import pipeline as downloads_pipeline
 from app.tagger.cbz_tagger import has_comicinfo
+from app.metadata.anilist import parse_anilist_id
 from app.metadata.mangaupdates import MangaUpdatesService
 from app.parser import (
     clean_series_for_matching,
@@ -1927,6 +1928,7 @@ async def api_calibre_sync():
     payload["task_id"] = task["id"]
     payload["task"] = task
     payload.setdefault("status", "success")
+    _invalidate_calibre_snapshot()
     return JSONResponse(payload)
 
 @app.get("/api/calibre/status")
@@ -2852,15 +2854,41 @@ async def api_tagger_manual_tag(payload: Dict[str, Any]):
 
 # --- CBZ <Series> audit / explicit repair (the old rename-bug data repair) ---
 
+_CALIBRE_SNAPSHOT_TTL = 10.0
+_calibre_snapshot_lock = threading.Lock()
+_calibre_snapshot_cache: Optional[list] = None
+_calibre_snapshot_cached_at = 0.0
+
+
+def _invalidate_calibre_snapshot() -> None:
+    """Drop the memoised Calibre series list after a series-identity mutation."""
+    global _calibre_snapshot_cache, _calibre_snapshot_cached_at
+    with _calibre_snapshot_lock:
+        _calibre_snapshot_cache = None
+        _calibre_snapshot_cached_at = 0.0
+
+
 def _calibre_series_snapshot() -> Optional[list]:
-    """Live Calibre series list when the library is reachable (else ``None``)."""
-    try:
-        scanner = CalibreMangaScanner(db.get_setting("calibre_path", CALIBRE_DIR))
-        if scanner.is_available():
-            return scanner.get_all_series()
-    except Exception as exc:  # pragma: no cover - audit falls back to synced rows
-        logger.debug("Calibre snapshot unavailable for the CBZ audit: %s", exc)
-    return None
+    """Live Calibre series list when the library is reachable (else ``None``).
+
+    Memoised for 10s under a single-flight lock: every picker keystroke used to
+    rescan the whole Calibre library, and a burst of re-binds shared nothing.
+    Mutating endpoints call ``_invalidate_calibre_snapshot()``.
+    """
+    global _calibre_snapshot_cache, _calibre_snapshot_cached_at
+    with _calibre_snapshot_lock:
+        now = time.monotonic()
+        if _calibre_snapshot_cache is not None and (now - _calibre_snapshot_cached_at) < _CALIBRE_SNAPSHOT_TTL:
+            return _calibre_snapshot_cache
+        try:
+            scanner = CalibreMangaScanner(db.get_setting("calibre_path", CALIBRE_DIR))
+            if scanner.is_available():
+                _calibre_snapshot_cache = scanner.get_all_series()
+                _calibre_snapshot_cached_at = time.monotonic()
+                return _calibre_snapshot_cache
+        except Exception as exc:  # pragma: no cover - audit falls back to synced rows
+            logger.debug("Calibre snapshot unavailable for the CBZ audit: %s", exc)
+        return None
 
 
 def _run_staging_cbz_audit() -> Dict[str, Any]:
@@ -3844,6 +3872,7 @@ async def api_release_different_series(release_id: int, payload: Dict[str, Any])
         raise HTTPException(status_code=404, detail="Release not found")
     body = payload or {}
     detach = body.get("detach") is True
+    remember = body.get("remember") is True
     new_title = str(body.get("new_series_title") or "").strip()
     calibre_series = None
     if detach:
@@ -3907,11 +3936,27 @@ async def api_release_different_series(release_id: int, payload: Dict[str, Any])
         db._invalidate_grouped_cache()
     except Exception:
         pass
+    _invalidate_calibre_snapshot()
+    alias_saved = None
+    if remember and not detach:
+        source_name = str(release.get("series_name") or "").strip()
+        if source_name and normalize_text(source_name) != normalize_text(target):
+            target_calibre_id = None
+            if calibre_series:
+                target_calibre_id = int(calibre_series.get("series_id") or calibre_series.get("id") or 0) or None
+            try:
+                alias_saved = await asyncio.to_thread(
+                    db.add_series_alias_override,
+                    source_name, target, target_calibre_id,
+                    actor=auth_module.get_current_actor(),
+                )
+            except Exception as exc:
+                logger.warning("Could not remember the release re-bind alias: %s", exc)
     try:
         db.log_activity(
             "RELEASE_REKEYED_DIFFERENT_SERIES",
             f"Re-keyed release #{release_id} from '{release.get('series_name')}' to '{target}'",
-            json.dumps({"detach": detach, "status": status, "no_alias": True}),
+            json.dumps({"detach": detach, "status": status, "no_alias": alias_saved is None}),
         )
     except Exception:
         pass
@@ -3919,6 +3964,7 @@ async def api_release_different_series(release_id: int, payload: Dict[str, Any])
     return JSONResponse({
         "status": "success", "release_id": release_id, "series_name": target,
         "missing_volumes": missing, "release_status": status,
+        "alias_saved": alias_saved is not None,
         "download_state": release_download_state(updated), "release": updated,
     })
 
@@ -3956,6 +4002,7 @@ async def api_match_series_to_calibre(series_id: int, payload: Dict[str, Any]):
         db._invalidate_grouped_cache()
     except Exception:
         pass
+    _invalidate_calibre_snapshot()
     return JSONResponse(result)
 
 
@@ -4007,7 +4054,127 @@ async def api_series_link_repair(payload: Optional[Dict[str, Any]] = None):
         db._invalidate_grouped_cache()
     except Exception:
         pass
+    _invalidate_calibre_snapshot()
     return JSONResponse({"status": "success", "dry_run": False, "linked": results, "count": len(results)})
+
+
+@app.get("/api/series/{series_id}/management")
+async def api_series_management(series_id: int):
+    """Series row + releases, synonyms and AniList titles for the Manage panel."""
+    payload = await asyncio.to_thread(db.get_series_management, series_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Tracked series not found")
+    return JSONResponse({"status": "success", **payload})
+
+
+@app.post("/api/series/{series_id}/identity")
+async def api_update_series_identity(series_id: int, payload: Optional[Dict[str, Any]] = None):
+    """Edits the cosmetic display title and/or the AniList pin lock."""
+    body = payload or {}
+    display_title = body.get("display_title")
+    if display_title is not None and not isinstance(display_title, str):
+        raise HTTPException(status_code=400, detail="display_title must be a string")
+    anilist_locked = body.get("anilist_locked")
+    if anilist_locked is not None:
+        anilist_locked = bool(anilist_locked)
+    try:
+        updated = await asyncio.to_thread(
+            db.update_series_display_identity,
+            series_id,
+            display_title=display_title,
+            clear_anilist=body.get("clear_anilist") is True,
+            anilist_locked=anilist_locked,
+            actor=auth_module.get_current_actor(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="Tracked series not found")
+    return JSONResponse({"status": "success", "series": updated})
+
+
+@app.post("/api/series/{series_id}/anilist-map")
+async def api_pin_series_anilist(series_id: int, payload: Optional[Dict[str, Any]] = None):
+    """Pins one series to an exact AniList entry (id/URL) or a chosen search hit."""
+    body = payload or {}
+    if await asyncio.to_thread(db.get_series_by_id, series_id) is None:
+        raise HTTPException(status_code=404, detail="Tracked series not found")
+    ref = body.get("anilist_id", body.get("anilist_url"))
+    anilist_id = parse_anilist_id(ref)
+    meta: Optional[Dict[str, Any]] = None
+    if anilist_id is not None:
+        meta = await asyncio.to_thread(scheduler.anilist.resolve_by_anilist_id, anilist_id, True)
+    else:
+        query = str(body.get("query") or "").strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="anilist_id, anilist_url or query is required")
+        meta = await asyncio.to_thread(scheduler.anilist.resolve_manga_series, query, True)
+        anilist_id = parse_anilist_id((meta or {}).get("anilist_id"))
+    if not meta or anilist_id is None:
+        raise HTTPException(status_code=404, detail="No AniList entry found for that reference")
+    updated = await asyncio.to_thread(
+        db.set_series_anilist_mapping, series_id, anilist_id, meta,
+        actor=auth_module.get_current_actor(),
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Tracked series not found")
+    return JSONResponse({
+        "status": "success",
+        "series": updated,
+        "anilist_id": anilist_id,
+        "canonical_title": str(meta.get("canonical_title") or ""),
+        "romaji_title": str(meta.get("romaji_title") or ""),
+    })
+
+
+@app.post("/api/series/{series_id}/synonyms/spin-out")
+async def api_spin_out_series_synonym(series_id: int, payload: Optional[Dict[str, Any]] = None):
+    """Splits one synonym into its own tracked series (aliases retargeted)."""
+    body = payload or {}
+    alias_id = body.get("alias_id")
+    if alias_id is not None:
+        try:
+            alias_id = int(alias_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="alias_id must be an integer")
+    try:
+        result = await asyncio.to_thread(
+            db.spin_out_series_synonym,
+            series_id,
+            source_name=body.get("source_name"),
+            new_name=body.get("new_name"),
+            alias_id=alias_id,
+            move_matching_releases=body.get("move_matching_releases", True) is not False,
+            actor=auth_module.get_current_actor(),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
+
+
+@app.post("/api/series/{series_id}/aliases/{alias_id}/retarget")
+async def api_retarget_series_alias(
+    series_id: int, alias_id: int, payload: Optional[Dict[str, Any]] = None,
+):
+    """Points one synonym mapping at another tracked/Calibre series."""
+    body = payload or {}
+    calibre_series_id = body.get("calibre_series_id")
+    try:
+        result = await asyncio.to_thread(
+            db.retarget_series_alias,
+            series_id, alias_id,
+            target_name=body.get("target_name"),
+            calibre_series_id=calibre_series_id,
+            move_matching_releases=body.get("move_matching_releases") is True,
+            actor=auth_module.get_current_actor(),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(result)
 
 
 def _start_backfill_task(series_name: str, max_pages: int) -> tuple:

@@ -56,6 +56,41 @@ from app.notifier.webhook import NotificationService
 
 logger = logging.getLogger("mangatrax.scheduler")
 
+#: Hard wall-clock budget for one attribution audit request. The audit is a read-only
+#: diagnostic: it must answer the UI (and any reverse proxy) instead of scanning an
+#: unbounded release table until the proxy turns the response into an HTML error page.
+ATTRIBUTION_TIME_BUDGET_SECONDS = 8.0
+
+#: Tokens that, when they are the ONLY thing following the stored series name in a
+#: release title, cannot change the attribution (volume/format noise). Anything else
+#: (e.g. "short story collection", a spin-off suffix) forces the parser path.
+_ATTRIBUTION_SUFFIX_NOISE_TOKENS = frozenset({
+    "vol", "volume", "vols", "v", "book", "books", "part", "parts",
+    "epub", "pdf", "mobi", "azw3", "azw", "fb2", "txt", "html",
+    "complete", "completed", "series", "edition", "digital", "official",
+    "retail", "rip", "batch", "pack", "box", "set", "omnibus", "all", "the", "a", "of",
+})
+
+
+def _attribution_title_noise_only(title_norm: str, stored_norm: str) -> bool:
+    """True when the stored spelling is present and only volume/format noise remains.
+
+    Cheap fast path: a title that is just ``<stored series> Vol N`` / format tags
+    cannot parse to a different series, so the parser + identity resolver are skipped.
+    """
+    if not title_norm or not stored_norm or stored_norm not in title_norm:
+        return False
+    remainder = title_norm.replace(stored_norm, " ", 1)
+    for token in remainder.split():
+        if token.isdigit() or token in _ATTRIBUTION_SUFFIX_NOISE_TOKENS:
+            continue
+        alpha = token.rstrip("0123456789")
+        if alpha and alpha != token and alpha in _ATTRIBUTION_SUFFIX_NOISE_TOKENS:
+            continue  # v03 / vol1 / book2
+        return False
+    return True
+
+
 # --- Marker-less chapter guard (context-aware, NOT a blind regex) -------------
 #
 # A release titled "Chainsaw Man 180" carries no "v"/"vol" marker, so the pure
@@ -125,6 +160,11 @@ class MangaScheduler:
         self._feed_check_lock = threading.Lock()
         self._feed_check_state_lock = threading.Lock()
         self._staging_volume_cache: Optional[tuple] = None
+        # qBittorrent file-priority pass: (release_id, torrent_hash, wanted tuple)
+        # signatures already resolved. Torrent metadata can take a few seconds to
+        # arrive, so the 30 s pass retries until it can map files, then never
+        # re-calls filePrio (or re-logs the same decision) for that wanted set.
+        self._selective_filter_done: set = set()
         self._feed_check_state: Dict[str, Any] = {
             "running": False,
             "started_at": None,
@@ -647,12 +687,31 @@ class MangaScheduler:
 
         # Metadata is resolved up-front (and cached) exactly as before: it still
         # drives covers / volume counts / display, it just never drives the key.
+        # A pinned series resolves its STORED AniList id: automatic title search
+        # must never replace a manual mapping with a fuzzy match.
         if meta is None:
+            pinned = None
             try:
-                meta = self.anilist.resolve_manga_series(raw)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.debug("Metadata lookup failed for '%s': %s", raw, exc)
+                series_row = self.db.get_series_by_name(raw)
+            except Exception:  # pragma: no cover - defensive
+                series_row = None
+            if series_row and series_row.get("anilist_locked"):
+                pinned = series_row.get("anilist_id")
+            if pinned:
+                try:
+                    meta = self.anilist.resolve_by_anilist_id(pinned) or {}
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("Pinned AniList lookup failed for '%s' (id %s): %s", raw, pinned, exc)
+                    meta = {}
+            elif series_row and series_row.get("anilist_locked"):
+                # Locked without an id: never fall back to a title search.
                 meta = {}
+            else:
+                try:
+                    meta = self.anilist.resolve_manga_series(raw)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("Metadata lookup failed for '%s': %s", raw, exc)
+                    meta = {}
         meta = meta or {}
         variants = self._name_variants(raw)
         meta, aliases, anilist_id = self._identity_entry_aliases(raw, variants, meta)
@@ -691,7 +750,16 @@ class MangaScheduler:
 
         def _make(stable: str, source: str) -> Dict[str, Any]:
             stable = (stable or "").strip() or raw
-            display = display_title_from_meta(stable, meta if authoritative else None) or stable
+            explicit_display = ""
+            try:
+                explicit_display = self.db.get_series_display_override(stable)
+            except Exception:  # pragma: no cover - display must never break matching
+                explicit_display = ""
+            display = (
+                explicit_display
+                or display_title_from_meta(stable, meta if authoritative else None)
+                or stable
+            )
             alt_names: List[str] = []
             seen = {normalize_text(stable)}
             for value in list(aliases) + ([canonical] if canonical else []) + ([romaji] if romaji else []):
@@ -836,6 +904,10 @@ class MangaScheduler:
         """
         matcher = self._series_refresh_matcher()
         alias_index = self.db.get_authoritative_alias_index()
+        started = time.monotonic()
+        deadline = started + ATTRIBUTION_TIME_BUDGET_SECONDS
+        resolution_cache: Dict[str, Dict[str, Any]] = {}
+        truncated = False
         tracked: Dict[str, str] = {}
         for row in self.db.get_all_series() or []:
             name = str(row.get("name") or "").strip()
@@ -851,6 +923,9 @@ class MangaScheduler:
             ).fetchall()
         total_rows = len(rows)
         for index, row in enumerate(rows, 1):
+            if time.monotonic() >= deadline:
+                truncated = True
+                break
             if progress:
                 progress(index - 1, total_rows, f"Auditing release #{row['id']}")
             current = str(row["series_name"] or "").strip()
@@ -858,6 +933,10 @@ class MangaScheduler:
             if not current_norm or current_norm not in tracked:
                 continue
             title = str(row["title"] or "").strip()
+            # Cheap fast path: the title only appends volume/format noise to the
+            # stored spelling, so parsing cannot reveal a different attribution.
+            if _attribution_title_noise_only(normalize_text(title), current_norm):
+                continue
             try:
                 parsed = extract_manga_bundle_and_volumes(title)
                 parsed_series = str(parsed.get("series_name") or "").strip()
@@ -870,11 +949,15 @@ class MangaScheduler:
             claims = alias_index.get(parsed_norm) or set()
             if current_norm in {normalize_text(claim) for claim in claims}:
                 continue
-            try:
-                identity = self.resolve_series_identity(parsed_series, matcher=matcher)
-            except Exception as exc:  # pragma: no cover - audit must never crash
-                logger.debug("Attribution audit identity lookup failed for %r: %s", parsed_series, exc)
-                continue
+            if parsed_norm in resolution_cache:
+                identity = resolution_cache[parsed_norm]
+            else:
+                try:
+                    identity = self.resolve_series_identity(parsed_series, matcher=matcher)
+                except Exception as exc:  # pragma: no cover - audit must never crash
+                    logger.debug("Attribution audit identity lookup failed for %r: %s", parsed_series, exc)
+                    continue
+                resolution_cache[parsed_norm] = identity
             suggested = str(identity.get("stable_name") or "").strip() or parsed_series
             suggested_norm = normalize_text(suggested)
             if not suggested_norm or suggested_norm == current_norm:
@@ -899,13 +982,19 @@ class MangaScheduler:
                 ),
             })
         if progress:
-            progress(total_rows, total_rows, "Attribution audit complete")
+            message = "Attribution audit complete" if not truncated else (
+                f"Attribution audit hit its {ATTRIBUTION_TIME_BUDGET_SECONDS:g}s budget — results are partial"
+            )
+            progress(total_rows, total_rows, message)
         return {
             "status": "success",
+            "truncated": truncated,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
             "summary": {
                 "scanned": len(rows),
                 "repairable": sum(1 for item in records if item["safe_to_repair"]),
                 "ambiguous": sum(1 for item in records if not item["safe_to_repair"]),
+                "truncated": truncated,
             },
             "files": records,
         }
@@ -4922,7 +5011,9 @@ class MangaScheduler:
         with self.db.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, title, series_name, torrent_hash, download_url, volumes_json AS volumes, missing_vols_json AS missing_volumes, is_bundle
+                SELECT id, title, series_name, torrent_hash, download_url,
+                       volumes_json AS volumes, missing_vols_json AS missing_volumes,
+                       download_wanted_json AS download_wanted, is_bundle
                 FROM releases
                 WHERE download_status = 'DOWNLOADING' AND is_bundle = 1
                   AND (downloader IS NULL OR downloader != 'torbox');
@@ -4940,30 +5031,44 @@ class MangaScheduler:
             if not h:
                 continue
 
-            missing = r.get("missing_volumes")
-            if isinstance(missing, str):
-                import json
-                try:
-                    missing = json.loads(missing)
-                except Exception:
-                    missing = []
-            if not missing or not isinstance(missing, list):
+            def _vols(raw):
+                if isinstance(raw, str):
+                    try:
+                        raw = json.loads(raw)
+                    except Exception:
+                        return []
+                if not isinstance(raw, list):
+                    return []
+                clean = []
+                for value in raw:
+                    try:
+                        clean.append(round(float(value), 2))
+                    except (TypeError, ValueError):
+                        continue
+                return sorted(set(clean))
+
+            # The set chosen at submit time is authoritative; missing_vols is a
+            # recomputable fallback for rows submitted before it was persisted.
+            wanted = _vols(r.get("download_wanted")) or _vols(r.get("missing_volumes"))
+            if not wanted:
                 continue
 
-            vols = r.get("volumes")
-            if isinstance(vols, str):
-                import json
-                try:
-                    vols = json.loads(vols)
-                except Exception:
-                    vols = []
+            vols = _vols(r.get("volumes"))
 
             # Only need filtering if we already own some volumes in this bundle
-            if vols and len(missing) >= len(vols):
+            if vols and len(wanted) >= len(vols):
                 continue
 
-            res = qbit.apply_selective_volume_download(h, [float(v) for v in missing])
-            if res.get("status") == "filtered":
+            signature = (int(r["id"]), str(h), tuple(wanted))
+            if signature in self._selective_filter_done:
+                continue
+
+            res = qbit.apply_selective_volume_download(h, wanted)
+            status = str(res.get("status") or "")
+            if status == "pending_metadata":
+                # Metadata is not loaded yet; retry on the next pass.
+                continue
+            if status == "filtered":
                 filtered_count += 1
                 skipped_vols = res.get("skipped_volumes", [])
                 self._log_activity(
@@ -4971,6 +5076,13 @@ class MangaScheduler:
                     f"Optimized torrent for '{r['title']}': downloading {len(res.get('kept_volumes', []))} missing volumes; skipped {len(skipped_vols)} volumes already in Calibre ({skipped_vols}).",
                     f"Torrent Hash: {h[:10]}..."
                 )
+                self._selective_filter_done.add(signature)
+            elif status in ("all_owned", "single_archive", "disabled"):
+                # A single archive cannot be split and a disabled engine will not
+                # change on retry: stop asking for this signature.
+                self._selective_filter_done.add(signature)
+                if status == "disabled":
+                    break
         return filtered_count
 
     def expand_unresolved_complete_releases(

@@ -6,6 +6,37 @@ semantic versioning.
 
 ## [Unreleased]
 
+### Added
+- **Per-series management panel** (Series → Manage): view and edit the cosmetic display title,
+  pin/clear an exact AniList entry (`anilist_id` + `anilist_locked`), list the series' releases,
+  split a registered synonym into its own tracked series (mapping retargeted, optional re-key of
+  matching releases) and retarget a synonym to another tracked/Calibre series.
+  New routes: `GET /api/series/{id}/management`, `POST /api/series/{id}/identity`,
+  `POST /api/series/{id}/anilist-map`, `POST /api/series/{id}/synonyms/spin-out`,
+  `POST /api/series/{id}/aliases/{alias_id}/retarget`.
+- **Exact AniList pinning:** `parse_anilist_id` accepts an id or an AniList URL, an exact
+  `Media(id:)` lookup replaces fuzzy title search for pinned series, and a pinned series always
+  resolves through its stored id — automatic enrichment can never overwrite a manual mapping.
+  Clearing a mapping also drops its cached metadata row and locks the series.
+- **Remember a re-bind mapping:** the per-release “Different series” modal gained
+  “Remember this mapping for future releases” (opt-in alias from the old title to the chosen
+  series; off by default, so a one-off move stays one-off).
+- **Searchable manual series matches** in Settings (250 ms debounce, explicit no-match state).
+
+### Changed
+- **Series pickers are debounced and stale-cancelling:** the release re-bind picker waits 500 ms
+  and aborts the previous request (the Calibre match picker 250 ms); an identical already-rendered
+  query is not refetched.
+- **Calibre series snapshot is memoised for 10 s** (single-flight) and invalidated after any
+  series-identity mutation, instead of rescanning the whole library per keystroke.
+- **Attribution audit is budgeted:** a volume/format-only title suffix skips the parser, identity
+  resolution is memoised per parsed spelling, and the audit stops at an 8 s budget, returning
+  `truncated` / `elapsed_ms` so the UI can show partial results instead of timing out.
+- **Selective qBittorrent filtering uses the persisted wanted set** and records one signature per
+  resolved torrent: the 30 s pass retries only unloaded metadata and never re-calls file priorities
+  or re-logs the same decision.
+- **Themed thin scrollbars** (`custom-scrollbar`) on long internal panes.
+
 ### Changed
 - **Visual identity — “Sumi Ink & Hanko”:** neutral Sumi Carbon surfaces replace the blue-slate
   palette, Space Grotesk / Plus Jakarta Sans / JetBrains Mono are loaded for display, UI and

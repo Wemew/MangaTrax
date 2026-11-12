@@ -584,8 +584,8 @@ async function blacklistSeries(name) {
             <button type="button" onclick="closeSeriesCalibreMatch()" class="text-slate-400 hover:text-white text-lg leading-none" aria-label="Close">&times;</button>
         </div>
         <p class="text-[11px] text-slate-400">Links this tracked series to the chosen Calibre series, merges duplicate trackers and re-keys releases to the Calibre name. Alias mappings are preserved.</p>
-        <input type="text" id="series-calibre-match-search" oninput="searchSeriesCalibreMatch()" placeholder="Search Calibre series..." class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
-        <div id="series-calibre-match-list" class="max-h-64 overflow-y-auto divide-y divide-slate-800/60 rounded-xl border border-slate-800" aria-live="polite"></div>
+        <input type="text" id="series-calibre-match-search" oninput="queueSeriesCalibreSearch()" placeholder="Search Calibre series..." class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+        <div id="series-calibre-match-list" class="custom-scrollbar max-h-64 overflow-y-auto divide-y divide-slate-800/60 rounded-xl border border-slate-800" aria-live="polite"></div>
         <div id="series-calibre-match-error" class="hidden text-[11px] text-rose-300"></div>
         <div class="flex items-center justify-end gap-2 pt-1">
             <button type="button" onclick="closeSeriesCalibreMatch()" class="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs font-semibold text-slate-200">Cancel</button>
@@ -598,6 +598,9 @@ let _seriesCalibreMatch = null;
 let _seriesCalibreTarget = null;
 let _seriesCalibreButton = null;
 let _seriesCalibreItems = [];
+let _seriesCalibreTimer = null;
+let _seriesCalibreController = null;
+let _seriesCalibreSeq = 0;
 function seriesCalibreEsc(value) {
     const div = document.createElement('div');
     div.textContent = value == null ? '' : String(value);
@@ -607,6 +610,8 @@ function openSeriesCalibreMatch(seriesId, name, button) {
     _seriesCalibreMatch = { id: seriesId, name: name || '' };
     _seriesCalibreTarget = null;
     _seriesCalibreButton = button || null;
+    _seriesCalibreSeq += 1;
+    if (_seriesCalibreController) { try { _seriesCalibreController.abort(); } catch (e) {} _seriesCalibreController = null; }
     const modal = document.getElementById('series-calibre-match-modal');
     if (!modal) return;
     document.getElementById('series-calibre-match-title').textContent = `Match '${name || ''}' to Calibre series`;
@@ -618,22 +623,40 @@ function openSeriesCalibreMatch(seriesId, name, button) {
     searchSeriesCalibreMatch();
 }
 function closeSeriesCalibreMatch() {
+    _seriesCalibreSeq += 1;
+    if (_seriesCalibreTimer) { clearTimeout(_seriesCalibreTimer); _seriesCalibreTimer = null; }
+    if (_seriesCalibreController) { try { _seriesCalibreController.abort(); } catch (e) {} _seriesCalibreController = null; }
     const modal = document.getElementById('series-calibre-match-modal');
     if (modal) { modal.classList.add('hidden'); modal.classList.remove('flex'); }
+}
+// 250ms after the last keystroke; an older in-flight response can never overwrite
+// a newer query because the previous request is aborted and sequence-checked.
+function queueSeriesCalibreSearch() {
+    if (_seriesCalibreTimer) clearTimeout(_seriesCalibreTimer);
+    _seriesCalibreTimer = setTimeout(function () { _seriesCalibreTimer = null; searchSeriesCalibreMatch(); }, 250);
 }
 async function searchSeriesCalibreMatch() {
     const list = document.getElementById('series-calibre-match-list');
     const search = (document.getElementById('series-calibre-match-search') || {}).value || '';
+    if (_seriesCalibreController) { try { _seriesCalibreController.abort(); } catch (e) {} }
+    const controller = new AbortController();
+    _seriesCalibreController = controller;
+    const seq = ++_seriesCalibreSeq;
     try {
-        const res = await fetch('/api/calibre/series?search=' + encodeURIComponent(search));
+        const res = await fetch('/api/calibre/series?search=' + encodeURIComponent(search), { signal: controller.signal });
         const data = await res.json();
+        if (seq !== _seriesCalibreSeq) return;
         _seriesCalibreItems = data.series || [];
         _seriesCalibreTarget = _seriesCalibreItems.length ? (_seriesCalibreItems[0].id || _seriesCalibreItems[0].series_id) : null;
         list.innerHTML = _seriesCalibreItems.length ? _seriesCalibreItems.map(function (item) {
             const id = item.id || item.series_id;
             return `<button type="button" onclick="selectSeriesCalibreMatch(${JSON.stringify(id)})" class="w-full text-left px-3 py-2 hover:bg-slate-800/60"><span class="block text-xs font-semibold text-white">${seriesCalibreEsc(item.name || item.series_name)}</span><span class="block text-[10px] text-slate-400">${item.book_count || 0} book(s)</span></button>`;
         }).join('') : '<p class="p-4 text-center text-slate-400 text-[11px]">No Calibre series found.</p>';
-    } catch (err) { list.innerHTML = '<p class="p-4 text-center text-rose-300 text-[11px]">Could not load Calibre series.</p>'; }
+    } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        if (seq !== _seriesCalibreSeq) return;
+        list.innerHTML = '<p class="p-4 text-center text-rose-300 text-[11px]">Could not load Calibre series.</p>';
+    }
 }
 function selectSeriesCalibreMatch(id) { _seriesCalibreTarget = id; }
 async function submitSeriesCalibreMatch() {
@@ -658,6 +681,236 @@ async function submitSeriesCalibreMatch() {
         }
     } catch (err) { errorEl.textContent = 'Error: ' + err; errorEl.classList.remove('hidden'); }
     finally { submit.disabled = false; }
+}
+</script>
+
+<div id="series-manage-modal" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="series-manage-title">
+    <div class="bg-darkcard border border-slate-700 rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90dvh] overflow-y-auto custom-scrollbar p-5 space-y-4">
+        <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+                <h3 id="series-manage-title" class="text-sm font-bold text-white">Manage series</h3>
+                <p id="series-manage-subtitle" class="text-[11px] text-slate-400"></p>
+            </div>
+            <button type="button" onclick="closeSeriesManage()" class="text-slate-400 hover:text-white text-lg leading-none" aria-label="Close">&times;</button>
+        </div>
+        <div id="series-manage-body" class="space-y-4 text-[11px] text-slate-300">
+            <p class="py-6 text-center text-slate-400">Loading…</p>
+        </div>
+    </div>
+</div>
+<script>
+let _manageSeriesId = null;
+
+function _manageEsc(value) {
+    const div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+}
+
+function openSeriesManage(seriesId, name) {
+    _manageSeriesId = seriesId;
+    const modal = document.getElementById('series-manage-modal');
+    if (!modal) return;
+    document.getElementById('series-manage-title').textContent = 'Manage: ' + (name || '');
+    document.getElementById('series-manage-subtitle').textContent = 'Identity, synonyms and releases';
+    document.getElementById('series-manage-body').innerHTML = '<p class="py-6 text-center text-slate-400">Loading…</p>';
+    modal.classList.remove('hidden'); modal.classList.add('flex');
+    loadSeriesManage();
+}
+
+function closeSeriesManage() {
+    const modal = document.getElementById('series-manage-modal');
+    if (modal) { modal.classList.add('hidden'); modal.classList.remove('flex'); }
+    _manageSeriesId = null;
+}
+
+async function loadSeriesManage() {
+    if (_manageSeriesId == null) return;
+    const body = document.getElementById('series-manage-body');
+    try {
+        const res = await fetch(`/api/series/${_manageSeriesId}/management`);
+        const data = await res.json();
+        if (!res.ok) { body.innerHTML = `<p class="py-6 text-center text-rose-300">${_manageEsc(data.detail || 'Could not load series')}</p>`; return; }
+        renderSeriesManage(data);
+    } catch (err) {
+        body.innerHTML = `<p class="py-6 text-center text-rose-300">Could not load series: ${_manageEsc(String(err))}</p>`;
+    }
+}
+
+function renderSeriesManage(data) {
+    const series = data.series || {};
+    const aliases = data.aliases || [];
+    const releases = data.releases || [];
+    const titles = data.anilist_titles || [];
+    const body = document.getElementById('series-manage-body');
+    document.getElementById('series-manage-title').textContent = 'Manage: ' + (series.name || '');
+    const pinState = series.anilist_locked
+        ? `<span class="px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300">pinned${series.anilist_id ? ' · #' + _manageEsc(String(series.anilist_id)) : ''}</span>`
+        : '<span class="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400">auto (title search)</span>';
+    const tracked = (data.tracked_series || []).filter(function (item) {
+        return Number(item.id) !== Number(series.id);
+    });
+    const aliasRows = aliases.length ? aliases.map(function (alias) {
+        const options = tracked.map(function (item) {
+            const label = item.display_title && item.display_title !== item.name
+                ? `${item.display_title} (${item.name})`
+                : item.name;
+            return `<option value="${_manageEsc(item.name)}">${_manageEsc(label)}</option>`;
+        }).join('');
+        return `<div class="py-2 border-b border-slate-800/60 space-y-1.5" data-alias-id="${Number(alias.id)}" data-alias-source="${_manageEsc(alias.source_series || '')}">
+            <div class="flex items-center justify-between gap-2">
+                <span class="font-mono text-slate-300 break-all">${_manageEsc(alias.source_series)} <span class="text-slate-500">→</span> ${_manageEsc(alias.target_name)}</span>
+                <button type="button" onclick="spinOutSynonymFromButton(this)" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-brand-300 shrink-0" title="Create a new tracked series from this synonym">Split out</button>
+            </div>
+            <div class="flex items-center gap-1.5">
+                <label class="sr-only" for="alias-target-${Number(alias.id)}">Retarget '${_manageEsc(alias.source_series || '')}' to another tracked series</label>
+                <select id="alias-target-${Number(alias.id)}" data-alias-target class="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white" ${tracked.length ? '' : 'disabled'}>
+                    ${options || '<option value="">No other tracked series</option>'}
+                </select>
+                <button type="button" onclick="retargetSynonymFromButton(this)" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 shrink-0" title="Point this synonym at the selected tracked series" ${tracked.length ? '' : 'disabled'}>Retarget</button>
+            </div>
+        </div>`;
+    }).join('') : '<p class="py-2 text-slate-400">No synonyms registered for this series.</p>';
+    const releaseRows = releases.length ? releases.slice(0, 60).map(function (rel) {
+        const vols = Array.isArray(rel.volumes_json) ? rel.volumes_json : [];
+        const volLabel = vols.length ? 'Vol ' + vols.map(function (v) { return Number(v); }).join(', ') : '';
+        return `<tr class="border-b border-slate-800/60">
+            <td class="py-1.5 pr-2 font-mono text-slate-500">#${Number(rel.id)}</td>
+            <td class="py-1.5 pr-2 text-slate-200 break-all">${_manageEsc(rel.title || '')}</td>
+            <td class="py-1.5 pr-2 font-mono text-slate-400">${_manageEsc(volLabel)}</td>
+            <td class="py-1.5 pr-2 text-slate-300">${_manageEsc(rel.status || '')}</td>
+            <td class="py-1.5 text-slate-400">${_manageEsc(rel.download_status || '')}</td>
+        </tr>`;
+    }).join('') : '<tr><td colspan="5" class="py-2 text-center text-slate-400">No releases registered for this series.</td></tr>';
+
+    body.innerHTML = `
+        <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-3 space-y-2">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+                <span class="font-semibold text-white">Identity</span>
+                <span>AniList: ${pinState}</span>
+            </div>
+            <label class="block text-slate-400" for="manage-display-title">Display title (cosmetic; the matching key stays "${_manageEsc(series.name || '')}")</label>
+            <div class="flex flex-wrap items-center gap-2">
+                <input id="manage-display-title" type="text" value="${_manageEsc(series.display_title || '')}" placeholder="${_manageEsc(series.name || '')}" class="flex-1 min-w-[12rem] bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                <button type="button" onclick="saveSeriesIdentity()" class="px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold">Save title</button>
+                <button type="button" onclick="clearSeriesAniList()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/40 border border-slate-700 text-rose-300 text-xs font-semibold" title="Remove the stored AniList entry and lock automatic enrichment">Clear AniList</button>
+            </div>
+            <div class="flex flex-wrap items-center gap-2 pt-1">
+                <input id="manage-anilist-ref" type="text" placeholder="AniList URL or id…" class="flex-1 min-w-[12rem] bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                <button type="button" onclick="pinSeriesAniList()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold">Pin mapping</button>
+                <button type="button" onclick="pinSeriesAniList(true)" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold" title="Search AniList by the tracked series name and pin the top entry">Search by name</button>
+            </div>
+            ${titles.length ? `<p class="text-slate-500 break-all">AniList titles: ${titles.map(_manageEsc).join(' · ')}</p>` : ''}
+        </div>
+        <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-3 space-y-1.5">
+            <div class="flex items-center justify-between gap-2">
+                <span class="font-semibold text-white">Synonyms (${aliases.length})</span>
+                <span class="text-slate-500">Split out makes a new series · Retarget re-points this synonym</span>
+            </div>
+            ${aliasRows}
+        </div>
+        <div class="bg-slate-950/60 border border-slate-800 rounded-xl p-3 space-y-1.5">
+            <div class="flex items-center justify-between gap-2">
+                <span class="font-semibold text-white">Releases (${data.counts ? data.counts.releases : releases.length})</span>
+                <span class="text-slate-500">Read-only</span>
+            </div>
+            <div class="max-h-64 overflow-y-auto custom-scrollbar">
+                <table class="w-full text-left text-[11px]"><tbody>${releaseRows}</tbody></table>
+            </div>
+        </div>`;
+}
+
+async function saveSeriesIdentity() {
+    if (_manageSeriesId == null) return;
+    const value = (document.getElementById('manage-display-title') || {}).value || '';
+    try {
+        const res = await fetch(`/api/series/${_manageSeriesId}/identity`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ display_title: value }),
+        });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Could not save identity', 'error'); return; }
+        showToast('Display title saved', 'success');
+        await loadSeriesManage();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
+}
+
+async function clearSeriesAniList() {
+    if (_manageSeriesId == null) return;
+    if (!confirm('Clear the stored AniList entry and lock automatic enrichment for this series?')) return;
+    try {
+        const res = await fetch(`/api/series/${_manageSeriesId}/identity`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clear_anilist: true }),
+        });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Could not clear AniList', 'error'); return; }
+        showToast('AniList mapping cleared and locked', 'success');
+        await loadSeriesManage();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
+}
+
+async function pinSeriesAniList(byName) {
+    if (_manageSeriesId == null) return;
+    const ref = (document.getElementById('manage-anilist-ref') || {}).value || '';
+    const payload = byName
+        ? { query: (document.getElementById('series-manage-title').textContent || '').replace(/^Manage:\s*/, '') }
+        : { anilist_id: ref };
+    if (!byName && !String(ref).trim()) { showToast('Paste an AniList URL or id first', 'error'); return; }
+    try {
+        const res = await fetch(`/api/series/${_manageSeriesId}/anilist-map`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'No AniList entry found', 'error'); return; }
+        showToast(`Pinned AniList #${data.anilist_id}${data.canonical_title ? ' · ' + data.canonical_title : ''}`, 'success');
+        await loadSeriesManage();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
+}
+
+function spinOutSynonymFromButton(button) {
+    const row = button ? button.closest('[data-alias-id]') : null;
+    if (!row) return;
+    spinOutSynonym(Number(row.getAttribute('data-alias-id')), row.getAttribute('data-alias-source') || '');
+}
+
+async function retargetSynonymFromButton(button) {
+    if (_manageSeriesId == null) return;
+    const row = button ? button.closest('[data-alias-id]') : null;
+    if (!row) return;
+    const select = row.querySelector('[data-alias-target]');
+    const target = select ? select.value : '';
+    if (!target) { showToast('No other tracked series available to retarget to', 'error'); return; }
+    const source = row.getAttribute('data-alias-source') || 'this synonym';
+    const move = confirm(`Point "${source}" at "${target}"?\n\nOK = also re-key releases whose title matches the synonym\nCancel = change the mapping only`);
+    try {
+        const res = await fetch(`/api/series/${_manageSeriesId}/aliases/${row.getAttribute('data-alias-id')}/retarget`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target_name: target, move_matching_releases: move }),
+        });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Retarget failed', 'error'); return; }
+        showToast(`'${data.source_name}' now maps to '${data.target_name}'${move ? ' (' + (data.moved_releases || []).length + ' release(s) moved)' : ''}`, 'success');
+        await loadSeriesManage();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
+}
+
+async function spinOutSynonym(aliasId, sourceName) {
+    if (_manageSeriesId == null) return;
+    const newName = prompt('New tracked series title for this synonym:', sourceName || '');
+    if (!newName) return;
+    const move = confirm('Also re-key releases whose title matches this synonym?\n\nOK = move matching releases\nCancel = create the series and mapping only');
+    try {
+        const res = await fetch(`/api/series/${_manageSeriesId}/synonyms/spin-out`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ alias_id: aliasId, new_name: newName, move_matching_releases: move }),
+        });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Split failed', 'error'); return; }
+        showToast(`Created '${data.new_series_name}' (${(data.moved_releases || []).length} release(s) moved)`, 'success');
+        await loadSeriesManage();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
 }
 </script>
 {% endblock %}

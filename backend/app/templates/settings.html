@@ -775,11 +775,12 @@
                     <i data-lucide="link" class="w-4 h-4 text-amber-400"></i>
                     Manual series matches (alias overrides)
                 </h4>
-                <p class="text-[11px] text-slate-400">Persistent mappings created from “Manual match” on the Downloads page. Remove one to restore the previous Awaiting-Calibre behaviour.</p>
+                <p class="text-[11px] text-slate-400">Persistent mappings created from “Manual match” on the Downloads page or “Remember this mapping” on a release re-bind. Remove one to restore the previous Awaiting-Calibre behaviour.</p>
+                <input type="text" id="series-alias-search" autocomplete="off" oninput="filterSeriesAliases()" placeholder="Search old title or new series..." aria-label="Filter manual series matches" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-1.5 text-[11px] text-white focus:outline-none focus:border-brand-500">
                 <div id="series-alias-list" class="divide-y divide-slate-800/60 text-[11px]">
                     {% if series_alias_overrides %}
                     {% for alias in series_alias_overrides %}
-                    <div class="py-1.5 flex items-center justify-between gap-2" data-alias-id="{{ alias.id }}">
+                    <div class="py-1.5 flex items-center justify-between gap-2" data-alias-id="{{ alias.id }}" data-alias-search="{{ ((alias.source_series or '') ~ ' ' ~ (alias.target_name or ''))|lower|e }}">
                         <span class="font-mono text-slate-300 break-all">{{ alias.source_series }} <span class="text-slate-400">→</span> {{ alias.target_name }}</span>
                         <button type="button" onclick="removeSeriesAlias({{ alias.id }})" aria-label="Remove alias override {{ alias.source_series|e }}" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-rose-900/40 border border-slate-700 text-rose-300 text-[10px] font-bold">Remove</button>
                     </div>
@@ -788,6 +789,7 @@
                     <p id="series-alias-empty" class="py-2 text-slate-400">No manual matches yet.</p>
                     {% endif %}
                 </div>
+                <p id="series-alias-no-match" class="hidden py-2 text-slate-400">No mappings match that search.</p>
             </div>
 
             <!-- Series attribution audit & repair (task-40) -->
@@ -1358,9 +1360,35 @@ async function removeSeriesAlias(id) {
         const list = document.getElementById('series-alias-list');
         if (list && !list.querySelector('[data-alias-id]')) {
             list.innerHTML = '<p id="series-alias-empty" class="py-2 text-slate-400">No manual matches yet.</p>';
+            const search = document.getElementById('series-alias-search');
+            if (search) search.value = '';
         }
+        filterSeriesAliases();
         showToast('Manual series match removed', 'success');
     } catch (err) { showToast('Error: ' + err, 'error'); }
+}
+
+// 250ms-debounced client-side filter over the loaded alias mappings, matching the
+// old title, the new series and the fallback search blob alike.
+let _seriesAliasFilterTimer = null;
+function filterSeriesAliases() {
+    if (_seriesAliasFilterTimer) clearTimeout(_seriesAliasFilterTimer);
+    _seriesAliasFilterTimer = setTimeout(function () {
+        _seriesAliasFilterTimer = null;
+        const list = document.getElementById('series-alias-list');
+        if (!list) return;
+        const query = String((document.getElementById('series-alias-search') || {}).value || '').trim().toLowerCase();
+        const rows = Array.from(list.querySelectorAll('[data-alias-id]'));
+        let visible = 0;
+        rows.forEach(function (row) {
+            const haystack = row.getAttribute('data-alias-search') || row.textContent.toLowerCase();
+            const matches = !query || haystack.indexOf(query) !== -1;
+            row.classList.toggle('hidden', !matches);
+            if (matches) visible += 1;
+        });
+        const noMatch = document.getElementById('series-alias-no-match');
+        if (noMatch) noMatch.classList.toggle('hidden', !(query && rows.length && visible === 0));
+    }, 250);
 }
 
 async function auditSeriesAttribution() {
@@ -1375,8 +1403,11 @@ async function auditSeriesAttribution() {
         _attributionSelected = new Set();
         _updateAttributionButton();
         const summary = data.summary || {};
+        const truncation = data.truncated
+            ? ` · partial results (hit the time budget after ${Math.round((data.elapsed_ms || 0))} ms)`
+            : '';
         document.getElementById('attribution-summary').textContent =
-            `Scanned ${summary.scanned || 0}: ${summary.repairable || 0} repairable, ${summary.ambiguous || 0} ambiguous.`;
+            `Scanned ${summary.scanned || 0}: ${summary.repairable || 0} repairable, ${summary.ambiguous || 0} ambiguous${truncation}.`;
         tbody.innerHTML = _attributionData.length
             ? _attributionData.map(function (row, index) {
                 return `<tr>

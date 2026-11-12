@@ -86,6 +86,52 @@ class AniListRateLimiter:
 
 _RATE_LIMITER = AniListRateLimiter(max_requests=90, time_window=60.0)
 
+ANILIST_ID_QUERY = """
+query ($id: Int) {
+  Media(id: $id, type: MANGA) {
+    id
+    format
+    title { english romaji native }
+    coverImage { large extraLarge }
+    volumes
+    chapters
+    status
+    description
+    genres
+    tags { id name rank isMediaSpoiler isGeneralSpoiler category }
+    synonyms
+  }
+}
+"""
+
+_ANILIST_ID_URL_RE = re.compile(r"anilist\.co/(?:manga|anime)/(\d+)", re.IGNORECASE)
+
+
+def parse_anilist_id(value) -> Optional[int]:
+    """Extracts an AniList media id from an int, an AniList URL, or a bare id string.
+
+    Returns ``None`` for anything that is not one unambiguous positive id, so a
+    mis-pasted link or a title can never be stored as a mapping.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    text = str(value).strip()
+    if not text:
+        return None
+    match = _ANILIST_ID_URL_RE.search(text)
+    if match:
+        text = match.group(1)
+    elif "/" in text or " " in text:
+        return None
+    try:
+        parsed = int(text)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 ANILIST_QUERY = """
 query ($search: String) {
   Media(search: $search, type: MANGA, format_in: [MANGA, ONE_SHOT]) {
@@ -157,7 +203,24 @@ class AniListMetadataService:
         ``db.cache_manga_metadata`` for the search term, romaji and canonical titles.
         If the forced lookup fails or yields nothing authoritative, the existing cached
         values are returned instead of a blank fallback so callers can keep them.
+
+        A series with a manual AniList pin (``anilist_locked`` + ``anilist_id``) always
+        resolves through that exact id; a fuzzy title search must never overwrite a
+        deliberate mapping, whichever caller asks for metadata.
         """
+        if self.db is not None:
+            try:
+                pinned_row = self.db.get_series_by_name(raw_series_name)
+            except Exception:  # pragma: no cover - lookup is best effort
+                pinned_row = None
+            if pinned_row and pinned_row.get("anilist_locked"):
+                if pinned_row.get("anilist_id"):
+                    pinned_meta = self.resolve_by_anilist_id(pinned_row.get("anilist_id"), force_refresh)
+                    if pinned_meta:
+                        return pinned_meta
+                # Locked without an id means "do not enrich by title": a cleared
+                # mapping must not be silently re-discovered by a fuzzy search.
+                return {}
         cleaned_term = clean_query_term(raw_series_name)
         if not cleaned_term:
             return {
@@ -282,6 +345,77 @@ class AniListMetadataService:
                 return canonical
         return raw_series_name
 
+    @staticmethod
+    def _parse_media(media: Dict[str, Any], search_term: str) -> Optional[Dict[str, Any]]:
+        """Normalises one AniList Media node into the provider result shape."""
+        if not isinstance(media, dict):
+            return None
+        format_val = (media.get("format") or "").upper()
+        if format_val in ("NOVEL",):
+            return None
+
+        titles = media.get("title", {})
+        english = (titles.get("english") or "").strip()
+        romaji = (titles.get("romaji") or "").strip()
+        synonyms = media.get("synonyms") or []
+
+        # Prefer English title over romaji
+        canonical = english
+        if not canonical and synonyms:
+            for syn in synonyms:
+                s_clean = syn.strip()
+                if s_clean and s_clean.lower() != romaji.lower() and re.search(r"\b(?:the|a|an|of|in|to|is|for|my|no|war|voice|shape|world|demon|titan|hero)\b", s_clean, re.IGNORECASE):
+                    canonical = s_clean
+                    break
+        if not canonical:
+            canonical = romaji or search_term
+
+        raw_tags = media.get("tags") or []
+        parsed_tags = []
+        for tag in raw_tags:
+            if not isinstance(tag, dict):
+                continue
+            name = str(tag.get("name") or "").strip()
+            if not name:
+                continue
+            parsed_tags.append({
+                "name": name,
+                "rank": int(tag.get("rank") or 0),
+                "category": str(tag.get("category") or ""),
+                "spoiler": bool(tag.get("isMediaSpoiler") or tag.get("isGeneralSpoiler")),
+            })
+        # AniList prevalence: rank descending; Python sort is stable so ties
+        # keep provider order.
+        parsed_tags.sort(key=lambda item: -item["rank"])
+        genres = [str(item).strip() for item in (media.get("genres") or []) if str(item).strip()]
+        display_tags = [item["name"] for item in parsed_tags if not item["spoiler"]]
+        cover = media.get("coverImage", {}).get("extraLarge") or media.get("coverImage", {}).get("large") or ""
+        volumes = media.get("volumes")
+        status = media.get("status") or "UNKNOWN"
+        desc = media.get("description") or ""
+        clean_desc = re.sub(r"<[^>]+>", "", desc).strip()
+
+        return {
+            "canonical_title": canonical,
+            "english_title": canonical,
+            "romaji_title": romaji,
+            # Identity evidence (task-40): the exact AniList media id and its
+            # own aliases, plus which search term produced this entry.  A
+            # parent-prefix match must never lend its aliases/identity to a
+            # spinoff release.
+            "anilist_id": media.get("id"),
+            "synonyms": [str(item).strip() for item in synonyms if str(item or "").strip()],
+            "genres": genres,
+            "tags": parsed_tags,
+            "tags_sorted": display_tags,
+            "matched_term": str(search_term or ""),
+            "cover_url": cover,
+            "total_volumes": volumes,
+            "status": status,
+            "synopsis": clean_desc,
+            "source": "anilist"
+        }
+
     def _fetch_from_anilist(self, search_term: str) -> Optional[Dict[str, Any]]:
         payload = {
             "query": ANILIST_QUERY,
@@ -311,71 +445,7 @@ class AniListMetadataService:
                     if not media:
                         return None
 
-                    format_val = (media.get("format") or "").upper()
-                    if format_val in ("NOVEL",):
-                        return None
-
-                    titles = media.get("title", {})
-                    english = (titles.get("english") or "").strip()
-                    romaji = (titles.get("romaji") or "").strip()
-                    synonyms = media.get("synonyms") or []
-
-                    # Prefer English title over romaji
-                    canonical = english
-                    if not canonical and synonyms:
-                        for syn in synonyms:
-                            s_clean = syn.strip()
-                            if s_clean and s_clean.lower() != romaji.lower() and re.search(r"\b(?:the|a|an|of|in|to|is|for|my|no|war|voice|shape|world|demon|titan|hero)\b", s_clean, re.IGNORECASE):
-                                canonical = s_clean
-                                break
-                    if not canonical:
-                        canonical = romaji or search_term
-
-                    raw_tags = media.get("tags") or []
-                    parsed_tags = []
-                    for tag in raw_tags:
-                        if not isinstance(tag, dict):
-                            continue
-                        name = str(tag.get("name") or "").strip()
-                        if not name:
-                            continue
-                        parsed_tags.append({
-                            "name": name,
-                            "rank": int(tag.get("rank") or 0),
-                            "category": str(tag.get("category") or ""),
-                            "spoiler": bool(tag.get("isMediaSpoiler") or tag.get("isGeneralSpoiler")),
-                        })
-                    # AniList prevalence: rank descending; Python sort is stable so ties
-                    # keep provider order.
-                    parsed_tags.sort(key=lambda item: -item["rank"])
-                    genres = [str(item).strip() for item in (media.get("genres") or []) if str(item).strip()]
-                    display_tags = [item["name"] for item in parsed_tags if not item["spoiler"]]
-                    cover = media.get("coverImage", {}).get("extraLarge") or media.get("coverImage", {}).get("large") or ""
-                    volumes = media.get("volumes")
-                    status = media.get("status") or "UNKNOWN"
-                    desc = media.get("description") or ""
-                    clean_desc = re.sub(r"<[^>]+>", "", desc).strip()
-
-                    return {
-                        "canonical_title": canonical,
-                        "english_title": canonical,
-                        "romaji_title": romaji,
-                        # Identity evidence (task-40): the exact AniList media id and its
-                        # own aliases, plus which search term produced this entry.  A
-                        # parent-prefix match must never lend its aliases/identity to a
-                        # spinoff release.
-                        "anilist_id": media.get("id"),
-                        "synonyms": [str(item).strip() for item in synonyms if str(item or "").strip()],
-                        "genres": genres,
-                        "tags": parsed_tags,
-                        "tags_sorted": display_tags,
-                        "matched_term": str(search_term or ""),
-                        "cover_url": cover,
-                        "total_volumes": volumes,
-                        "status": status,
-                        "synopsis": clean_desc,
-                        "source": "anilist"
-                    }
+                    return self._parse_media(media, search_term)
             except urllib.error.HTTPError as e:
                 if e.code == 429:
                     _RATE_LIMITER.handle_rate_limit_error(e.headers)
@@ -392,3 +462,65 @@ class AniListMetadataService:
                 return None
 
         return None
+
+    def _fetch_by_id(self, anilist_id: int) -> Optional[Dict[str, Any]]:
+        """Exact ``Media(id:)`` lookup: never a fuzzy title search."""
+        payload = {"query": ANILIST_ID_QUERY, "variables": {"id": int(anilist_id)}}
+        data_bytes = json.dumps(payload).encode("utf-8")
+        for attempt in range(2):
+            _RATE_LIMITER.wait_if_needed()
+            req = urllib.request.Request(
+                ANILIST_GRAPHQL_ENDPOINT,
+                data=data_bytes,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "MangaTrax/1.0 (+https://github.com/Wemew/MangaTrax)",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    _RATE_LIMITER.handle_response_headers(resp.headers)
+                    if resp.status != 200:
+                        return None
+                    result = json.loads(resp.read().decode("utf-8"))
+                    return self._parse_media(result.get("data", {}).get("Media"), str(anilist_id))
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    _RATE_LIMITER.handle_rate_limit_error(e.headers)
+                    if attempt == 0:
+                        logger.info("Retrying AniList id %s after 429 rate limit cooldown...", anilist_id)
+                        continue
+                elif e.code != 404:
+                    logger.warning("AniList HTTP Error %s for id %s: %s", e.code, anilist_id, e.reason)
+                return None
+            except Exception as e:
+                logger.debug("AniList id lookup unavailable for %s: %s", anilist_id, e)
+                return None
+        return None
+
+    def resolve_by_anilist_id(self, value, force_refresh: bool = False) -> Optional[Dict[str, Any]]:
+        """Resolves one exact AniList entry from an id or an AniList URL.
+
+        Cached under an ``anilist:<id>`` key so a pinned mapping keeps resolving
+        to that entry even when the series name searches differently.
+        """
+        anilist_id = parse_anilist_id(value)
+        if anilist_id is None:
+            return None
+        cache_key = f"anilist:{anilist_id}"
+        if not force_refresh and self.db is not None:
+            try:
+                cached = self.db.get_cached_manga_metadata(cache_key)
+            except Exception:
+                cached = None
+            if cached:
+                cached.setdefault("anilist_id", anilist_id)
+                return cached
+        fresh = self._fetch_by_id(anilist_id)
+        if fresh and self.db is not None:
+            try:
+                self.db.cache_manga_metadata(cache_key, fresh)
+            except Exception as exc:  # pragma: no cover - cache is best effort
+                logger.debug("Could not cache AniList id %s: %s", anilist_id, exc)
+        return fresh

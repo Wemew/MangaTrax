@@ -710,35 +710,72 @@ document.addEventListener('click', function (event) {
 let _differentRelease = null;
 let _differentTarget = null;
 let _differentButton = null;
+let _differentSearchTimer = null;
+let _differentSearchController = null;
+let _differentSearchSeq = 0;
+let _differentRenderedQuery = null;
 function diffSeriesEsc(value) { const div = document.createElement('div'); div.textContent = value == null ? '' : String(value); return div.innerHTML; }
 function openDifferentSeriesModal(releaseId, seriesName, button) {
     _differentRelease = { id: releaseId, series: seriesName || '' };
     _differentTarget = null;
     _differentButton = button || null;
+    _differentSearchSeq += 1;
+    _differentRenderedQuery = null;
+    if (_differentSearchController) { try { _differentSearchController.abort(); } catch (e) {} _differentSearchController = null; }
     const modal = document.getElementById('different-series-modal');
     if (!modal) return;
     document.getElementById('different-series-title').textContent = `Move release #${releaseId} from '${seriesName || ''}'`;
     document.getElementById('different-series-search').value = '';
     document.getElementById('different-series-new').value = '';
     document.getElementById('different-series-error').classList.add('hidden');
+    const rememberEl = document.getElementById('different-series-remember');
+    if (rememberEl) rememberEl.checked = false;
     document.getElementById('different-series-list').innerHTML = '<p class="p-4 text-center text-slate-400 text-[11px]">Searching Calibre…</p>';
     modal.classList.remove('hidden'); modal.classList.add('flex');
-    searchDifferentSeries();
+    searchDifferentSeries(true);
 }
-function closeDifferentSeriesModal() { const modal = document.getElementById('different-series-modal'); if (modal) { modal.classList.add('hidden'); modal.classList.remove('flex'); } }
-async function searchDifferentSeries() {
+function closeDifferentSeriesModal() {
+    _differentSearchSeq += 1;
+    _differentRenderedQuery = null;
+    if (_differentSearchTimer) { clearTimeout(_differentSearchTimer); _differentSearchTimer = null; }
+    if (_differentSearchController) { try { _differentSearchController.abort(); } catch (e) {} _differentSearchController = null; }
+    const modal = document.getElementById('different-series-modal');
+    if (modal) { modal.classList.add('hidden'); modal.classList.remove('flex'); }
+}
+// 500ms after the last keystroke: the previous in-flight request is aborted and
+// stale responses are dropped, so fast typing never renders an older result set.
+function queueDifferentSeriesSearch() {
+    if (_differentSearchTimer) clearTimeout(_differentSearchTimer);
+    _differentSearchTimer = setTimeout(function () { _differentSearchTimer = null; searchDifferentSeries(false); }, 500);
+}
+async function searchDifferentSeries(force) {
     const list = document.getElementById('different-series-list');
-    const search = (document.getElementById('different-series-search') || {}).value || '';
+    const searchEl = document.getElementById('different-series-search');
+    const search = searchEl ? searchEl.value : '';
+    if (!force && search === _differentRenderedQuery && list && list.dataset.rendered === '1') return;
+    if (_differentSearchController) { try { _differentSearchController.abort(); } catch (e) {} }
+    const controller = new AbortController();
+    _differentSearchController = controller;
+    const seq = ++_differentSearchSeq;
     try {
-        const res = await fetch('/api/calibre/series?search=' + encodeURIComponent(search));
+        const res = await fetch('/api/calibre/series?search=' + encodeURIComponent(search), { signal: controller.signal });
         const data = await res.json();
+        if (seq !== _differentSearchSeq) return;
         const items = data.series || [];
         _differentTarget = items.length ? (items[0].id || items[0].series_id) : null;
         list.innerHTML = items.length ? items.map(function (item) {
             const id = item.id || item.series_id;
             return `<button type="button" onclick="selectDifferentSeries(${JSON.stringify(id)})" class="w-full text-left px-3 py-2 hover:bg-slate-800/60"><span class="block text-xs font-semibold text-white">${diffSeriesEsc(item.name || item.series_name)}</span><span class="block text-[10px] text-slate-400">${item.book_count || 0} book(s)</span></button>`;
         }).join('') : '<p class="p-4 text-center text-slate-400 text-[11px]">No Calibre series found. Create a new title or detach.</p>';
-    } catch (err) { list.innerHTML = '<p class="p-4 text-center text-rose-300 text-[11px]">Could not load Calibre series.</p>'; }
+        list.dataset.rendered = '1';
+        _differentRenderedQuery = search;
+    } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        if (seq !== _differentSearchSeq) return;
+        list.innerHTML = '<p class="p-4 text-center text-rose-300 text-[11px]">Could not load Calibre series.</p>';
+        list.dataset.rendered = '1';
+        _differentRenderedQuery = search;
+    }
 }
 function selectDifferentSeries(id) { _differentTarget = id; }
 async function submitDifferentSeries(detach) {
@@ -749,6 +786,8 @@ async function submitDifferentSeries(detach) {
     else if (newTitle) body.new_series_title = newTitle;
     else if (_differentTarget != null) body.calibre_series_id = _differentTarget;
     else { errorEl.textContent = 'Pick a Calibre series, create a title, or detach.'; errorEl.classList.remove('hidden'); return; }
+    const rememberEl = document.getElementById('different-series-remember');
+    if (!detach && rememberEl && rememberEl.checked) body.remember = true;
     const submit = document.getElementById('different-series-submit');
     if (submit) submit.disabled = true;
     try {
@@ -758,7 +797,10 @@ async function submitDifferentSeries(detach) {
         const data = await res.json();
         if (!res.ok) { errorEl.textContent = data.detail || 'Move failed'; errorEl.classList.remove('hidden'); return; }
         closeDifferentSeriesModal();
-        if (window.showToast) showToast(`Release moved to '${data.series_name}' (${data.release_status})`, 'success');
+        if (window.showToast) {
+            const suffix = data.alias_saved ? ' · mapping remembered for future releases' : '';
+            showToast(`Release moved to '${data.series_name}' (${data.release_status})${suffix}`, 'success');
+        }
         if (_differentButton) {
             const row = _differentButton.closest('.series-release-row');
             if (row) row.remove();
@@ -776,9 +818,16 @@ async function submitDifferentSeries(detach) {
             <h3 id="different-series-title" class="text-sm font-bold text-white">Move release to a different series</h3>
             <button type="button" onclick="closeDifferentSeriesModal()" class="text-slate-400 hover:text-white text-lg leading-none" aria-label="Close">&times;</button>
         </div>
-        <p class="text-[11px] text-slate-400">Only this release is re-keyed (siblings are untouched); no global alias is registered. Choose an existing Calibre series, create a new title, or detach it to Discovery.</p>
-        <input type="text" id="different-series-search" oninput="searchDifferentSeries()" placeholder="Search Calibre series..." class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
-        <div id="different-series-list" class="max-h-52 overflow-y-auto divide-y divide-slate-800/60 rounded-xl border border-slate-800" aria-live="polite"></div>
+        <p class="text-[11px] text-slate-400">Only this release is re-keyed (siblings are untouched). Choose an existing Calibre series, create a new title, or detach it to Discovery.</p>
+        <input type="text" id="different-series-search" oninput="queueDifferentSeriesSearch()" placeholder="Search Calibre series..." class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
+        <div id="different-series-list" class="custom-scrollbar max-h-52 overflow-y-auto divide-y divide-slate-800/60 rounded-xl border border-slate-800" aria-live="polite"></div>
+        <label class="flex items-start gap-2.5 cursor-pointer pt-1">
+            <input type="checkbox" id="different-series-remember" class="mt-0.5 w-4 h-4 rounded bg-slate-950 border-slate-700 text-brand-600 focus:ring-0">
+            <span class="min-w-0">
+                <span class="block text-xs font-semibold text-slate-200">Remember this mapping for future releases</span>
+                <span class="block text-[11px] text-slate-500">By default only this release is re-bound. Check to save an alias from the old title to the selected series, so future releases follow it too.</span>
+            </span>
+        </label>
         <div>
             <label for="different-series-new" class="block text-[11px] font-semibold text-slate-300 mb-1">or create a new series title</label>
             <input type="text" id="different-series-new" placeholder="New series title" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">

@@ -2335,7 +2335,7 @@ document.addEventListener('DOMContentLoaded', function () {
         </div>
         <p class="text-[11px] text-slate-400">Pick a Calibre series or create a new tracked series. The mapping is remembered so future releases match automatically.</p>
         <input type="text" id="manual-match-search" oninput="searchManualMatch()" placeholder="Search Calibre series..." aria-label="Search Calibre series" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
-        <div id="manual-match-list" class="max-h-64 overflow-y-auto divide-y divide-slate-800/60 rounded-xl border border-slate-800" aria-live="polite"></div>
+        <div id="manual-match-list" class="custom-scrollbar max-h-64 overflow-y-auto divide-y divide-slate-800/60 rounded-xl border border-slate-800" aria-live="polite"></div>
         <div>
             <label for="manual-match-new-title" class="block text-[11px] font-semibold text-slate-300 mb-1">or create a new series title (not in Calibre)</label>
             <input type="text" id="manual-match-new-title" placeholder="e.g. [Oshi No Ko]" aria-label="New series title" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
@@ -2356,7 +2356,7 @@ document.addEventListener('DOMContentLoaded', function () {
         </div>
         <p class="text-[11px] text-slate-400">Retags every file in this staging group to the chosen series, registers the alias and links the tracked Calibre series. Volume/other ComicInfo fields are preserved.</p>
         <input type="text" id="staging-series-match-search" oninput="searchStagingSeriesMatch()" placeholder="Search Calibre series..." class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">
-        <div id="staging-series-match-list" class="max-h-56 overflow-y-auto divide-y divide-slate-800/60 rounded-xl border border-slate-800" aria-live="polite"></div>
+        <div id="staging-series-match-list" class="custom-scrollbar max-h-56 overflow-y-auto divide-y divide-slate-800/60 rounded-xl border border-slate-800" aria-live="polite"></div>
         <div>
             <label for="staging-series-match-new" class="block text-[11px] font-semibold text-slate-300 mb-1">or create a new series title</label>
             <input type="text" id="staging-series-match-new" placeholder="New series title" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white">

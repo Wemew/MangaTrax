@@ -12,7 +12,7 @@
             {% endif %}
             <div class="min-w-0">
                 <div class="font-bold text-slate-100 text-sm flex items-center gap-1.5 break-words-anywhere">
-                    <span>{{ s.name }}</span>
+                    <span{% if s.display_title and s.display_title != s.name %} title="Matching key: {{ s.name|e }}"{% endif %}>{{ s.display_title or s.name }}</span>
                     {% if s.website_url %}
                     <a href="{{ s.website_url|safe_url }}" target="_blank" rel="noopener noreferrer" title="Open series webpage" class="text-slate-500 hover:text-brand-400 transition-colors inline-flex">
                         <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
@@ -32,7 +32,7 @@
         {% if s.calibre_series_id %}
         {{ s.book_count }}
         {% else %}
-        <button type="button" onclick="openSeriesCalibreMatch({{ s.id }}, {{ s.name|tojson }}, this)" aria-label="Not linked — Match {{ s.name|escape }} to Calibre series" title="Match this tracked series to an existing Calibre series" class="mt-btn min-h-[44px] px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20 text-[11px] font-semibold">Not linked — Match to Calibre series</button>
+        <button type="button" onclick='openSeriesCalibreMatch({{ s.id }}, {{ s.name|tojson }}, this)' aria-label="Not linked — Match {{ s.name|escape }} to Calibre series" title="Match this tracked series to an existing Calibre series" class="mt-btn min-h-[44px] px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20 text-[11px] font-semibold">Not linked — Match to Calibre series</button>
         {% endif %}
     </td>
     <td data-label="Latest" class="py-3 px-4 text-center font-semibold text-brand-400">
@@ -55,7 +55,11 @@
     </td>
     <td data-label="Actions" class="py-3 px-4 text-right mt-cell-actions">
         <div class="flex items-center justify-end gap-2">
-            <button type="button" onclick="backfillSeries({{ s.id }}, '{{ s.name|escape }}', this)" aria-label="Refresh metadata and Calibre info, then backfill {{ s.name|escape }}" title="Refresh metadata + Calibre info, then search Nyaa for all past releases and missing volumes of {{ s.name }}" class="min-h-[36px] px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-brand-600/30 text-slate-300 hover:text-brand-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+            <button type="button" onclick='openSeriesManage({{ s.id }}, {{ s.name|tojson }})' aria-label="Manage {{ s.name|escape }}: identity, synonyms and releases" title="Manage series identity, synonyms and releases" class="min-h-[36px] px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
+                <i data-lucide="settings-2" class="w-3.5 h-3.5 text-brand-400"></i>
+                <span>Manage</span>
+            </button>
+            <button type="button" onclick="backfillSeries({{ s.id }}, '{{ s.name|escape }}', this)" aria-label="Refresh metadata and Calibre info, then backfill {{ s.name|escape }}" title="Refresh metadata + Calibre info, then search Nyaa for all past releases and missing volumes of {{ s.name|escape }}" class="min-h-[36px] px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-brand-600/30 text-slate-300 hover:text-brand-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
                 <i data-lucide="history" class="w-3.5 h-3.5 text-brand-400"></i>
                 <span>Backfill</span>
             </button>
