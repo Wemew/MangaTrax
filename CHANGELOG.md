@@ -7,6 +7,30 @@ semantic versioning.
 ## [Unreleased]
 
 ### Added
+- **Multi-user mode through OIDC groups:** each login owns its tracked series, monitor state,
+  blacklist, prioritized groups and a private `staging/<user>/` folder (flat inside), while the Calibre
+  library, cached metadata and the "in staging" indicator stay shared. Admin comes from
+  `MANGATRAX_ADMIN_GROUPS` matching the IdP `groups` claim (`MANGATRAX_OIDC_GROUPS_CLAIM`, default
+  `groups`); losing the group demotes on next login without deleting data.
+- **Admin panel (`/admin`, admin-only):** per-user policy toggles (auto-download, approval bypass),
+  group/role view, and the pending-request queue. Sensitive surfaces (Settings, Logs, debug,
+  maintenance/destructive actions, manual tagging, downloader configuration, feeds) return 403
+  for non-admins; normal users keep their Library/Releases/Discovery/Downloads views.
+- **Request approval:** a normal user's download request enters `release_requests` as `pending`
+  (HTTP 202) and becomes `REQUESTED` only when an admin approves; a per-user admin toggle bypasses
+  the queue. Approved requests remember their requester so downloads route to that user's
+  downloads/staging folder.
+- **Per-user data tables:** `user_series`, `user_blacklist`, `user_prioritized_groups`,
+  `release_requests` plus `users.groups_json/is_admin/auto_download/bypass_approval/staging_folder`
+  and `releases.request_user_id` — all additive with defaults.
+- **Staging isolation in the pipeline:** the shared routing pass and the flatten maintenance step skip
+  registered per-user folders, so completed downloads under `downloads/<user>/` can only move into
+  that user's `staging/<user>/` folder — never into the shared staging root.
+- **Legacy inheritance:** the first admin login claims the existing single-user catalog, blacklist and
+  prioritized groups exactly once (`multi_user_legacy_claimed_by`); new accounts start empty.
+- **First run:** single-operator deployments (`none`/`basic`) keep their current behavior and are
+  implicitly admin; OIDC mode gains a user menu that reflects the signed-in identity.
+
 - **Per-series management panel** (Series → Manage): view and edit the cosmetic display title,
   pin/clear an exact AniList entry (`anilist_id` + `anilist_locked`), list the series' releases,
   split a registered synonym into its own tracked series (mapping retargeted, optional re-key of

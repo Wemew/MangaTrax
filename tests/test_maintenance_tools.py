@@ -263,8 +263,8 @@ def test_route_wiring_source_guard():
     print("--> Testing route wiring source guards...")
     with open(MAIN_SOURCE, encoding="utf-8") as handle:
         source = handle.read()
-    maintenance_start = source.index('@app.post("/api/maintenance/clear")')
-    debug_start = source.index('@app.post("/api/debug/action")')
+    maintenance_start = source.index('@app.post("/api/maintenance/clear", dependencies=[Depends(require_admin)])')
+    debug_start = source.index('@app.post("/api/debug/action", dependencies=[Depends(require_admin)])')
     assert maintenance_start < debug_start, "maintenance route should precede the debug route"
 
     maintenance_segment = source[maintenance_start:debug_start]

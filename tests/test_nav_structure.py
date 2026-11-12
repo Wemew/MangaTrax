@@ -27,11 +27,12 @@ ROUTES = {
     "downloads": "/downloads",
     "logs": "/logs",
     "settings": "/settings",
+    "admin": "/admin",
 }
 
 ACTIVE_PAGES = [
     "dashboard", "series", "releases", "prioritized",
-    "discovery", "feeds", "downloads", "logs", "settings",
+    "discovery", "feeds", "downloads", "logs", "settings", "admin",
 ]
 
 
@@ -98,7 +99,7 @@ def test_dropdown_contract():
         "library": ["/series", "/releases", "/prioritized"],
         "discover": ["/discovery", "/feeds"],
         "downloads": ["/downloads", "/downloads/manual-pickup"],
-        "system": ["/logs", "/settings"],
+        "system": ["/admin", "/logs", "/settings"],
     }
     for name, hrefs in expected_children.items():
         item = _nav_item(nav, name)
@@ -121,7 +122,7 @@ def test_dropdown_contract():
     # Parent items highlight when any child page is active.
     assert "active_page in ['series', 'releases', 'prioritized']" in nav
     assert "active_page in ['discovery', 'feeds']" in nav
-    assert "active_page in ['logs', 'settings']" in nav
+    assert "active_page in ['logs', 'settings', 'admin']" in nav
     assert "request.url.path.startswith('/downloads/manual-pickup')" in nav
     # Amber treatment for Prioritized is preserved.
     assert "text-amber-400" in _nav_item(nav, "library")
@@ -322,7 +323,7 @@ def test_active_page_values():
     parents = {
         "Library": ["series", "releases", "prioritized"],
         "Discover": ["discovery", "feeds"],
-        "System": ["logs", "settings"],
+        "System": ["logs", "settings", "admin"],
     }
     for parent, children in parents.items():
         assert "active_page in [%s]" % ", ".join("'%s'" % child for child in children) in source, parent

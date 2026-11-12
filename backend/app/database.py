@@ -710,6 +710,18 @@ class MangaDatabase:
                     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # Multi-user roles and per-user policy flags (admin panel controlled).
+            cur.execute("PRAGMA table_info(users);")
+            user_cols = [r["name"] for r in cur.fetchall()]
+            for user_col, user_ddl in (
+                ("groups_json", "TEXT DEFAULT '[]'"),
+                ("is_admin", "INTEGER DEFAULT 0"),
+                ("auto_download", "INTEGER DEFAULT 0"),
+                ("bypass_approval", "INTEGER DEFAULT 0"),
+                ("staging_folder", "TEXT DEFAULT ''"),
+            ):
+                if user_col not in user_cols:
+                    cur.execute(f"ALTER TABLE users ADD COLUMN {user_col} {user_ddl};")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_users_subject ON users(subject);")
 
             # Settings
@@ -897,6 +909,68 @@ class MangaDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_series_alias_overrides_target "
                 "ON series_alias_overrides(target_name);"
             )
+            # Multi-user: per-user membership/monitor state for tracked series.
+            # ``series_tracking`` stays the shared catalog (Calibre rows are global);
+            # a membership row makes a non-Calibre series (or a monitor override on a
+            # shared row) belong to one user.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_series (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    series_id INTEGER NOT NULL,
+                    is_monitored INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, series_id)
+                );
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_user_series_user ON user_series(user_id);"
+            )
+            # Per-user blacklist (the legacy table is the shared fallback).
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_blacklist (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    reason TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, name)
+                );
+            """)
+            # Per-user prioritized release groups.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_prioritized_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    notes TEXT DEFAULT '',
+                    priority INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, name)
+                );
+            """)
+            # Requests awaiting an admin decision (per-user; bypass users never enter).
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS release_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    release_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    decided_at TIMESTAMP,
+                    decided_by TEXT DEFAULT '',
+                    UNIQUE(user_id, release_id)
+                );
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_release_requests_status "
+                "ON release_requests(status);"
+            )
+            # Release rows route downloads to the requesting user's staging folder.
+            cur.execute("PRAGMA table_info(releases);")
+            release_cols = [r["name"] for r in cur.fetchall()]
+            if "request_user_id" not in release_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN request_user_id INTEGER;")
             # task-47: persisted background tasks (reload-safe progress).
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS background_tasks (
@@ -2102,15 +2176,24 @@ class MangaDatabase:
         monitored_only: bool = False,
         limit: Optional[int] = None,
         offset: int = 0,
-        search: Optional[str] = None
+        search: Optional[str] = None,
+        user_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         # One statement: the historical correlated subquery scanned ``releases``
         # once per tracked row. ``cover_latest`` aggregates MAX(id) per
         # normalised series name once, then joins the cover row back.
         where_clauses = []
         params = []
+        monitored_expr = (
+            "COALESCE(us.is_monitored, st.is_monitored)" if user_id is not None
+            else "st.is_monitored"
+        )
+        if user_id is not None:
+            # Shared Calibre rows plus this user's own memberships (the join binds
+            # the user id; no placeholder is needed in the predicate).
+            where_clauses.append("(us.id IS NOT NULL OR st.calibre_series_id IS NOT NULL)")
         if monitored_only:
-            where_clauses.append("st.is_monitored = 1")
+            where_clauses.append(f"{monitored_expr} = 1")
         if search and search.strip():
             clean_s = _like_contains(search.strip())
             where_clauses.append(
@@ -2130,36 +2213,365 @@ class MangaDatabase:
         # serves this shape (measured ~4.8 ms warm at 800 series / 8,000 releases).
         # Noveltrax's aggregate-CTE variant is slower here (~7.8 ms warm) because it
         # scans every release row instead of an indexed LIMIT 1 per series.
-        base_sql = """
+        join_sql = ""
+        join_params: List[Any] = []
+        if user_id is not None:
+            join_sql = "LEFT JOIN user_series us ON us.series_id = st.id AND us.user_id = ?"
+            join_params = [int(user_id)]
+        base_sql = f"""
             SELECT 
                 st.*,
+                {monitored_expr} AS is_monitored,
                 (SELECT r.cover_url FROM releases r WHERE lower(r.series_name) = lower(st.name) AND r.cover_url IS NOT NULL AND r.cover_url != '' ORDER BY r.id DESC LIMIT 1) AS cover_url
             FROM series_tracking st
+            {join_sql}
         """
-        sql = f"{base_sql} {where_str} ORDER BY st.is_monitored DESC, st.name COLLATE NOCASE ASC {limit_str};"
+        sql = (
+            f"{base_sql} {where_str} "
+            f"ORDER BY {monitored_expr} DESC, st.name COLLATE NOCASE ASC {limit_str};"
+        )
+        if join_params:
+            params = join_params + params
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute(sql, tuple(params))
             return [dict(row) for row in cur.fetchall()]
 
-    def count_all_series(self, monitored_only: bool = False, search: Optional[str] = None) -> int:
+    def count_all_series(
+        self,
+        monitored_only: bool = False,
+        search: Optional[str] = None,
+        user_id: Optional[int] = None,
+    ) -> int:
         with self.get_connection() as conn:
             cur = conn.cursor()
             where_clauses = []
             params = []
+            join_sql = ""
+            monitored_expr = (
+                "COALESCE(us.is_monitored, st.is_monitored)" if user_id is not None
+                else "st.is_monitored"
+            )
+            if user_id is not None:
+                join_sql = "LEFT JOIN user_series us ON us.series_id = st.id AND us.user_id = ?"
+                params.append(int(user_id))
+                where_clauses.append("(us.id IS NOT NULL OR st.calibre_series_id IS NOT NULL)")
             if monitored_only:
-                where_clauses.append("is_monitored = 1")
+                where_clauses.append(f"{monitored_expr} = 1")
             if search and search.strip():
                 clean_s = _like_contains(search.strip())
                 where_clauses.append(
-                    "(lower(name) LIKE ? ESCAPE '\\' OR lower(COALESCE(authors, '')) LIKE ? ESCAPE '\\' "
-                    "OR lower(COALESCE(publisher, '')) LIKE ? ESCAPE '\\')"
+                    "(lower(st.name) LIKE ? ESCAPE '\\' OR lower(COALESCE(st.authors, '')) LIKE ? ESCAPE '\\' "
+                    "OR lower(COALESCE(st.publisher, '')) LIKE ? ESCAPE '\\')"
                 )
                 params.extend([clean_s, clean_s, clean_s])
             where_str = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-            cur.execute(f"SELECT COUNT(*) FROM series_tracking {where_str};", tuple(params))
+            cur.execute(
+                f"SELECT COUNT(*) FROM series_tracking st {join_sql} {where_str};", tuple(params)
+            )
             row = cur.fetchone()
             return row[0] if row else 0
+
+    # --- Multi-user membership / per-user policy (additive) ---
+
+    def add_user_series(self, user_id: int, series_id: int, is_monitored: bool = True) -> Dict[str, Any]:
+        """Track one series for one user (idempotent)."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO user_series (user_id, series_id, is_monitored, created_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id, series_id) DO UPDATE SET is_monitored = excluded.is_monitored;
+                """,
+                (int(user_id), int(series_id), 1 if is_monitored else 0),
+            )
+            conn.commit()
+            row = cur.execute(
+                "SELECT * FROM user_series WHERE user_id = ? AND series_id = ?;",
+                (int(user_id), int(series_id)),
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def get_user_series_membership(self, user_id: int, series_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_series WHERE user_id = ? AND series_id = ? LIMIT 1;",
+                (int(user_id), int(series_id)),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_user_series(self, user_id: int) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM user_series WHERE user_id = ? ORDER BY series_id ASC;",
+                (int(user_id),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def is_user_series(self, user_id: int, series_id: int) -> bool:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM user_series WHERE user_id = ? AND series_id = ? LIMIT 1;",
+                (int(user_id), int(series_id)),
+            ).fetchone()
+        return row is not None
+
+    def set_user_series_monitored(self, user_id: int, series_id: int, monitored: bool) -> bool:
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO user_series (user_id, series_id, is_monitored)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, series_id) DO UPDATE SET is_monitored = excluded.is_monitored;
+                """,
+                (int(user_id), int(series_id), 1 if monitored else 0),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def get_user_blacklist(self, user_id: int) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM user_blacklist WHERE user_id = ? ORDER BY name COLLATE NOCASE ASC;",
+                (int(user_id),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_user_blacklist(self, user_id: int, name: str, reason: str = "") -> bool:
+        clean = str(name or "").strip()
+        if not clean:
+            return False
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_blacklist (user_id, name, reason, created_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id, name) DO UPDATE SET reason = excluded.reason;
+                """,
+                (int(user_id), clean, str(reason or "")),
+            )
+            conn.commit()
+        return True
+
+    def remove_user_blacklist(self, user_id: int, blacklist_id: int) -> bool:
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "DELETE FROM user_blacklist WHERE id = ? AND user_id = ?;",
+                (int(blacklist_id), int(user_id)),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def is_user_series_blacklisted(self, user_id: int, name: str) -> bool:
+        clean = str(name or "").strip()
+        if not clean:
+            return False
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM user_blacklist WHERE user_id = ? AND lower(name) = lower(?) LIMIT 1;",
+                (int(user_id), clean),
+            ).fetchone()
+        return row is not None
+
+    def get_user_prioritized_groups(self, user_id: int) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM user_prioritized_groups WHERE user_id = ? "
+                "ORDER BY priority DESC, name COLLATE NOCASE ASC;",
+                (int(user_id),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_user_prioritized_group(
+        self, user_id: int, name: str, notes: str = "", priority: int = 1,
+    ) -> Dict[str, Any]:
+        clean = str(name or "").strip()
+        if not clean:
+            raise ValueError("group name is required")
+        try:
+            clean_priority = max(1, min(int(priority), 100))
+        except (TypeError, ValueError):
+            clean_priority = 1
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO user_prioritized_groups (user_id, name, notes, priority, created_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id, name) DO UPDATE SET
+                    notes = excluded.notes, priority = excluded.priority;
+                """,
+                (int(user_id), clean, str(notes or ""), clean_priority),
+            )
+            conn.commit()
+            row = cur.execute(
+                "SELECT * FROM user_prioritized_groups WHERE user_id = ? AND name = ?;",
+                (int(user_id), clean),
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def remove_user_prioritized_group(self, user_id: int, group_id: int) -> bool:
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "DELETE FROM user_prioritized_groups WHERE id = ? AND user_id = ?;",
+                (int(group_id), int(user_id)),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    # --- Request approvals ---
+
+    def set_release_request_user(self, release_id: int, user_id: Optional[int]) -> None:
+        """Remember whose staging folder an approved download must land in."""
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE releases SET request_user_id = ? WHERE id = ?;",
+                (None if user_id is None else int(user_id), int(release_id)),
+            )
+            conn.commit()
+
+    def get_release_request(self, user_id: int, release_id: int) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM release_requests WHERE user_id = ? AND release_id = ?;",
+                (int(user_id), int(release_id)),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_pending_approvals(self) -> List[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT rr.id, rr.user_id, rr.release_id, rr.created_at,
+                       COALESCE(NULLIF(u.display_name, ''), NULLIF(u.username, ''), u.subject) AS requester,
+                       r.title, r.series_name, r.status AS release_status
+                FROM release_requests rr
+                JOIN releases r ON r.id = rr.release_id
+                LEFT JOIN users u ON u.id = rr.user_id
+                WHERE rr.status = 'pending'
+                ORDER BY rr.created_at ASC, rr.id ASC;
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_pending_approvals(self) -> int:
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM release_requests WHERE status = 'pending';"
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def decide_release_request(
+        self, approval_id: int, decision: str, actor: str = "admin",
+    ) -> Optional[Dict[str, Any]]:
+        """Approve/reject one pending request; approval marks the release requested."""
+        decision_clean = str(decision or "").strip().lower()
+        if decision_clean not in ("approve", "reject"):
+            raise ValueError("decision must be approve or reject")
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            row = cur.execute(
+                "SELECT * FROM release_requests WHERE id = ? AND status = 'pending';",
+                (int(approval_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            request = dict(row)
+            new_status = "approved" if decision_clean == "approve" else "rejected"
+            cur.execute(
+                "UPDATE release_requests SET status = ?, decided_at = CURRENT_TIMESTAMP, decided_by = ? WHERE id = ?;",
+                (new_status, str(actor or "admin"), int(approval_id)),
+            )
+            if decision_clean == "approve":
+                cur.execute(
+                    "UPDATE releases SET status = CASE WHEN status IN "
+                    "('IGNORED', 'BLACKLISTED', 'IN_CALIBRE', 'IN_STAGING') THEN status "
+                    "ELSE 'REQUESTED' END, request_user_id = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ?;",
+                    (int(request["user_id"]), int(request["release_id"])),
+                )
+            conn.commit()
+        return {"id": int(approval_id), "status": new_status, "request": request}
+
+    def create_release_request(
+        self, user_id: int, release_id: int, auto_approve: bool = False, actor: str = "user",
+    ) -> Dict[str, Any]:
+        """Queue (or, for bypass users, immediately grant) a user's download request."""
+        status = "approved" if auto_approve else "pending"
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO release_requests (user_id, release_id, status, created_at, decided_at, decided_by)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP,
+                        CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, ?)
+                ON CONFLICT(user_id, release_id) DO UPDATE SET
+                    status = CASE WHEN release_requests.status IN ('pending', 'rejected')
+                                  THEN excluded.status ELSE release_requests.status END,
+                    decided_at = CASE WHEN release_requests.status = 'rejected'
+                                      THEN excluded.decided_at ELSE release_requests.decided_at END,
+                    decided_by = CASE WHEN release_requests.status = 'rejected'
+                                      THEN excluded.decided_by ELSE release_requests.decided_by END;
+                """,
+                (
+                    int(user_id), int(release_id), status,
+                    1 if auto_approve else 0,
+                    str(actor or "user") if auto_approve else "",
+                ),
+            )
+            if auto_approve:
+                cur.execute(
+                    "UPDATE releases SET status = CASE WHEN status IN "
+                    "('IGNORED', 'BLACKLISTED', 'IN_CALIBRE', 'IN_STAGING') THEN status "
+                    "ELSE 'REQUESTED' END, request_user_id = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ?;",
+                    (int(user_id), int(release_id)),
+                )
+            conn.commit()
+            row = cur.execute(
+                "SELECT * FROM release_requests WHERE user_id = ? AND release_id = ?;",
+                (int(user_id), int(release_id)),
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def claim_legacy_data_for_admin(self, user_id: int) -> Dict[str, int]:
+        """Give the first Admin the existing single-user data (idempotent).
+
+        Copies the legacy series catalog, blacklist and prioritized groups into
+        the per-user tables exactly once (recorded in ``app_settings``).
+        """
+        marker = "multi_user_legacy_claimed_by"
+        claimed = str(self.get_setting(marker, "") or "").strip()
+        if claimed:
+            return {"claimed": 0}
+        counts = {"series": 0, "blacklist": 0, "groups": 0}
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT OR IGNORE INTO user_series (user_id, series_id, is_monitored) "
+                "SELECT ?, id, is_monitored FROM series_tracking;",
+                (int(user_id),),
+            )
+            counts["series"] = max(0, int(cur.rowcount or 0))
+            cur.execute(
+                "INSERT OR IGNORE INTO user_blacklist (user_id, name, reason, created_at) "
+                "SELECT ?, name, reason, created_at FROM series_blacklist;",
+                (int(user_id),),
+            )
+            counts["blacklist"] = max(0, int(cur.rowcount or 0))
+            cur.execute(
+                "INSERT OR IGNORE INTO user_prioritized_groups (user_id, name, notes, priority, created_at) "
+                "SELECT ?, name, notes, priority, created_at FROM prioritized_groups;",
+                (int(user_id),),
+            )
+            counts["groups"] = max(0, int(cur.rowcount or 0))
+            conn.commit()
+        self.set_setting(marker, str(int(user_id)))
+        return counts
 
     def toggle_series_monitored(self, series_id: int) -> bool:
         with self.get_connection() as conn:
@@ -3378,8 +3790,18 @@ class MangaDatabase:
         }
 
     def get_releases(self, status: Optional[str] = None, limit: int = 500, offset: int = 0,
-                     search: Optional[str] = None, sort: str = "updated") -> List[Dict[str, Any]]:
+                     search: Optional[str] = None, sort: str = "updated",
+                     user_id: Optional[int] = None) -> List[Dict[str, Any]]:
         media_guard = tracked_media_clause()
+        blacklist_guard = ""
+        blacklist_params: List[Any] = []
+        if user_id is not None:
+            # Per-user blacklist hides those series only for that user.
+            blacklist_guard = (
+                " AND (series_name IS NULL OR lower(series_name) NOT IN "
+                "(SELECT lower(name) FROM user_blacklist WHERE user_id = ?))"
+            )
+            blacklist_params = [int(user_id)]
         if sort == "post_date":
             order_clause = ("COALESCE(NULLIF(trim(published_at), ''), created_at, updated_at) DESC, "
                             "updated_at DESC, id DESC")
@@ -3408,26 +3830,26 @@ class MangaDatabase:
                     WHERE (is_complete = 1 OR lower(title) LIKE '%complete%')
                       AND status NOT IN ('BLACKLISTED', 'IGNORED')
                       AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
-                      AND {media_guard}{search_clause}
+                      AND {media_guard}{blacklist_guard}{search_clause}
                       AND COALESCE(is_light_novel, 0) = 0
                     ORDER BY {order_clause} LIMIT ? OFFSET ?;
-                """, (*search_params, limit, offset))
+                """, (*blacklist_params, *search_params, limit, offset))
             elif status:
                 cur.execute(
-                    f"SELECT * FROM releases WHERE status = ? AND {media_guard}{search_clause} "
+                    f"SELECT * FROM releases WHERE status = ? AND {media_guard}{blacklist_guard}{search_clause} "
                     f"AND COALESCE(is_light_novel, 0) = 0 ORDER BY {order_clause} LIMIT ? OFFSET ?;",
-                    (status, *search_params, limit, offset),
+                    (status, *blacklist_params, *search_params, limit, offset),
                 )
             else:
                 cur.execute(f"""
                     SELECT * FROM releases 
                     WHERE status NOT IN ('BLACKLISTED', 'IGNORED')
                       AND (series_name IS NULL OR lower(series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
-                      AND {media_guard}{search_clause}
+                      AND {media_guard}{blacklist_guard}{search_clause}
                       AND COALESCE(is_light_novel, 0) = 0
                     ORDER BY {order_clause}
                     LIMIT ? OFFSET ?;
-                """, (*search_params, limit, offset))
+                """, (*blacklist_params, *search_params, limit, offset))
             rows = [dict(r) for r in cur.fetchall()]
 
             cur.execute("SELECT search_term, canonical_title, romaji_title, cover_url, source FROM manga_metadata_cache;")
@@ -3469,10 +3891,19 @@ class MangaDatabase:
                     r["display_series_name"] = s_name
             return rows
 
-    def count_releases(self, status: Optional[str] = None, search: Optional[str] = None) -> int:
+    def count_releases(
+        self, status: Optional[str] = None, search: Optional[str] = None,
+        user_id: Optional[int] = None,
+    ) -> int:
         media_guard = tracked_media_clause()
         clauses = [f"({media_guard})"]
         params: List[Any] = []
+        if user_id is not None:
+            clauses.append(
+                "(series_name IS NULL OR lower(series_name) NOT IN "
+                "(SELECT lower(name) FROM user_blacklist WHERE user_id = ?))"
+            )
+            params.append(int(user_id))
         if status == "COMPLETED":
             clauses.append("(is_complete = 1 OR lower(title) LIKE '%complete%')")
             clauses.append("status NOT IN ('BLACKLISTED', 'IGNORED')")
@@ -3553,8 +3984,19 @@ class MangaDatabase:
             ) if stable else ""
         return rows
 
-    def get_pending_requests(self, limit: int = 1000) -> List[Dict[str, Any]]:
-        return self.get_releases(status="REQUESTED", limit=limit)
+    def get_pending_requests(
+        self, limit: int = 1000, user_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        releases = self.get_releases(status="REQUESTED", limit=limit, user_id=user_id)
+        if user_id is None:
+            return releases
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT release_id FROM release_requests WHERE user_id = ? AND status IN ('pending', 'approved');",
+                (int(user_id),),
+            ).fetchall()
+        requested_ids = {int(row["release_id"]) for row in rows}
+        return [row for row in releases if int(row["id"]) in requested_ids]
 
     def get_release_by_id(self, release_id: int) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:
@@ -3588,7 +4030,8 @@ class MangaDatabase:
         return clauses, params, include
 
     def count_discovery_releases(self, search: Optional[str] = None,
-                                 include_tags=None, exclude_tags=None, tag_match: str = "any") -> int:
+                                 include_tags=None, exclude_tags=None, tag_match: str = "any",
+                                 user_id: Optional[int] = None) -> int:
         """
         Returns total count of unique discovered manga series (Volume 1 or unnumbered standalones)
         which are not in Calibre, not monitored in series_tracking, and not blacklisted.
@@ -3602,6 +4045,14 @@ class MangaDatabase:
                 clean_s = _like_contains(search.strip())
                 search_clause = "AND (lower(r.title) LIKE ? ESCAPE '\\' OR lower(r.series_name) LIKE ? ESCAPE '\\')"
                 params.extend([clean_s, clean_s])
+            blacklist_guard = ""
+            blacklist_params: List[Any] = []
+            if user_id is not None:
+                blacklist_guard = (
+                    " AND (r.series_name IS NULL OR lower(r.series_name) NOT IN "
+                    "(SELECT lower(name) FROM user_blacklist WHERE user_id = ?))"
+                )
+                blacklist_params = [int(user_id)]
             tag_clauses, tag_params, _include = self._discovery_tag_sql(
                 include_tags, exclude_tags, tag_match,
             )
@@ -3626,19 +4077,20 @@ class MangaDatabase:
                       AND r.status NOT IN ('IN_CALIBRE', 'IN_STAGING', 'BLACKLISTED', 'IGNORED')
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_blacklist))
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1))
+                      {blacklist_guard}
                       AND {tracked_media_clause('r')}
                       AND COALESCE(r.is_light_novel, 0) = 0
                       {search_clause}
                 )
                 SELECT count(*) FROM ranked_discovery WHERE rn = 1;
             """
-            cur.execute(query, tuple(params))
+            cur.execute(query, tuple(blacklist_params + params))
             row = cur.fetchone()
             return row[0] if row else 0
 
     def get_discovery_releases(self, limit: int = 24, offset: int = 0, search: Optional[str] = None,
                                include_tags=None, exclude_tags=None, tag_match: str = "any",
-                               sort: str = "newest") -> List[Dict[str, Any]]:
+                               sort: str = "newest", user_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         Returns releases that are Volume 1 or unnumbered (standalone),
         which are NOT currently in Calibre, NOT in series_tracking, and NOT blacklisted.
@@ -3653,6 +4105,14 @@ class MangaDatabase:
                 clean_s = _like_contains(search.strip())
                 search_clause = "AND (lower(r.title) LIKE ? ESCAPE '\\' OR lower(r.series_name) LIKE ? ESCAPE '\\')"
                 params.extend([clean_s, clean_s])
+            blacklist_guard = ""
+            blacklist_params: List[Any] = []
+            if user_id is not None:
+                blacklist_guard = (
+                    " AND (r.series_name IS NULL OR lower(r.series_name) NOT IN "
+                    "(SELECT lower(name) FROM user_blacklist WHERE user_id = ?))"
+                )
+                blacklist_params = [int(user_id)]
             tag_clauses, tag_params, include_norm = self._discovery_tag_sql(
                 include_tags, exclude_tags, tag_match,
             )
@@ -3695,6 +4155,7 @@ class MangaDatabase:
                       AND (r.series_name IS NULL OR lower(r.series_name) NOT IN (SELECT lower(name) FROM series_tracking WHERE is_monitored = 1))
                       AND {tracked_media_clause('r')}
                       AND COALESCE(r.is_light_novel, 0) = 0
+                      {blacklist_guard}
                       {search_clause}
                 )
                 SELECT * FROM ranked_discovery
@@ -3702,7 +4163,9 @@ class MangaDatabase:
                 {order_clause}
                 LIMIT ? OFFSET ?;
             """
-            params = match_params + params + [limit, offset]
+            # SQL text order: match_select placeholders (SELECT list), then
+            # blacklist_guard, then the search/tag clause, then LIMIT/OFFSET.
+            params = match_params + blacklist_params + params + [limit, offset]
             cur.execute(query, tuple(params))
             rows = [dict(row) for row in cur.fetchall()]
 
@@ -3983,6 +4446,8 @@ class MangaDatabase:
         email: str = "",
         display_name: str = "",
         auth_source: str = "",
+        groups: Optional[List[str]] = None,
+        is_admin: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Insert or refresh a known user keyed on the stable ``subject`` claim.
 
@@ -3992,22 +4457,122 @@ class MangaDatabase:
         clean_subject = str(subject or "").strip()
         if not clean_subject:
             raise ValueError("users.subject must not be empty")
+        groups_json = json.dumps([str(item) for item in (groups or [])])
+        admin_value = None if is_admin is None else (1 if is_admin else 0)
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
-                INSERT INTO users (subject, username, email, display_name, auth_source, first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO users (
+                    subject, username, email, display_name, auth_source,
+                    groups_json, is_admin, first_seen, last_seen
+                )
+                VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 0), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(subject) DO UPDATE SET
                     username = CASE WHEN excluded.username != '' THEN excluded.username ELSE users.username END,
                     email = CASE WHEN excluded.email != '' THEN excluded.email ELSE users.email END,
                     display_name = CASE WHEN excluded.display_name != '' THEN excluded.display_name ELSE users.display_name END,
                     auth_source = CASE WHEN excluded.auth_source != '' THEN excluded.auth_source ELSE users.auth_source END,
+                    groups_json = CASE WHEN ? = 1 THEN excluded.groups_json ELSE users.groups_json END,
+                    is_admin = CASE WHEN ? IS NULL THEN users.is_admin ELSE excluded.is_admin END,
                     last_seen = CURRENT_TIMESTAMP;
-            """, (clean_subject, str(username or ""), str(email or ""), str(display_name or ""), str(auth_source or "")))
+            """, (
+                clean_subject, str(username or ""), str(email or ""),
+                str(display_name or ""), str(auth_source or ""),
+                groups_json, admin_value,
+                1 if groups is not None else 0, admin_value,
+            ))
             conn.commit()
             cur.execute("SELECT * FROM users WHERE subject = ?;", (clean_subject,))
             row = cur.fetchone()
             return dict(row) if row else {}
+
+    @staticmethod
+    def _staging_folder_slug(label: str, user_id: int) -> str:
+        import re as _re
+        clean = _re.sub(r"[^a-z0-9._-]+", "-", str(label or "").strip().lower()).strip("-._")
+        clean = clean[:40].strip("-._")
+        return clean or f"user-{int(user_id)}"
+
+    def ensure_user_staging_folder(self, user_id: int) -> str:
+        """Stable per-user staging folder name (``staging/<folder>/``), persisted.
+
+        The name is derived once from the user's label and then frozen, so a
+        display-name change never silently relocates a user's files.
+        """
+        row = self.get_user_by_id(user_id)
+        if not row:
+            raise ValueError("user not found")
+        existing = str(row.get("staging_folder") or "").strip()
+        if existing:
+            return existing
+        label = str(row.get("username") or row.get("display_name") or row.get("subject") or "")
+        base = self._staging_folder_slug(label, int(user_id))
+        candidate = base
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            taken = {
+                str(item["staging_folder"]).strip().lower()
+                for item in cur.execute(
+                    "SELECT staging_folder FROM users WHERE trim(COALESCE(staging_folder,'')) != '';"
+                ).fetchall()
+            }
+            suffix = 2
+            while candidate.lower() in taken:
+                candidate = f"{base}-{suffix}"
+                suffix += 1
+            cur.execute(
+                "UPDATE users SET staging_folder = ? WHERE id = ? AND trim(COALESCE(staging_folder,'')) = '';",
+                (candidate, int(user_id)),
+            )
+            conn.commit()
+        row = self.get_user_by_id(user_id)
+        return str((row or {}).get("staging_folder") or candidate)
+
+    def get_user_by_id(self, user_id: Optional[int]) -> Optional[Dict[str, Any]]:
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return None
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM users WHERE id = ?;", (uid,)).fetchone()
+        return dict(row) if row else None
+
+    def list_users(self) -> List[Dict[str, Any]]:
+        """All known identities, admins first, then by label (Admin panel)."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM users ORDER BY is_admin DESC, "
+                "COALESCE(NULLIF(display_name, ''), username, subject) COLLATE NOCASE ASC;"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_user_flags(
+        self,
+        user_id: int,
+        auto_download: Optional[bool] = None,
+        bypass_approval: Optional[bool] = None,
+        is_admin: Optional[bool] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Admin-panel policy flags for one user. ``None`` leaves a flag unchanged."""
+        sets: List[str] = []
+        params: List[Any] = []
+        for column, value in (
+            ("auto_download", auto_download),
+            ("bypass_approval", bypass_approval),
+            ("is_admin", is_admin),
+        ):
+            if value is None:
+                continue
+            sets.append(f"{column} = ?")
+            params.append(1 if value else 0)
+        if not sets:
+            return self.get_user_by_id(user_id)
+        params.append(int(user_id))
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = ?;", params)
+            conn.commit()
+        return self.get_user_by_id(user_id)
 
     def get_user(self, subject: str) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:

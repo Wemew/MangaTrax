@@ -428,7 +428,9 @@ def _is_temp_staging_file(filename: str) -> bool:
     return lower.endswith(".part") or lower.endswith(".mangatrax-part")
 
 
-def flatten_staging_dir(staging_dir: str, db: Any = None) -> Dict[str, Any]:
+def flatten_staging_dir(
+    staging_dir: str, db: Any = None, exclude_dirs: Any = None,
+) -> Dict[str, Any]:
     """Move every file in nested staging subdirs to the flat staging root.
 
     Collisions follow the routing policy (same size -> skip, different size ->
@@ -436,6 +438,9 @@ def flatten_staging_dir(staging_dir: str, db: Any = None) -> Dict[str, Any]:
     untouched, symlinks are never followed/removed, and emptied dirs are pruned with
     the task-34 safe helper.
     """
+    exclusions = {
+        str(name).strip().lower() for name in (exclude_dirs or ()) if str(name).strip()
+    }
     stats: Dict[str, Any] = {
         "flattened": 0, "skipped_existing": 0, "conflicts_renamed": 0, "dirs_removed": 0,
     }
@@ -447,10 +452,19 @@ def flatten_staging_dir(staging_dir: str, db: Any = None) -> Dict[str, Any]:
     for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
         current = os.path.realpath(dirpath)
         if current == root:
+            # Per-user staging folders stay flat inside their own folder: never flatten.
+            dirnames[:] = [
+                name for name in dirnames
+                if not os.path.islink(os.path.join(dirpath, name))
+                and name.lower() not in exclusions
+            ]
             continue
         if not current.startswith(root + os.sep):
             continue
-        dirnames[:] = [name for name in dirnames if not os.path.islink(os.path.join(dirpath, name))]
+        dirnames[:] = [
+            name for name in dirnames
+            if not os.path.islink(os.path.join(dirpath, name))
+        ]
         for filename in sorted(filenames):
             if _is_temp_staging_file(filename):
                 continue
@@ -480,7 +494,8 @@ def flatten_staging_dir(staging_dir: str, db: Any = None) -> Dict[str, Any]:
                     logger.info("Flatten staging: collision, moved '%s' to '%s'", filename, os.path.basename(dest))
             except Exception as exc:  # one bad file must not abort the flatten
                 logger.warning("Flatten staging failed for '%s': %s", source, exc)
-    pruned = prune_empty_dirs(root, db=None, busy_names=set(), label="staging", actor="user")
+    keep_names = set(exclusions)
+    pruned = prune_empty_dirs(root, db=None, busy_names=keep_names, label="staging", actor="user")
     stats["dirs_removed"] = int(pruned.get("removed") or 0)
     if stats["flattened"]:
         logger.info(
@@ -496,6 +511,7 @@ def process_downloads_to_staging(
     series_templates: Any,
     db,
     actor: str = "scheduler",
+    exclude_dirs: Any = None,
 ) -> Dict[str, Any]:
     """Tag and route raw downloads into staging; see the module docstring.
 
@@ -525,10 +541,14 @@ def process_downloads_to_staging(
         result["flatten_conflicts_renamed"] += int(stats.get("conflicts_renamed") or 0)
         result["flatten_dirs_removed"] += int(stats.get("dirs_removed") or 0)
 
+    exclusions = {
+        str(name).strip().lower() for name in (exclude_dirs or ()) if str(name).strip()
+    }
     # Legacy nested staging trees are flattened before and after routing (cheap:
-    # flatten exits immediately when staging is already flat).
+    # flatten exits immediately when staging is already flat). Per-user folders are
+    # never flattened into the shared root.
     if staging_dir:
-        _merge_flatten(flatten_staging_dir(staging_dir, db=db))
+        _merge_flatten(flatten_staging_dir(staging_dir, db=db, exclude_dirs=exclusions))
     if not downloads_dir or not os.path.isdir(downloads_dir):
         return result
     downloads_root = os.path.realpath(downloads_dir)
@@ -549,6 +569,9 @@ def process_downloads_to_staging(
 
     for root, dirs, files in os.walk(downloads_dir):
         dirs.sort()
+        if exclusions and os.path.realpath(root) == downloads_root:
+            # User folders are routed by their own pass into their own staging folder.
+            dirs[:] = [name for name in dirs if name.lower() not in exclusions]
         for filename in sorted(files):
             if any(filename.lower().endswith(suffix) for suffix in _IGNORED_SUFFIXES):
                 continue
@@ -726,7 +749,7 @@ def process_downloads_to_staging(
                 _record_failure(source_path, f"{type(exc).__name__}: {exc}")
 
     if staging_dir:
-        _merge_flatten(flatten_staging_dir(staging_dir, db=db))
+        _merge_flatten(flatten_staging_dir(staging_dir, db=db, exclude_dirs=exclusions))
 
     result["series_awaiting"] = [
         {

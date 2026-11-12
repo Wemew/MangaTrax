@@ -1,0 +1,390 @@
+#!/usr/bin/env python3
+"""Multi-user data isolation, admin gating and request approval.
+
+Covers:
+  * shared Calibre rows visible to everyone vs per-user tracked membership,
+  * per-user monitor toggle, blacklist and prioritized groups,
+  * request approval queue (pending -> approved) and bypass users,
+  * Admin role enforcement for sensitive endpoints,
+  * per-user staging folder naming (stable, collision-safe).
+"""
+
+import json
+import os
+import sys
+from unittest.mock import patch
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BACKEND_DIR = os.path.join(BASE_DIR, "backend")
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+for _path in (BACKEND_DIR, TESTS_DIR, BASE_DIR):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+from e2e.harness import E2ETestContext  # noqa: E402
+from fastapi import HTTPException  # noqa: E402  (harness installs the shim when absent)
+
+import app.main as main_app  # noqa: E402
+from app import auth as auth_module  # noqa: E402
+from app.auth import Identity  # noqa: E402
+
+
+def _user(ctx, subject, username, admin=False):
+    groups = ["mangatrax-admins"] if admin else []
+    return ctx.db.upsert_user(
+        subject=subject, username=username, display_name=username.title(),
+        auth_source="oidc", groups=groups, is_admin=admin,
+    )
+
+
+def _series(ctx, name, calibre_id=None, monitored=1):
+    with ctx.db.get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO series_tracking (name, authors, is_monitored, calibre_series_id) "
+            "VALUES (?, '', ?, ?);",
+            (name, monitored, calibre_id),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def _release(ctx, guid, title, series, status="DISCOVERY"):
+    with ctx.db.get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO releases (guid, title, series_name, status, download_url) "
+            "VALUES (?, ?, ?, ?, ?);",
+            (guid, title, series, status, "magnet:?xt=urn:btih:" + guid),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def test_shared_vs_private_listing(ctx, red, blue):
+    shared = _series(ctx, "Calibre Shared", calibre_id=11)
+    private = _series(ctx, "Blue Private")
+    ctx.db.add_user_series(blue["id"], private, is_monitored=True)
+
+    red_names = {row["name"] for row in ctx.db.get_all_series(user_id=red["id"])}
+    blue_names = {row["name"] for row in ctx.db.get_all_series(user_id=blue["id"])}
+    assert "Calibre Shared" in red_names and "Calibre Shared" in blue_names
+    assert "Blue Private" not in red_names, red_names
+    assert "Blue Private" in blue_names, blue_names
+    assert ctx.db.count_all_series(user_id=red["id"]) == len(red_names)
+    assert ctx.db.count_all_series(user_id=blue["id"]) == len(blue_names)
+
+
+def test_per_user_monitor_toggle(ctx, red, blue):
+    shared = _series(ctx, "Shared Toggle", calibre_id=12)
+    assert shared
+
+    with patch.object(main_app, "_current_user_row", return_value=blue):
+        res = ctx.client.post(f"/api/series/{shared}/toggle")
+    assert res.status_code == 200, res.text
+    first = res.json()["is_monitored"]
+    membership = ctx.db.get_user_series_membership(blue["id"], shared)
+    assert membership is not None, "toggle must create the user's membership"
+    assert bool(membership["is_monitored"]) == first
+
+    with patch.object(main_app, "_current_user_row", return_value=blue):
+        res = ctx.client.post(f"/api/series/{shared}/toggle")
+    assert res.json()["is_monitored"] is (not first)
+
+    # Another user's state is untouched.
+    red_membership = ctx.db.get_user_series_membership(red["id"], shared)
+    assert red_membership is None, red_membership
+
+
+def test_per_user_blacklist_and_groups(ctx, red, blue):
+    with patch.object(main_app, "_current_user_row", return_value=blue):
+        assert ctx.client.post("/api/blacklist", json_data={"name": "Bad Series", "reason": "nope"}).status_code == 200
+        assert ctx.client.post("/api/prioritized/groups", json_data={"name": "BlueGroup", "notes": "", "priority": 2}).status_code == 200
+
+    assert len(ctx.db.get_user_blacklist(blue["id"])) == 1
+    assert ctx.db.get_user_blacklist(red["id"]) == []
+    shared_names = {row["name"] for row in ctx.db.get_blacklisted_series()}
+    assert "Bad Series" not in shared_names, \
+        "per-user blacklist must not leak into the shared table"
+
+    blue_groups = ctx.db.get_user_prioritized_groups(blue["id"])
+    assert len(blue_groups) == 1 and blue_groups[0]["name"] == "BlueGroup"
+    assert ctx.db.get_user_prioritized_groups(red["id"]) == []
+
+    with patch.object(main_app, "_current_user_row", return_value=blue):
+        listed = ctx.client.get("/api/prioritized/groups").json()["groups"]
+    assert [g["name"] for g in listed] == ["BlueGroup"], listed
+
+    # The per-user blacklist hides those series from that user's release list only.
+    _release(ctx, "bl-1", "Bad Series v05", "Bad Series", status="REQUESTED")
+    _release(ctx, "bl-2", "Good Series v05", "Good Series", status="REQUESTED")
+    blue_names = {
+        row["series_name"] for row in ctx.db.get_releases(status="REQUESTED", user_id=blue["id"])
+    }
+    red_names = {
+        row["series_name"] for row in ctx.db.get_releases(status="REQUESTED", user_id=red["id"])
+    }
+    assert "Bad Series" not in blue_names, "per-user blacklist must hide the series"
+    assert "Bad Series" in red_names, "another user's blacklist must not hide it"
+    assert "Good Series" in blue_names and "Good Series" in red_names
+
+    # The HTTP surface forwards the acting user into that filter.
+    main_source = open(os.path.join(BACKEND_DIR, "app", "main.py"), encoding="utf-8").read()
+    assert "sort=clean_sort, user_id=user_id" in main_source, "releases route must pass user_id"
+    assert "tag_match=clean_match, sort=clean_sort, user_id=user_id" in main_source, \
+        "discovery route must pass user_id"
+
+
+def test_request_approval_flow(ctx, red, blue):
+    release_id = _release(ctx, "req-1", "Blue Wants This v01", "Blue Wants This")
+
+    with patch.object(main_app, "_current_user_row", return_value=blue):
+        res = ctx.client.post(f"/api/releases/{release_id}/download")
+    assert res.status_code == 202, res.text
+    assert res.json()["status"] == "pending_approval"
+    pending = ctx.db.list_pending_approvals()
+    assert len(pending) == 1 and pending[0]["release_id"] == release_id, pending
+    assert pending[0]["requester"] == "Blue"
+
+    with patch.object(main_app, "_current_user_row", return_value=red):
+        res = ctx.client.post(f"/api/admin/approvals/{pending[0]['id']}/approve")
+    assert res.status_code == 200, res.text
+    assert ctx.db.list_pending_approvals() == []
+    release = ctx.db.get_release_by_id(release_id)
+    assert release["status"] == "REQUESTED", release["status"]
+    assert int(release["request_user_id"]) == blue["id"], release.get("request_user_id")
+
+    # Rejected requests never touch the release status.
+    release2 = _release(ctx, "req-2", "Reject Me v01", "Reject Me")
+    with patch.object(main_app, "_current_user_row", return_value=blue):
+        ctx.client.post(f"/api/releases/{release2}/download")
+    pending2 = ctx.db.list_pending_approvals()
+    with patch.object(main_app, "_current_user_row", return_value=red):
+        res = ctx.client.post(f"/api/admin/approvals/{pending2[0]['id']}/reject")
+    assert res.status_code == 200 and ctx.db.get_release_by_id(release2)["status"] == "DISCOVERY"
+
+    # A rejected request can be raised again (it returns to pending, not stuck).
+    with patch.object(main_app, "_current_user_row", return_value=blue):
+        res = ctx.client.post(f"/api/releases/{release2}/download")
+    assert res.status_code == 202, res.text
+    assert ctx.db.get_release_request(blue["id"], release2)["status"] == "pending"
+
+
+def test_approval_auto_download(ctx, red, blue):
+    """Approved requests submit automatically only when the admin enabled it."""
+    ctx.db.set_user_flags(blue["id"], auto_download=True)
+    blue = ctx.db.get_user_by_id(blue["id"])
+    release_id = _release(ctx, "auto-1", "Auto Release v01", "Auto Release")
+    with patch.object(main_app, "_current_user_row", return_value=blue):
+        ctx.client.post(f"/api/releases/{release_id}/download")
+    pending = [p for p in ctx.db.list_pending_approvals() if p["release_id"] == release_id]
+    assert len(pending) == 1, pending
+
+    seen = {}
+    class StubQbit:
+        enabled = True
+        def extract_torrent_hash(self, url):
+            return "autohash"
+        def add_torrent(self, url_or_magnet, savepath=None, category=None, tags=None):
+            seen["savepath"] = savepath
+            return True
+        def apply_selective_volume_download(self, torrent_hash, wanted_volumes):
+            return {"status": "pending_metadata"}
+
+    with patch.object(main_app, "_current_user_row", return_value=red), \
+         patch.object(main_app.scheduler, "get_qbit_client", return_value=StubQbit()), \
+         patch.object(main_app, "resolve_downloader_engine", return_value="qbit"):
+        res = ctx.client.post(f"/api/admin/approvals/{pending[0]['id']}/approve")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body.get("download", {}).get("status") == "success", body
+    folder = ctx.db.ensure_user_staging_folder(blue["id"])
+    assert seen["savepath"].replace("\\", "/").endswith(folder), seen
+    assert ctx.db.get_release_by_id(release_id)["status"] == "REQUESTED"
+
+    # Turned off again: approval no longer submits the download by itself.
+    ctx.db.set_user_flags(blue["id"], auto_download=False)
+    blue = ctx.db.get_user_by_id(blue["id"])
+    manual_id = _release(ctx, "auto-2", "Manual Release v01", "Manual Release")
+    with patch.object(main_app, "_current_user_row", return_value=blue):
+        ctx.client.post(f"/api/releases/{manual_id}/download")
+    pending2 = [p for p in ctx.db.list_pending_approvals() if p["release_id"] == manual_id]
+    with patch.object(main_app, "_current_user_row", return_value=red):
+        res = ctx.client.post(f"/api/admin/approvals/{pending2[0]['id']}/approve")
+    assert res.status_code == 200 and "download" not in res.json(), res.text
+
+
+def test_bypass_user_downloads_to_own_staging(ctx, blue):
+    ctx.db.set_user_flags(blue["id"], bypass_approval=True)
+    blue = ctx.db.get_user_by_id(blue["id"])
+    release_id = _release(ctx, "req-3", "Bypass Release v01", "Bypass Release")
+    seen = {}
+
+    class StubQbit:
+        enabled = True
+        def extract_torrent_hash(self, url):
+            return "deadbeef"
+        def add_torrent(self, url_or_magnet, savepath=None, category=None, tags=None):
+            seen["savepath"] = savepath
+            return True
+        def apply_selective_volume_download(self, torrent_hash, wanted_volumes):
+            return {"status": "pending_metadata"}
+
+    with patch.object(main_app, "_current_user_row", return_value=blue), \
+         patch.object(main_app.scheduler, "get_qbit_client", return_value=StubQbit()), \
+         patch.object(main_app, "resolve_downloader_engine", return_value="qbit"):
+        res = ctx.client.post(f"/api/releases/{release_id}/download")
+    assert res.status_code == 200, res.text
+    folder = ctx.db.ensure_user_staging_folder(blue["id"])
+    assert seen["savepath"].replace("\\", "/").endswith(folder), seen
+    pending = [p for p in ctx.db.list_pending_approvals() if p["release_id"] == release_id]
+    assert pending == [], "bypass users skip the queue"
+
+
+def test_require_admin_gate(ctx, red, blue):
+    original_mode = main_app.AUTH.config.mode
+    original_groups = main_app.AUTH.config.admin_groups
+    original_set = main_app.AUTH._admin_group_set
+    try:
+        main_app.AUTH.config.mode = "oidc"
+        main_app.AUTH.config.admin_groups = ("mangatrax-admins",)
+        main_app.AUTH._admin_group_set = {"mangatrax-admins"}
+
+        token = auth_module.set_current_identity(
+            Identity(subject="blue", username="blue", auth_source="oidc", groups=())
+        )
+        try:
+            try:
+                main_app.require_admin()
+                raise AssertionError("non-admin must be rejected")
+            except HTTPException as exc:
+                assert exc.status_code == 403, exc
+        finally:
+            auth_module.reset_current_identity(token)
+
+        token = auth_module.set_current_identity(
+            Identity(subject="red", username="red", auth_source="oidc", groups=("mangatrax-admins",))
+        )
+        try:
+            main_app.require_admin()  # no raise
+        finally:
+            auth_module.reset_current_identity(token)
+    finally:
+        main_app.AUTH.config.mode = original_mode
+        main_app.AUTH.config.admin_groups = original_groups
+        main_app.AUTH._admin_group_set = original_set
+
+
+def test_staging_dir_scoping(ctx, red, blue):
+    ctx.db.set_setting("staging_dir", ctx.staging_dir)
+    main_app._CURRENT_USER_CACHE.set(None)
+
+    folder = ctx.db.ensure_user_staging_folder(blue["id"])
+    with patch.object(main_app, "_current_user_row", return_value=blue):
+        blue_dir = main_app._staging_dir_setting()
+    assert os.path.realpath(blue_dir) == os.path.realpath(os.path.join(ctx.staging_dir, folder)), blue_dir
+    assert os.path.isdir(blue_dir), "the user staging folder must be created on demand"
+
+    with patch.object(main_app, "_current_user_row", return_value=red):
+        assert main_app._staging_dir_setting() == ctx.staging_dir, "admins scan the whole tree"
+    with patch.object(main_app, "_current_user_row", return_value=None):
+        assert main_app._staging_dir_setting() == ctx.staging_dir, "legacy mode is unchanged"
+
+    # A staged file in any user folder still counts as "in staging" globally.
+    from app.staged_ownership import build_staged_volumes_map
+    os.makedirs(blue_dir, exist_ok=True)
+    open(os.path.join(blue_dir, "Blue Private Series v02.cbz"), "wb").close()
+    shared_map = build_staged_volumes_map(ctx.db, ctx.staging_dir)
+    assert shared_map, "staging map must see the user folder"
+    assert any(2.0 in volumes for volumes in shared_map.values()), shared_map
+
+
+def test_per_user_routing(ctx, blue):
+    import zipfile
+
+    _series(ctx, "Routed Series", calibre_id=None)  # template so routing can tag
+    folder = ctx.db.ensure_user_staging_folder(blue["id"])
+    downloads_root = ctx.scheduler.get_downloads_dir()
+    user_downloads = os.path.join(downloads_root, folder)
+    os.makedirs(user_downloads, exist_ok=True)
+    filename = "Routed Series v02.cbz"
+    with zipfile.ZipFile(os.path.join(user_downloads, filename), "w") as archive:
+        archive.writestr("001.jpg", b"fake-image-bytes")
+
+    # The shared/global pass must never pull a user's file into the staging root.
+    user_staging = os.path.join(ctx.staging_dir, folder)
+    nested = os.path.join(user_staging, "nested")
+    os.makedirs(nested, exist_ok=True)
+    open(os.path.join(nested, "Nested Series v01.cbz"), "wb").close()
+    ctx.scheduler.process_downloads_to_staging(actor="scheduler")
+    assert os.path.isfile(os.path.join(user_downloads, filename)), "global pass touched a user folder"
+    assert not os.path.exists(os.path.join(ctx.staging_dir, filename)), "file leaked into the shared root"
+    assert os.path.isfile(os.path.join(nested, "Nested Series v01.cbz")), \
+        "global flatten must not flatten a user's staging folder"
+
+    result = ctx.scheduler.process_downloads_to_staging_for_users()
+    assert folder in result, result
+    assert "error" not in (result.get(folder) or {}), result.get(folder)
+    user_staging = os.path.join(ctx.staging_dir, folder)
+    assert os.path.isdir(user_staging)
+    assert os.path.isfile(os.path.join(user_staging, filename)), os.listdir(user_staging)
+    # Flat inside the user folder, and never at the shared root.
+    assert not os.path.exists(os.path.join(ctx.staging_dir, filename))
+
+
+def test_admin_surface_source_guards(ctx):
+    templates_dir = os.path.join(BACKEND_DIR, "app", "templates")
+    main_source = open(os.path.join(BACKEND_DIR, "app", "main.py"), encoding="utf-8").read()
+    for decorator_prefix in (
+        '@app.post("/api/settings"',
+        '@app.post("/api/debug/action"',
+        '@app.get("/admin"',
+        '@app.get("/logs"',
+        '@app.get("/settings"',
+        '@app.post("/api/admin/approvals/{approval_id}/approve"',
+        '@app.post("/api/releases/{release_id}/status"',
+        '@app.post("/api/series/{series_id}/identity"',
+    ):
+        idx = main_source.find(decorator_prefix)
+        assert idx != -1, decorator_prefix
+        line_end = main_source.find("\n", idx)
+        decorator = main_source[idx:line_end]
+        assert "require_admin" in decorator, (decorator_prefix, decorator)
+
+    series_row = open(os.path.join(templates_dir, "partials", "series_table_row_chunk.html"), encoding="utf-8").read()
+    assert "{% if is_admin() %}" in series_row, "admin-only row actions must be wrapped"
+    release_row = open(os.path.join(templates_dir, "partials", "flat_release_row_chunk.html"), encoding="utf-8").read()
+    assert "{% if is_admin() %}" in release_row, "catalog mutation buttons must be admin-only"
+
+
+def test_staging_folders(ctx):
+    one = ctx.db.upsert_user(subject="oidc|same-1", username="Same Name", auth_source="oidc")
+    two = ctx.db.upsert_user(subject="oidc|same-2", username="Same Name", auth_source="oidc")
+    folder_one = ctx.db.ensure_user_staging_folder(one["id"])
+    folder_two = ctx.db.ensure_user_staging_folder(two["id"])
+    assert folder_one == "same-name", folder_one
+    assert folder_two != folder_one, (folder_one, folder_two)
+    assert ctx.db.ensure_user_staging_folder(one["id"]) == folder_one, "folder must be stable"
+
+
+def main():
+    ctx = E2ETestContext(prefix="mangatrax_multiuser_iso_")
+    try:
+        red = _user(ctx, "oidc|red", "red", admin=True)
+        blue = _user(ctx, "oidc|blue", "blue")
+        test_shared_vs_private_listing(ctx, red, blue)
+        test_per_user_monitor_toggle(ctx, red, blue)
+        test_per_user_blacklist_and_groups(ctx, red, blue)
+        test_request_approval_flow(ctx, red, blue)
+        test_approval_auto_download(ctx, red, blue)
+        test_bypass_user_downloads_to_own_staging(ctx, blue)
+        test_require_admin_gate(ctx, red, blue)
+        test_admin_surface_source_guards(ctx)
+        test_staging_dir_scoping(ctx, red, blue)
+        test_per_user_routing(ctx, blue)
+        test_staging_folders(ctx)
+        print("multi-user isolation suite PASSED")
+    finally:
+        ctx.close()
+
+
+if __name__ == "__main__":
+    main()

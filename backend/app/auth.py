@@ -140,9 +140,14 @@ __all__ = [
     "parse_basic_authorization",
     "sanitize_next_path",
     "current_actor",
+    "current_identity",
+    "normalize_groups",
     "get_current_actor",
     "set_current_actor",
     "reset_current_actor",
+    "get_current_identity",
+    "set_current_identity",
+    "reset_current_identity",
 ]
 
 AUTH_MODES = ("none", "basic", "oidc")
@@ -198,6 +203,9 @@ def _constant_time_equals(left: str, right: str) -> bool:
 # Request actor context (audit attribution)
 # ---------------------------------------------------------------------------
 current_actor: contextvars.ContextVar[str] = contextvars.ContextVar("current_actor", default="system")
+current_identity: contextvars.ContextVar[Optional["Identity"]] = contextvars.ContextVar(
+    "current_identity", default=None
+)
 
 
 def get_current_actor() -> str:
@@ -224,9 +232,57 @@ def reset_current_actor(token) -> None:
         pass
 
 
+def set_current_identity(identity: Optional["Identity"]):
+    """Bind the authenticated identity for the current request (middleware)."""
+    return current_identity.set(identity)
+
+
+def get_current_identity() -> Optional["Identity"]:
+    try:
+        return current_identity.get()
+    except Exception:  # pragma: no cover - ContextVar is always available
+        return None
+
+
+def reset_current_identity(token) -> None:
+    try:
+        current_identity.reset(token)
+    except Exception:  # pragma: no cover - reset in a different context
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Identity
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# OIDC group claims -> role
+# ---------------------------------------------------------------------------
+def normalize_groups(value: Any) -> Tuple[str, ...]:
+    """Normalise an IdP groups claim into a de-duplicated tuple of names.
+
+    Accepts a JSON array (the usual PocketID/Keycloak shape) or a delimited
+    string; blank entries and case-insensitive duplicates are dropped.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        candidates = [part for part in value.replace(",", " ").split() if part]
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        candidates = [str(item) for item in value if item is not None]
+    else:
+        candidates = [str(value)]
+    groups: list = []
+    seen = set()
+    for item in candidates:
+        clean = str(item).strip()
+        norm = clean.lower()
+        if not clean or norm in seen:
+            continue
+        seen.add(norm)
+        groups.append(clean)
+    return tuple(groups)
+
+
 @dataclass(frozen=True)
 class Identity:
     """A resolved end-user identity (from an OIDC ID token or Basic credentials)."""
@@ -236,6 +292,7 @@ class Identity:
     email: str = ""
     display_name: str = ""
     auth_source: str = ""
+    groups: Tuple[str, ...] = ()
 
     @property
     def actor(self) -> str:
@@ -252,6 +309,7 @@ class Identity:
             "email": self.email,
             "name": self.display_name,
             "src": self.auth_source,
+            "groups": list(self.groups),
         }
 
     @classmethod
@@ -268,22 +326,29 @@ class Identity:
             email=str(data.get("email") or ""),
             display_name=str(data.get("name") or ""),
             auth_source=str(data.get("src") or "oidc"),
+            groups=normalize_groups(data.get("groups")),
         )
 
     @classmethod
-    def from_oidc_claims(cls, claims: Mapping[str, Any]) -> "Identity":
+    def from_oidc_claims(
+        cls, claims: Mapping[str, Any], groups_claim: str = "groups",
+    ) -> "Identity":
         subject = str(claims.get("sub") or "").strip()
         if not subject:
             raise TokenValidationError("ID token is missing the required 'sub' claim")
         email = str(claims.get("email") or "")
         preferred = str(claims.get("preferred_username") or "")
         name = str(claims.get("name") or "")
+        raw_groups = claims.get(groups_claim)
+        if raw_groups is None and groups_claim != "groups":
+            raw_groups = claims.get("groups")
         return cls(
             subject=subject,
             username=preferred or email or subject,
             email=email,
             display_name=name or preferred or email,
             auth_source="oidc",
+            groups=normalize_groups(raw_groups),
         )
 
     @classmethod
@@ -321,6 +386,10 @@ class AuthConfig:
     session_max_age: int = DEFAULT_SESSION_MAX_AGE
     csrf_protection: bool = True
     debug_actions: bool = False
+    # Groups claim the IdP puts its group list in (PocketID: "groups").
+    oidc_groups_claim: str = "groups"
+    # Comma-separated groups that grant the Admin role.
+    admin_groups: Tuple[str, ...] = ("mangatrax-admins",)
 
     # -- construction -----------------------------------------------------
     @classmethod
@@ -349,6 +418,9 @@ class AuthConfig:
             session_max_age=max_age,
             csrf_protection=_env_bool(get("MANGATRAX_CSRF_PROTECT", None), True),
             debug_actions=_env_bool(get("MANGATRAX_DEBUG_ACTIONS", None), False),
+            oidc_groups_claim=get("MANGATRAX_OIDC_GROUPS_CLAIM", "groups").strip() or "groups",
+            admin_groups=normalize_groups(get("MANGATRAX_ADMIN_GROUPS", "mangatrax-admins"))
+            or ("mangatrax-admins",),
         )
 
     # -- derived properties ----------------------------------------------
@@ -969,6 +1041,31 @@ class AuthManager:
         self.state_tokens = SignedToken(config.session_secret, STATE_TTL_SECONDS, "oidc_state")
         self.provision_interval = float(provision_interval)
         self._provisioned_at: Dict[str, float] = {}
+        self._admin_group_set = {
+            str(group).strip().lower()
+            for group in (config.admin_groups or ())
+            if str(group).strip()
+        }
+
+    def is_admin(self, identity: Optional[Identity]) -> bool:
+        """Whether *identity* holds the Admin role.
+
+        ``none`` and ``basic`` deployments stay single-operator: the implicit
+        identity (and the break-glass Basic account) is admin. OIDC users are
+        admin only while they carry a configured admin group.
+        """
+        if not self.config.auth_enabled:
+            return True
+        if identity is None:
+            return False
+        if identity.auth_source != "oidc":
+            # Basic is the documented break-glass operator path.
+            return True
+        if not self._admin_group_set:
+            return False
+        return bool(
+            {group.lower() for group in identity.groups} & self._admin_group_set
+        )
 
     # -- identity resolution ----------------------------------------------
     def resolve_identity(self, headers: Optional[Any], cookies: Optional[Any]) -> Optional[Identity]:
@@ -1092,6 +1189,8 @@ class AuthManager:
                 email=identity.email,
                 display_name=identity.display_name,
                 auth_source=identity.auth_source,
+                groups=identity.groups,
+                is_admin=self.is_admin(identity),
             )
         except Exception as exc:  # pragma: no cover - DB failure must not break auth
             logger.warning("Failed to JIT-provision user '%s': %s", identity.subject, exc)
@@ -1146,7 +1245,7 @@ class AuthManager:
 
         token_response = oidc.exchange_code(code, code_verifier)
         claims = oidc.validate_id_token(token_response.get("id_token"), expected_nonce=stored_nonce, now=now)
-        identity = Identity.from_oidc_claims(claims)
+        identity = Identity.from_oidc_claims(claims, self.config.oidc_groups_claim)
         self.record_identity(identity, force=True)
         session_cookie = self.session_tokens.sign(identity.to_session(), now=now)
         redirect_url = sanitize_next_path(str(payload.get("next") or "/"))

@@ -1507,6 +1507,17 @@ class MangaScheduler:
         except Exception as exc:
             logger.debug("Processed notifications failed: %s", exc)
 
+    def _user_staging_folders(self) -> set:
+        """Registered per-user staging folder names (never flattened/routed globally)."""
+        try:
+            return {
+                str(user.get("staging_folder") or "").strip().lower()
+                for user in self.db.list_users()
+                if str(user.get("staging_folder") or "").strip()
+            }
+        except Exception:
+            return set()
+
     def process_downloads_to_staging(self, actor: Optional[str] = "scheduler") -> Dict[str, Any]:
         """Tag+move downloads whose series exists in Calibre into staging.
 
@@ -1520,6 +1531,7 @@ class MangaScheduler:
             series_templates = self.db.get_series_templates_map()
             result = downloads_pipeline.process_downloads_to_staging(
                 downloads_dir, staging_dir, series_templates, self.db, actor=actor,
+                exclude_dirs=self._user_staging_folders(),
             )
             self.notify_processed_batches(result)
             try:
@@ -2367,6 +2379,42 @@ class MangaScheduler:
             logger.debug("Downloads inventory scan failed: %s", exc)
             return {}
 
+    def process_downloads_to_staging_for_users(self) -> Dict[str, Any]:
+        """Route each user's ``downloads/<folder>/`` into their own staging folder.
+
+        User-initiated downloads are submitted with ``savepath=downloads/<folder>``
+        (see the download endpoint), so provenance survives the qBittorrent hop and
+        files can never land in another user's staging directory.
+        """
+        root_downloads = self.get_downloads_dir(create=False)
+        staging_root = self.db.get_setting("staging_dir", "/staging")
+        results: Dict[str, Any] = {}
+        if not root_downloads or not staging_root:
+            return results
+        try:
+            users = self.db.list_users()
+        except Exception as exc:
+            logger.debug("Per-user routing could not list users: %s", exc)
+            return results
+        for user in users:
+            folder = str(user.get("staging_folder") or "").strip()
+            if not folder:
+                continue
+            user_downloads = os.path.join(root_downloads, folder)
+            if not os.path.isdir(user_downloads):
+                continue
+            user_staging = os.path.join(staging_root, folder)
+            try:
+                os.makedirs(user_staging, exist_ok=True)
+                results[folder] = downloads_pipeline.process_downloads_to_staging(
+                    user_downloads, user_staging, self.db.get_series_templates_map(),
+                    self.db, actor="scheduler",
+                )
+            except Exception as exc:
+                logger.debug("Per-user routing failed for '%s': %s", folder, exc)
+                results[folder] = {"error": str(exc)[:200]}
+        return results
+
     def periodic_downloads_inventory_and_route(self) -> Dict[str, Any]:
         """Cheap frequent pass: inventory + tag/move eligible raw downloads."""
         inventory = self.refresh_downloads_inventory()
@@ -2375,6 +2423,12 @@ class MangaScheduler:
             routed = self.process_downloads_to_staging(actor="scheduler")
         except Exception as exc:
             logger.debug("Frequent downloads routing failed: %s", exc)
+        try:
+            user_routes = self.process_downloads_to_staging_for_users()
+            if user_routes:
+                routed = {"shared": routed, "users": user_routes}
+        except Exception as exc:
+            logger.debug("Per-user downloads routing failed: %s", exc)
         moved = int((routed or {}).get("tagged_and_moved") or 0)
         if moved:
             logger.info(

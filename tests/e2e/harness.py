@@ -108,6 +108,10 @@ except ImportError:
     fa.FastAPI = FastAPI
     fa.HTTPException = HTTPException
     fa.Request = Request
+    # Dependencies are declared on routes as ``dependencies=[Depends(fn)]``; the shim
+    # calls handlers directly, so the dependency is returned un-executed (suites that
+    # cover gated routes call the dependency itself).
+    fa.Depends = lambda dependency=None, **kw: dependency
     fa.Form = lambda default=None, **kw: default
     fa.Query = lambda default=None, **kw: default
     sys.modules["fastapi"] = fa

@@ -5,13 +5,14 @@ import difflib
 import time
 import threading
 import asyncio
+import contextvars
 import logging
 import logging.handlers
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Query, HTTPException
+from fastapi import Depends, FastAPI, Request, Query, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
@@ -246,6 +247,7 @@ async def enforce_authentication(request: Request, call_next):
         return JSONResponse({"detail": "Authentication error"}, status_code=500)
 
     actor_token = auth_module.set_current_actor(decision.actor)
+    identity_token = auth_module.set_current_identity(decision.identity)
     try:
         if decision.action == "redirect_login":
             return RedirectResponse(decision.location or "/auth/login", status_code=302)
@@ -265,6 +267,7 @@ async def enforce_authentication(request: Request, call_next):
             )
         return await call_next(request)
     finally:
+        auth_module.reset_current_identity(identity_token)
         auth_module.reset_current_actor(actor_token)
 
 # Security Headers Middleware
@@ -315,6 +318,20 @@ def _register_template_global(name: str, value) -> None:
 
 _register_template_global("auth_mode", AUTH_CONFIG.mode)
 _register_template_global("auth_actor", auth_module.get_current_actor)
+_register_template_global(
+    "is_admin", lambda: AUTH.is_admin(auth_module.get_current_identity())
+)
+
+def require_admin() -> None:
+    """FastAPI dependency: Admin role required for sensitive surfaces.
+
+    ``none``/``basic`` deployments are single-operator and stay admin; an OIDC
+    user without a configured admin group gets a JSON 403.
+    """
+    if not AUTH.config.auth_enabled:
+        return
+    if not AUTH.is_admin(auth_module.get_current_identity()):
+        raise HTTPException(status_code=403, detail="Admin role required")
 _register_template_global("debug_actions_enabled", AUTH_CONFIG.debug_actions)
 
 
@@ -351,15 +368,77 @@ def _operator_allowed_path_roots():
 _STAGING_FILENAME_MAX_LENGTH = 512
 
 
-def _staging_dir_setting() -> str:
+_CURRENT_USER_CACHE: "contextvars.ContextVar[Optional[tuple]]" = contextvars.ContextVar(
+    "mangatrax_current_user", default=None
+)
+
+
+def _current_user_row() -> Optional[Dict[str, Any]]:
+    """The ``users`` row for the authenticated request identity (memoised per request)."""
+    identity = auth_module.get_current_identity()
+    if identity is None:
+        return None
+    key = f"{identity.auth_source}:{identity.subject}"
+    cached = _CURRENT_USER_CACHE.get()
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    try:
+        row = db.get_user(identity.subject)
+    except Exception as exc:  # pragma: no cover - identity must never break a request
+        logger.debug("Could not resolve current user row: %s", exc)
+        row = None
+    if row is not None and row.get("is_admin"):
+        # First admin login on an upgraded deployment inherits the existing
+        # single-user data exactly once (memberships/blacklist/groups).
+        try:
+            if not str(db.get_setting("multi_user_legacy_claimed_by", "") or "").strip():
+                counts = db.claim_legacy_data_for_admin(int(row["id"]))
+                logger.info("Legacy data claimed by admin '%s': %s", row.get("username"), counts)
+        except Exception as exc:  # pragma: no cover - migration must never break auth
+            logger.warning("Could not claim legacy data for admin: %s", exc)
+    _CURRENT_USER_CACHE.set((key, row))
+    return row
+
+
+def _current_user_id() -> Optional[int]:
+    row = _current_user_row()
+    return int(row["id"]) if row else None
+
+
+def _staging_root_setting() -> str:
     return db.get_setting("staging_dir", "/staging")
+
+
+def _user_staging_dir(user: Dict[str, Any]) -> str:
+    """``<staging>/<folder>`` for one user, created on demand."""
+    root = _staging_root_setting()
+    folder = db.ensure_user_staging_folder(int(user["id"]))
+    path = os.path.join(root, folder)
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as exc:  # pragma: no cover - permissions surface via storage health
+        logger.warning("Could not create staging folder '%s': %s", path, exc)
+    return path
+
+
+def _staging_dir_setting() -> str:
+    """Request-scoped staging directory.
+
+    Authenticated non-admins get their private ``staging/<folder>``; admins (and
+    the legacy single-operator ``none`` mode) get the staging root, whose scans
+    recurse into every user folder so the "in staging" state stays global.
+    """
+    user = _current_user_row()
+    if user is None or user.get("is_admin"):
+        return _staging_root_setting()
+    return _user_staging_dir(user)
 
 
 def _storage_health_paths() -> Dict[str, str]:
     """The two pipeline mounts probed for writability."""
     return {
         "downloads": scheduler.get_downloads_dir(create=False),
-        "staging": _staging_dir_setting(),
+        "staging": _staging_root_setting(),
     }
 
 
@@ -1142,7 +1221,7 @@ async def dashboard_view(request: Request):
     calibre_path = db.get_setting("calibre_path", CALIBRE_DIR)
     scanner = CalibreMangaScanner(calibre_path)
     calibre_status = scanner.get_library_summary()
-    pending_requests = db.get_pending_requests(limit=10)
+    pending_requests = db.get_pending_requests(limit=10, user_id=_current_user_id())
     recent_logs = db.get_logs(limit=10)
 
     # Live downloader snapshot behind a short timeout, off the event loop, so a
@@ -1209,7 +1288,10 @@ async def releases_view(request: Request, status: Optional[str] = None, view: st
 
 @app.get("/prioritized", response_class=HTMLResponse)
 async def prioritized_view(request: Request, status: Optional[str] = None, view: str = Query("series")):
-    prioritized_groups = db.get_prioritized_groups()
+    user_id = _current_user_id()
+    prioritized_groups = (
+        db.get_user_prioritized_groups(user_id) if user_id is not None else db.get_prioritized_groups()
+    )
     try:
         initial_total = (
             db.count_releases_grouped_by_series(status=status, prioritized_only=(view != "flat"))
@@ -1443,8 +1525,12 @@ async def api_releases_flat_rows(
 ):
     clean_search = search.strip() if search else None
     clean_sort = sort if sort in ("post_date", "updated", "series") else "updated"
-    releases = db.get_releases(status=status, limit=limit, offset=offset, search=clean_search, sort=clean_sort)
-    total = db.count_releases(status=status, search=clean_search)
+    user_id = _current_user_id()
+    releases = db.get_releases(
+        status=status, limit=limit, offset=offset, search=clean_search,
+        sort=clean_sort, user_id=user_id,
+    )
+    total = db.count_releases(status=status, search=clean_search, user_id=user_id)
     seen_sigs = set()
     deduped = []
     for r in releases:
@@ -1530,8 +1616,12 @@ async def api_series_rows(
     search: Optional[str] = Query(None)
 ):
     clean_s = search.strip() if search else None
-    series_list = db.get_all_series(monitored_only=monitored_only, limit=limit, offset=offset, search=clean_s)
-    total = db.count_all_series(monitored_only=monitored_only, search=clean_s)
+    user_id = _current_user_id()
+    series_list = db.get_all_series(
+        monitored_only=monitored_only, limit=limit, offset=offset, search=clean_s,
+        user_id=user_id,
+    )
+    total = db.count_all_series(monitored_only=monitored_only, search=clean_s, user_id=user_id)
     has_more = (offset + len(series_list)) < total
     html = templates.get_template("partials/series_table_row_chunk.html").render(
         {"request": request, "series_list": series_list}
@@ -1585,8 +1675,10 @@ async def discovery_view(
     exclude_list = [item.strip() for item in (exclude_tags or "").split(",") if item.strip()]
     clean_match = tag_match if tag_match in ("any", "all") else "any"
     clean_sort = sort if sort in ("relevance", "newest", "series", "post_date") else "newest"
+    user_id = _current_user_id()
     total_count = db.count_discovery_releases(
-        search=clean_q, include_tags=include_list, exclude_tags=exclude_list, tag_match=clean_match,
+        search=clean_q, include_tags=include_list, exclude_tags=exclude_list,
+        tag_match=clean_match, user_id=user_id,
     )
     total_pages = max(1, math.ceil(total_count / page_size))
     current_page = min(page, total_pages) if total_count > 0 else 1
@@ -1594,12 +1686,14 @@ async def discovery_view(
     discovered = db.get_discovery_releases(
         limit=page_size, offset=offset, search=clean_q,
         include_tags=include_list, exclude_tags=exclude_list,
-        tag_match=clean_match, sort=clean_sort,
+        tag_match=clean_match, sort=clean_sort, user_id=user_id,
     )
     from app.tag_display import display_tags
     for row in discovered:
         row["tag_display"] = display_tags(row.get("tags_json"), view="discovery")
-    blacklisted = db.get_blacklisted_series()
+    blacklisted = (
+        db.get_user_blacklist(user_id) if user_id is not None else db.get_blacklisted_series()
+    )
 
     return templates.TemplateResponse(
         request=request,
@@ -1861,7 +1955,7 @@ async def feeds_view(request: Request):
         }
     )
 
-@app.get("/logs", response_class=HTMLResponse)
+@app.get("/logs", response_class=HTMLResponse, dependencies=[Depends(require_admin)])
 async def logs_view(request: Request):
     logs = db.get_logs(limit=150)
     return templates.TemplateResponse(
@@ -1873,7 +1967,92 @@ async def logs_view(request: Request):
         }
     )
 
-@app.get("/settings", response_class=HTMLResponse)
+@app.get("/admin", response_class=HTMLResponse, dependencies=[Depends(require_admin)])
+async def admin_view(request: Request):
+    """Admin panel: user roles, per-user policy flags and request approvals."""
+    users = []
+    for row in db.list_users():
+        entry = dict(row)
+        try:
+            entry["groups"] = json.loads(row.get("groups_json") or "[]")
+        except (TypeError, ValueError):
+            entry["groups"] = []
+        users.append(entry)
+    return templates.TemplateResponse(
+        request=request,
+        name="admin.html",
+        context={
+            "active_page": "admin",
+            "users": users,
+            "pending_approvals": db.list_pending_approvals() if hasattr(db, "list_pending_approvals") else [],
+        }
+    )
+
+
+@app.post("/api/admin/approvals/{approval_id}/approve", dependencies=[Depends(require_admin)])
+async def api_approve_release_request(approval_id: int):
+    """Approve a pending request; auto-download submits it when the user allows it."""
+    result = await asyncio.to_thread(
+        db.decide_release_request, approval_id, "approve", auth_module.get_current_actor(),
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Pending request not found")
+    request = result.get("request") or {}
+    requester = await asyncio.to_thread(db.get_user_by_id, request.get("user_id")) or {}
+    payload = {"status": "success", "decision": "approved", "request": result}
+    if requester.get("auto_download"):
+        download_response = await api_release_download(int(request["release_id"]))
+        raw_body = getattr(download_response, "body", None)
+        if raw_body is None:
+            raw_body = getattr(download_response, "content", b"{}")
+        try:
+            payload["download"] = json.loads(raw_body or b"{}")
+        except (TypeError, ValueError):
+            payload["download"] = {"status": "unknown"}
+    return JSONResponse(payload)
+
+
+@app.post("/api/admin/approvals/{approval_id}/reject", dependencies=[Depends(require_admin)])
+async def api_reject_release_request(approval_id: int):
+    result = await asyncio.to_thread(
+        db.decide_release_request, approval_id, "reject", auth_module.get_current_actor(),
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Pending request not found")
+    return JSONResponse({"status": "success", "decision": "rejected", "request": result})
+
+
+@app.get("/api/admin/users", dependencies=[Depends(require_admin)])
+async def api_admin_users():
+    return JSONResponse({"status": "success", "users": db.list_users()})
+
+
+@app.post("/api/admin/users/{user_id}/flags", dependencies=[Depends(require_admin)])
+async def api_admin_user_flags(user_id: int, payload: Optional[Dict[str, Any]] = None):
+    """Admin toggles a user's auto-download / approval-bypass policy."""
+    body = payload or {}
+    auto_download = body.get("auto_download")
+    bypass_approval = body.get("bypass_approval")
+    for name, value in (("auto_download", auto_download), ("bypass_approval", bypass_approval)):
+        if value is not None and not isinstance(value, bool):
+            raise HTTPException(status_code=400, detail=f"{name} must be a boolean")
+    updated = db.set_user_flags(
+        user_id,
+        auto_download=auto_download,
+        bypass_approval=bypass_approval,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+    db.log_activity(
+        "USER_FLAGS_UPDATED",
+        f"Admin updated policy flags for '{updated.get('display_name') or updated.get('username') or updated.get('subject')}'",
+        json.dumps({"user_id": user_id, "auto_download": auto_download, "bypass_approval": bypass_approval}),
+        actor=auth_module.get_current_actor(),
+    )
+    return JSONResponse({"status": "success", "user": updated})
+
+
+@app.get("/settings", response_class=HTMLResponse, dependencies=[Depends(require_admin)])
 async def settings_view(request: Request):
     settings = db.get_all_settings()
     torbox_key_set = bool(str(settings.get("torbox_api_key", "") or "").strip())
@@ -1907,7 +2086,7 @@ async def settings_view(request: Request):
 
 # --- API Endpoints ---
 
-@app.post("/api/calibre/sync")
+@app.post("/api/calibre/sync", dependencies=[Depends(require_admin)])
 async def api_calibre_sync():
     """Trigger manual Calibre library rescan and bundle request resolution.
 
@@ -1978,7 +2157,7 @@ async def api_get_cover(url: str = Query(...)):
 
     return Response(content=FALLBACK_COVER_SVG, media_type="image/svg+xml", status_code=200)
 
-@app.post("/api/feeds/check")
+@app.post("/api/feeds/check", dependencies=[Depends(require_admin)])
 async def api_feeds_check():
     """Start a feed poll in the background and return immediately.
 
@@ -2016,7 +2195,7 @@ async def api_feeds_check_status():
     """Non-blocking feed-poll status: running flag, timestamps and last result."""
     return JSONResponse(scheduler.get_feed_check_status())
 
-@app.post("/api/feeds/test")
+@app.post("/api/feeds/test", dependencies=[Depends(require_admin)])
 async def api_feeds_test(payload: Dict[str, Any]):
     """Live test a feed or scraper extraction without saving to database."""
     model = _validated_payload(schemas.FeedTestRequest, payload)
@@ -2037,7 +2216,7 @@ async def api_feeds_test(payload: Dict[str, Any]):
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
-@app.post("/api/feeds")
+@app.post("/api/feeds", dependencies=[Depends(require_admin)])
 async def api_add_feed(payload: Dict[str, Any]):
     """Add a new feed or web scraper."""
     model = _validated_payload(schemas.FeedCreateRequest, payload)
@@ -2052,13 +2231,13 @@ async def api_add_feed(payload: Dict[str, Any]):
     db.log_activity("FEED_ADDED", f"Added manga feed: {model.name}", f"Type: {model.feed_type}, URL: {model.url}")
     return JSONResponse({"status": "success", "feed_id": feed_id})
 
-@app.delete("/api/feeds/{feed_id}")
+@app.delete("/api/feeds/{feed_id}", dependencies=[Depends(require_admin)])
 async def api_delete_feed(feed_id: int):
     """Delete a feed."""
     db.delete_feed(feed_id)
     return JSONResponse({"status": "success"})
 
-@app.post("/api/feeds/{feed_id}/toggle")
+@app.post("/api/feeds/{feed_id}/toggle", dependencies=[Depends(require_admin)])
 async def api_toggle_feed(feed_id: int, payload: Dict[str, Any]):
     """Enable/disable a feed without deleting it.
 
@@ -2075,7 +2254,7 @@ async def api_toggle_feed(feed_id: int, payload: Dict[str, Any]):
     )
     return JSONResponse({"status": "success", "feed_id": feed_id, "enabled": model.enabled})
 
-@app.post("/api/staging/tag")
+@app.post("/api/staging/tag", dependencies=[Depends(require_admin)])
 async def api_staging_tag():
     """Process downloads: tag+moved into staging when the series is in Calibre.
 
@@ -2145,7 +2324,7 @@ async def api_torbox_poll_now():
     })
 
 
-@app.post("/api/downloads/prune-empty")
+@app.post("/api/downloads/prune-empty", dependencies=[Depends(require_admin)])
 async def api_downloads_prune_empty(payload: Optional[Dict[str, Any]] = None):
     """Manually prune EMPTY leftover folders (never rmtree; busy dirs skipped)."""
     body = payload or {}
@@ -2161,12 +2340,19 @@ async def api_downloads_prune_empty(payload: Optional[Dict[str, Any]] = None):
     return JSONResponse({"status": "success", **result, "task_id": task["id"], "task": task})
 
 
-@app.post("/api/downloads/flatten-staging")
+@app.post("/api/downloads/flatten-staging", dependencies=[Depends(require_admin)])
 async def api_downloads_flatten_staging():
     """Move every file in nested staging folders into the flat staging root."""
     result, task = await asyncio.to_thread(
         _recorded_task, "downloads:flatten", "Flatten staging folder",
-        lambda reporter: downloads_pipeline.flatten_staging_dir(_staging_dir_setting(), db),
+        lambda reporter: downloads_pipeline.flatten_staging_dir(
+            _staging_dir_setting(), db,
+            exclude_dirs={
+                str(user.get("staging_folder") or "").strip().lower()
+                for user in db.list_users()
+                if str(user.get("staging_folder") or "").strip()
+            },
+        ),
         auth_module.get_current_actor(), None,
     )
     return JSONResponse({"status": "success", **result, "task_id": task["id"], "task": task})
@@ -2415,12 +2601,18 @@ def _match_awaiting_series(
     db._invalidate_grouped_cache()
     moved = 0
     try:
+        user_folders = {
+            str(user.get("staging_folder") or "").strip().lower()
+            for user in db.list_users()
+            if str(user.get("staging_folder") or "").strip()
+        }
         route_result = downloads_pipeline.process_downloads_to_staging(
             scheduler.get_downloads_dir(create=False),
             _staging_dir_setting(),
             db.get_series_templates_map(),
             db,
             actor=actor,
+            exclude_dirs=user_folders,
         )
         moved = int(route_result.get("tagged_and_moved") or 0)
         scheduler.notify_processed_batches(route_result)
@@ -2476,7 +2668,7 @@ async def api_ln_audit():
     return JSONResponse(result)
 
 
-@app.post("/api/maintenance/light-novels/cleanup")
+@app.post("/api/maintenance/light-novels/cleanup", dependencies=[Depends(require_admin)])
 async def api_ln_cleanup(payload: Optional[Dict[str, Any]] = None):
     body = payload or {}
     if body.get("confirm") is not True:
@@ -2518,7 +2710,7 @@ async def api_false_series_audit():
     return JSONResponse(result)
 
 
-@app.post("/api/maintenance/false-series/repair")
+@app.post("/api/maintenance/false-series/repair", dependencies=[Depends(require_admin)])
 async def api_false_series_repair(payload: Optional[Dict[str, Any]] = None):
     body = payload or {}
     if body.get("confirm") is not True:
@@ -2550,7 +2742,7 @@ async def api_false_series_repair(payload: Optional[Dict[str, Any]] = None):
     return JSONResponse({**result, "task_id": task["id"], "task": task})
 
 
-@app.post("/api/maintenance/repair-volume-ranges")
+@app.post("/api/maintenance/repair-volume-ranges", dependencies=[Depends(require_admin)])
 async def api_repair_volume_ranges(payload: Optional[Dict[str, Any]] = None):
     body = payload or {}
     ids = body.get("release_ids") or []
@@ -2598,7 +2790,7 @@ async def api_releases_cache(
     return JSONResponse({"status": "success", **result})
 
 
-@app.post("/api/maintenance/clear-releases")
+@app.post("/api/maintenance/clear-releases", dependencies=[Depends(require_admin)])
 async def api_clear_releases(payload: Optional[Dict[str, Any]] = None):
     body = payload or {}
     if body.get("confirm") is not True:
@@ -2641,7 +2833,7 @@ async def api_series_attribution_audit():
     return JSONResponse({**result, "task_id": task["id"], "task": task})
 
 
-@app.post("/api/maintenance/series-attribution-repair")
+@app.post("/api/maintenance/series-attribution-repair", dependencies=[Depends(require_admin)])
 async def api_series_attribution_repair(payload: Optional[Dict[str, Any]] = None):
     body = payload or {}
     release_ids = body.get("release_ids") or []
@@ -2663,7 +2855,7 @@ async def api_series_attribution_repair(payload: Optional[Dict[str, Any]] = None
     return JSONResponse({**result, "task_id": task["id"], "task": task})
 
 
-@app.post("/api/logs/prune")
+@app.post("/api/logs/prune", dependencies=[Depends(require_admin)])
 async def api_logs_prune():
     """Manually prune activity_logs (retention + max rows) and checkpoint the WAL."""
     result, task = await asyncio.to_thread(
@@ -2836,7 +3028,7 @@ async def api_tagger_preview(filename: str = Query(..., min_length=1, max_length
     return JSONResponse(await asyncio.to_thread(_preview_staging_cbz, entry))
 
 
-@app.post("/api/tagger/manual-tag")
+@app.post("/api/tagger/manual-tag", dependencies=[Depends(require_admin)])
 async def api_tagger_manual_tag(payload: Dict[str, Any]):
     """Write user-supplied metadata into one staged CBZ (feature 16 workflow).
 
@@ -2982,7 +3174,7 @@ def _failure_file_path(row: Dict[str, Any], root: str) -> str:
     return safe_path
 
 
-@app.post("/api/downloads/inventory/audit")
+@app.post("/api/downloads/inventory/audit", dependencies=[Depends(require_admin)])
 async def api_inventory_cleanup_audit():
     """Read-only preview of duplicate / already-present raw inventory entries."""
     result = await asyncio.to_thread(
@@ -2992,7 +3184,7 @@ async def api_inventory_cleanup_audit():
     return JSONResponse(result)
 
 
-@app.post("/api/downloads/inventory/clear")
+@app.post("/api/downloads/inventory/clear", dependencies=[Depends(require_admin)])
 async def api_inventory_cleanup_clear(payload: Optional[Dict[str, Any]] = None):
     body = payload or {}
     if body.get("confirm") is not True:
@@ -3022,7 +3214,7 @@ async def api_inventory_cleanup_clear(payload: Optional[Dict[str, Any]] = None):
     return JSONResponse({"status": "started", **info})
 
 
-@app.post("/api/downloads/inventory/delete")
+@app.post("/api/downloads/inventory/delete", dependencies=[Depends(require_admin)])
 async def api_inventory_cleanup_delete(payload: Dict[str, Any]):
     if payload.get("confirm") is not True:
         raise HTTPException(status_code=400, detail="confirm must be true to delete a raw inventory entry")
@@ -3052,7 +3244,7 @@ async def api_download_failures():
     return JSONResponse({"status": "success", "failures": rows, "count": len(rows)})
 
 
-@app.post("/api/downloads/failures/scan")
+@app.post("/api/downloads/failures/scan", dependencies=[Depends(require_admin)])
 async def api_download_failures_scan():
     root = scheduler.get_downloads_dir(create=False)
 
@@ -3072,7 +3264,7 @@ async def api_download_failures_scan():
     return JSONResponse({"status": "success", **result, "task_id": task["id"], "task": task})
 
 
-@app.post("/api/downloads/failures/{failure_id}/retry")
+@app.post("/api/downloads/failures/{failure_id}/retry", dependencies=[Depends(require_admin)])
 async def api_download_failure_retry(failure_id: int):
     row = await asyncio.to_thread(db.get_download_failure, failure_id)
     if not row or str(row.get("status")) != "failed":
@@ -3103,7 +3295,7 @@ async def api_download_failure_retry(failure_id: int):
                          "download": body, "state": release_download_state(db.get_release_by_id(int(info["release_id"])))})
 
 
-@app.post("/api/downloads/failures/{failure_id}/convert")
+@app.post("/api/downloads/failures/{failure_id}/convert", dependencies=[Depends(require_admin)])
 async def api_download_failure_convert(failure_id: int):
     """Convert one convertible raw archive to CBZ, then re-run routing (task-67)."""
     row = await asyncio.to_thread(db.get_download_failure, failure_id)
@@ -3186,7 +3378,7 @@ def _delete_failure_rows(rows: List[Dict[str, Any]], root: str) -> Dict[str, Any
             "deleted_ids": deleted_ids}
 
 
-@app.post("/api/downloads/failures/{failure_id}/delete")
+@app.post("/api/downloads/failures/{failure_id}/delete", dependencies=[Depends(require_admin)])
 async def api_download_failure_delete(failure_id: int):
     row = await asyncio.to_thread(db.get_download_failure, failure_id)
     if not row or str(row.get("status")) != "failed":
@@ -3207,7 +3399,7 @@ async def api_download_failure_delete(failure_id: int):
     return JSONResponse({"status": "success", **result, "remaining": remaining})
 
 
-@app.post("/api/downloads/failures/delete-all")
+@app.post("/api/downloads/failures/delete-all", dependencies=[Depends(require_admin)])
 async def api_download_failures_delete_all(payload: Optional[Dict[str, Any]] = None):
     body = payload or {}
     if body.get("confirm") is not True:
@@ -3369,7 +3561,7 @@ async def api_staging_duplicates():
     return JSONResponse({**result, "staging_dir": _staging_dir_setting()})
 
 
-@app.post("/api/downloads/staging-duplicates/purge")
+@app.post("/api/downloads/staging-duplicates/purge", dependencies=[Depends(require_admin)])
 async def api_staging_duplicates_purge(payload: Optional[Dict[str, Any]] = None):
     body = payload or {}
     if body.get("confirm") is not True:
@@ -3499,7 +3691,7 @@ def _repair_staging_cbz_series(
     }
 
 
-@app.post("/api/tagger/repair-series")
+@app.post("/api/tagger/repair-series", dependencies=[Depends(require_admin)])
 async def api_tagger_repair_series(payload: Dict[str, Any]):
     """Explicitly repair the ``<Series>`` value of user-selected staged CBZ files.
 
@@ -3541,7 +3733,7 @@ async def api_unified_search(
     result = await asyncio.to_thread(search_module.unified_search, db, query, limit)
     return JSONResponse(result)
 
-@app.post("/api/downloader/test")
+@app.post("/api/downloader/test", dependencies=[Depends(require_admin)])
 async def api_downloader_test(payload: Optional[Dict[str, Any]] = None):
     """Test connection to qBittorrent, either with saved settings or transient test settings."""
     model = _validated_payload(schemas.DownloaderTestRequest, payload or {})
@@ -3562,7 +3754,7 @@ async def api_downloader_test(payload: Optional[Dict[str, Any]] = None):
     res = client.test_connection()
     return JSONResponse(res)
 
-@app.post("/api/downloader/torbox/test")
+@app.post("/api/downloader/torbox/test", dependencies=[Depends(require_admin)])
 async def api_downloader_torbox_test(payload: Optional[Dict[str, Any]] = None):
     """Test the Torbox connection (plan/slots).  An unsaved key may be supplied."""
     model = _validated_payload(schemas.TorboxTestRequest, payload or {})
@@ -3573,7 +3765,7 @@ async def api_downloader_torbox_test(payload: Optional[Dict[str, Any]] = None):
         client = build_downloader(db, engine="torbox")
     return JSONResponse(client.test_connection())
 
-@app.post("/api/downloader/configure")
+@app.post("/api/downloader/configure", dependencies=[Depends(require_admin)])
 async def api_downloader_configure(payload: Dict[str, Any]):
     """Save in-app BitTorrent downloader configuration and test connection."""
     model = _validated_payload(schemas.DownloaderConfigureRequest, payload)
@@ -3610,19 +3802,19 @@ async def api_downloader_queue():
     torrents = qbit.get_torrents(category="manga")
     return JSONResponse({"status": "success", "torrents": torrents})
 
-@app.post("/api/downloader/pause/{torrent_hash}")
+@app.post("/api/downloader/pause/{torrent_hash}", dependencies=[Depends(require_admin)])
 async def api_downloader_pause(torrent_hash: str):
     qbit = scheduler.get_qbit_client()
     success = qbit.pause_torrent(torrent_hash)
     return JSONResponse({"status": "success" if success else "error"})
 
-@app.post("/api/downloader/resume/{torrent_hash}")
+@app.post("/api/downloader/resume/{torrent_hash}", dependencies=[Depends(require_admin)])
 async def api_downloader_resume(torrent_hash: str):
     qbit = scheduler.get_qbit_client()
     success = qbit.resume_torrent(torrent_hash)
     return JSONResponse({"status": "success" if success else "error"})
 
-@app.delete("/api/downloader/delete/{torrent_hash}")
+@app.delete("/api/downloader/delete/{torrent_hash}", dependencies=[Depends(require_admin)])
 async def api_downloader_delete(torrent_hash: str):
     qbit = scheduler.get_qbit_client()
     success = qbit.delete_torrent(torrent_hash, delete_files=False)
@@ -3775,8 +3967,44 @@ async def api_release_download(release_id: int):
             detail="Volumes are already staged and waiting for Calibre import; not downloading again",
         )
 
+    # --- Multi-user request policy -------------------------------------
+    # Normal users queue a request for admin approval unless an admin granted
+    # them the bypass flag. Admins (and the legacy no-login deployment) keep the
+    # direct-download behavior.
+    requester = _current_user_row()
+    if requester is not None and not requester.get("is_admin") and not requester.get("bypass_approval"):
+        pending = await asyncio.to_thread(
+            db.create_release_request, int(requester["id"]), release_id,
+        )
+        db.log_activity(
+            "RELEASE_REQUEST_PENDING",
+            f"Requested '{target.get('title')}' (awaiting admin approval)",
+            json.dumps({"release_id": release_id, "request_id": pending.get("id")}),
+        )
+        return JSONResponse({
+            "status": "pending_approval",
+            "message": "Your request is waiting for an admin to approve it.",
+            "request": pending,
+        }, status_code=202)
+    if requester is not None and not requester.get("is_admin"):
+        # A bypassing user owns the routing target; an admin download keeps the
+        # already-approved requester's folder.
+        await asyncio.to_thread(db.set_release_request_user, release_id, int(requester["id"]))
+        target["request_user_id"] = int(requester["id"])
+
     download_url = target.get("download_url") or target.get("link")
     downloads_dir = scheduler.get_downloads_dir()
+    request_user = None
+    request_user_id = target.get("request_user_id")
+    if request_user_id:
+        request_user = await asyncio.to_thread(db.get_user_by_id, int(request_user_id))
+        if request_user is not None:
+            folder = await asyncio.to_thread(db.ensure_user_staging_folder, int(request_user["id"]))
+            downloads_dir = os.path.join(downloads_dir, folder)
+            try:
+                os.makedirs(downloads_dir, exist_ok=True)
+            except OSError as exc:  # pragma: no cover - surfaced via storage health
+                logger.warning("Could not create user downloads folder '%s': %s", downloads_dir, exc)
     # Accurate wanted volumes at every entry point: stored values, else the matcher.
     missing = await asyncio.to_thread(scheduler.resolve_release_missing_volumes, target)
     vols = target.get("volumes") or []
@@ -3853,18 +4081,32 @@ async def api_release_download(release_id: int):
 
 @app.post("/api/series/{series_id}/toggle")
 async def api_toggle_series(series_id: int):
-    """Toggle monitored status for a series."""
+    """Toggle monitored status for a series (per-user under a real login)."""
+    user_id = _current_user_id()
+    if user_id is not None:
+        row = db.get_series_by_id(series_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Series not found")
+        membership = db.get_user_series_membership(user_id, series_id)
+        if membership:
+            new_value = not bool(membership.get("is_monitored"))
+            db.set_user_series_monitored(user_id, series_id, new_value)
+        else:
+            # First toggle on a shared Calibre row inherits its state, then flips.
+            new_value = not bool(row.get("is_monitored"))
+            db.add_user_series(user_id, series_id, is_monitored=new_value)
+        return JSONResponse({"status": "success", "is_monitored": new_value})
     is_monitored = db.toggle_series_monitored(series_id)
     return JSONResponse({"status": "success", "is_monitored": is_monitored})
 
-@app.post("/api/series/{series_id}/link")
+@app.post("/api/series/{series_id}/link", dependencies=[Depends(require_admin)])
 async def api_update_series_link(series_id: int, payload: Dict[str, Any]):
     """Update or save custom website link for a series (http/https only)."""
     model = _validated_payload(schemas.SeriesLinkUpdateRequest, payload)
     db.update_series_link(series_id, model.website_url)
     return JSONResponse({"status": "success", "website_url": model.website_url})
 
-@app.post("/api/releases/{release_id}/different-series")
+@app.post("/api/releases/{release_id}/different-series", dependencies=[Depends(require_admin)])
 async def api_release_different_series(release_id: int, payload: Dict[str, Any]):
     """Re-key exactly one release to another series (no global alias) — task-66."""
     release = await asyncio.to_thread(db.get_release_by_id, release_id)
@@ -3969,7 +4211,7 @@ async def api_release_different_series(release_id: int, payload: Dict[str, Any])
     })
 
 
-@app.post("/api/series/{series_id}/match-calibre")
+@app.post("/api/series/{series_id}/match-calibre", dependencies=[Depends(require_admin)])
 async def api_match_series_to_calibre(series_id: int, payload: Dict[str, Any]):
     """Manually link a tracked series to an existing Calibre series (task-62)."""
     try:
@@ -4034,7 +4276,7 @@ async def api_series_link_audit():
     return JSONResponse({"status": "success", "proposed": proposed, "count": len(proposed)})
 
 
-@app.post("/api/series/link-repair")
+@app.post("/api/series/link-repair", dependencies=[Depends(require_admin)])
 async def api_series_link_repair(payload: Optional[Dict[str, Any]] = None):
     """Merge/link tracked series to Calibre (previewable, idempotent, task-62)."""
     body = payload or {}
@@ -4067,7 +4309,7 @@ async def api_series_management(series_id: int):
     return JSONResponse({"status": "success", **payload})
 
 
-@app.post("/api/series/{series_id}/identity")
+@app.post("/api/series/{series_id}/identity", dependencies=[Depends(require_admin)])
 async def api_update_series_identity(series_id: int, payload: Optional[Dict[str, Any]] = None):
     """Edits the cosmetic display title and/or the AniList pin lock."""
     body = payload or {}
@@ -4093,7 +4335,7 @@ async def api_update_series_identity(series_id: int, payload: Optional[Dict[str,
     return JSONResponse({"status": "success", "series": updated})
 
 
-@app.post("/api/series/{series_id}/anilist-map")
+@app.post("/api/series/{series_id}/anilist-map", dependencies=[Depends(require_admin)])
 async def api_pin_series_anilist(series_id: int, payload: Optional[Dict[str, Any]] = None):
     """Pins one series to an exact AniList entry (id/URL) or a chosen search hit."""
     body = payload or {}
@@ -4127,7 +4369,7 @@ async def api_pin_series_anilist(series_id: int, payload: Optional[Dict[str, Any
     })
 
 
-@app.post("/api/series/{series_id}/synonyms/spin-out")
+@app.post("/api/series/{series_id}/synonyms/spin-out", dependencies=[Depends(require_admin)])
 async def api_spin_out_series_synonym(series_id: int, payload: Optional[Dict[str, Any]] = None):
     """Splits one synonym into its own tracked series (aliases retargeted)."""
     body = payload or {}
@@ -4154,7 +4396,7 @@ async def api_spin_out_series_synonym(series_id: int, payload: Optional[Dict[str
     return JSONResponse(result)
 
 
-@app.post("/api/series/{series_id}/aliases/{alias_id}/retarget")
+@app.post("/api/series/{series_id}/aliases/{alias_id}/retarget", dependencies=[Depends(require_admin)])
 async def api_retarget_series_alias(
     series_id: int, alias_id: int, payload: Optional[Dict[str, Any]] = None,
 ):
@@ -4213,7 +4455,7 @@ def _start_backfill_task(series_name: str, max_pages: int) -> tuple:
     return res, background_tasks.serialize_task(db.get_background_task(task_id))
 
 
-@app.post("/api/series/{series_id}/backfill")
+@app.post("/api/series/{series_id}/backfill", dependencies=[Depends(require_admin)])
 async def api_series_backfill(series_id: int, payload: Optional[Dict[str, Any]] = None):
     """Refresh one series in the background: metadata, Calibre info, then Nyaa crawl."""
     model = _validated_payload(schemas.SeriesBackfillRequest, payload or {})
@@ -4228,7 +4470,7 @@ async def api_series_backfill(series_id: int, payload: Optional[Dict[str, Any]] 
     payload["task"] = task
     return JSONResponse(payload)
 
-@app.post("/api/series/backfill")
+@app.post("/api/series/backfill", dependencies=[Depends(require_admin)])
 async def api_series_backfill_by_name(payload: Dict[str, Any]):
     """Refresh one series by name in the background: metadata, Calibre info, then Nyaa crawl."""
     model = _validated_payload(schemas.SeriesBackfillByNameRequest, payload)
@@ -4238,7 +4480,7 @@ async def api_series_backfill_by_name(payload: Dict[str, Any]):
     payload["task"] = task
     return JSONResponse(payload)
 
-@app.post("/api/releases/{release_id}/status")
+@app.post("/api/releases/{release_id}/status", dependencies=[Depends(require_admin)])
 async def api_update_release_status(release_id: int, payload: Dict[str, Any]):
     """Update release status (e.g. IN_CALIBRE, REQUESTED, or IGNORED)."""
     model = _validated_payload(schemas.ReleaseStatusUpdateRequest, payload)
@@ -4263,14 +4505,22 @@ async def api_unignore_release(release_id: int):
 async def api_add_blacklist(payload: Dict[str, Any]):
     """Add a series to the blacklist and purge pending requests for it."""
     model = _validated_payload(schemas.BlacklistCreateRequest, payload)
-    success = db.add_to_blacklist(model.name, model.reason)
+    user_id = _current_user_id()
+    if user_id is not None:
+        db.add_user_blacklist(user_id, model.name, model.reason)
+    else:
+        db.add_to_blacklist(model.name, model.reason)
     db.log_activity("SERIES_BLACKLISTED", f"Blacklisted series: {model.name}", model.reason)
     return JSONResponse({"status": "success"})
 
 @app.delete("/api/blacklist/{blacklist_id}")
 async def api_delete_blacklist(blacklist_id: int):
-    """Remove a series from the blacklist."""
-    db.remove_from_blacklist(blacklist_id)
+    """Remove a series from the blacklist (per-user under a real login)."""
+    user_id = _current_user_id()
+    if user_id is not None:
+        db.remove_user_blacklist(user_id, blacklist_id)
+    else:
+        db.remove_from_blacklist(blacklist_id)
     db.log_activity("BLACKLIST_REMOVED", f"Removed series #{blacklist_id} from blacklist")
     return JSONResponse({"status": "success"})
 
@@ -4278,19 +4528,28 @@ async def api_delete_blacklist(blacklist_id: int):
 
 @app.get("/api/prioritized/groups")
 async def api_get_prioritized_groups():
-    groups = db.get_prioritized_groups()
+    user_id = _current_user_id()
+    groups = db.get_user_prioritized_groups(user_id) if user_id is not None else db.get_prioritized_groups()
     return JSONResponse({"status": "success", "groups": groups})
 
 @app.post("/api/prioritized/groups")
 async def api_add_prioritized_group(payload: Dict[str, Any]):
     model = _validated_payload(schemas.PrioritizedGroupCreateRequest, payload)
-    success = db.add_prioritized_group(model.name, model.notes, model.priority)
+    user_id = _current_user_id()
+    if user_id is not None:
+        db.add_user_prioritized_group(user_id, model.name, model.notes, model.priority)
+    else:
+        db.add_prioritized_group(model.name, model.notes, model.priority)
     db.log_activity("GROUP_PRIORITIZED", f"Added prioritized release group: {model.name}", model.notes)
     return JSONResponse({"status": "success"})
 
 @app.delete("/api/prioritized/groups/{group_id}")
 async def api_delete_prioritized_group(group_id: int):
-    db.remove_prioritized_group(group_id)
+    user_id = _current_user_id()
+    if user_id is not None:
+        db.remove_user_prioritized_group(user_id, group_id)
+    else:
+        db.remove_prioritized_group(group_id)
     db.log_activity("GROUP_UNPRIORITIZED", f"Removed prioritized group #{group_id}")
     return JSONResponse({"status": "success"})
 
@@ -4324,6 +4583,11 @@ async def api_discovery_track(payload: Dict[str, Any]):
     # Re-key the release (and any sibling row still stored under the typed name) so
     # releases.series_name and series_tracking.name stay one stable key.
     db.track_discovered_series(stable_name, release_id, legacy_names=[typed_name])
+    user_id = _current_user_id()
+    if user_id is not None:
+        tracked_row = db.get_series_by_name(stable_name)
+        if tracked_row:
+            db.add_user_series(user_id, int(tracked_row["id"]), is_monitored=True)
     tracked_msg = f"Started tracking new series: '{stable_name}'"
     if display_name and display_name != stable_name:
         tracked_msg += f" (display title: '{display_name}')"
@@ -4341,7 +4605,11 @@ async def api_discovery_track(payload: Dict[str, Any]):
 async def api_discovery_blacklist(payload: Dict[str, Any]):
     """Blacklist a series directly from a discovery card."""
     model = _validated_payload(schemas.DiscoveryBlacklistRequest, payload)
-    db.add_to_blacklist(model.series_name, model.reason)
+    user_id = _current_user_id()
+    if user_id is not None:
+        db.add_user_blacklist(user_id, model.series_name, model.reason)
+    else:
+        db.add_to_blacklist(model.series_name, model.reason)
     db.log_activity("SERIES_BLACKLISTED", f"Blacklisted series from discovery: {model.series_name}")
     return JSONResponse({"status": "success"})
 
@@ -4383,7 +4651,7 @@ async def api_get_settings():
         settings["torbox_api_key"] = schemas.TORBOX_API_KEY_MASK
     return JSONResponse({"status": "success", "settings": settings})
 
-@app.post("/api/settings")
+@app.post("/api/settings", dependencies=[Depends(require_admin)])
 async def api_save_settings(payload: Dict[str, Any]):
     """Save application settings (strict key whitelist; unknown keys rejected)."""
     model = _validated_payload(schemas.SettingsUpdateRequest, payload)
@@ -4445,7 +4713,7 @@ async def api_save_settings(payload: Dict[str, Any]):
             logger.debug("Routing/inventory pass after settings save failed: %s", exc)
     return JSONResponse({"status": "success", "storage": storage})
 
-@app.post("/api/settings/test-webhook")
+@app.post("/api/settings/test-webhook", dependencies=[Depends(require_admin)])
 async def api_test_webhook(payload: Optional[Dict[str, Any]] = None):
     """Test Discord and/or generic webhook endpoints with immediate feedback."""
     model = _validated_payload(schemas.WebhookTestRequest, payload or {})
@@ -4457,7 +4725,7 @@ async def api_test_webhook(payload: Optional[Dict[str, Any]] = None):
 
 # --- Polite Historical Backfill Endpoints ---
 
-@app.post("/api/backfill/start")
+@app.post("/api/backfill/start", dependencies=[Depends(require_admin)])
 async def api_backfill_start(payload: Optional[Dict[str, Any]] = None):
     """Starts polite historical backfill across feeds."""
     import asyncio
@@ -4476,7 +4744,7 @@ async def api_backfill_start(payload: Optional[Dict[str, Any]] = None):
     )
     return JSONResponse({"status": "started", "message": f"Polite backfill started from page {start_page} in background"})
 
-@app.post("/api/backfill/stop")
+@app.post("/api/backfill/stop", dependencies=[Depends(require_admin)])
 async def api_backfill_stop():
     """Signals the running backfiller to stop gracefully."""
     scheduler.stop_backfill()
@@ -4487,7 +4755,7 @@ async def api_backfill_status():
     """Returns current backfill progress and state."""
     return JSONResponse(scheduler.get_backfill_status())
 
-@app.post("/api/maintenance/clear")
+@app.post("/api/maintenance/clear", dependencies=[Depends(require_admin)])
 async def api_maintenance_clear(payload: Dict[str, Any]):
     """Safe maintenance/clear actions (Settings -> Maintenance).
 
@@ -4506,7 +4774,7 @@ async def api_maintenance_clear(payload: Dict[str, Any]):
     return JSONResponse(result)
 
 
-@app.post("/api/debug/action")
+@app.post("/api/debug/action", dependencies=[Depends(require_admin)])
 async def api_debug_action(payload: Dict[str, Any]):
     """Debug maintenance operations: clear discovery, descriptions, or cover cache.
 

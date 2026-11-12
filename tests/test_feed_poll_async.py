@@ -77,7 +77,7 @@ def _wait_for(predicate, timeout=5.0, interval=0.02):
 def test_endpoint_source_guard():
     print("--> Testing feed-check route wiring (source guard)...")
     main_source = _source(MAIN_SOURCE)
-    start = main_source.index('@app.post("/api/feeds/check")')
+    start = main_source.index('@app.post("/api/feeds/check", dependencies=[Depends(require_admin)])')
     end = main_source.index('@app.get("/api/feeds/check/status")')
     handler = main_source[start:end]
     assert "async def api_feeds_check" in handler, handler

@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+
+{% block title %}Admin · MangaTrax{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+                <i data-lucide="shield-check" class="w-6 h-6 text-brand-400"></i>
+                Admin panel
+            </h1>
+            <p class="text-xs text-slate-400 mt-1">
+                Roles come from the OIDC <span class="font-mono">groups</span> claim. Policy flags below are per user and never touch the shared Calibre library.
+            </p>
+        </div>
+        <button type="button" onclick="refreshAdminUsers()" class="min-h-[44px] md:min-h-0 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-2">
+            <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-brand-400"></i>
+            <span>Refresh</span>
+        </button>
+    </div>
+
+    <div class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+        <div class="px-4 sm:px-6 py-4 border-b border-slate-800 flex items-center justify-between gap-3">
+            <h2 class="text-sm font-bold text-white flex items-center gap-2">
+                <i data-lucide="users" class="w-4 h-4 text-brand-400"></i>
+                Users
+            </h2>
+            <span class="text-[11px] text-slate-400" id="admin-users-count">{{ users|length }} known</span>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-xs mt-table-cards">
+                <thead>
+                    <tr class="bg-slate-900/80 border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-[11px]">
+                        <th scope="col" class="py-3 px-4">User</th>
+                        <th scope="col" class="py-3 px-4">Groups</th>
+                        <th scope="col" class="py-3 px-4 text-center">Role</th>
+                        <th scope="col" class="py-3 px-4 text-center">Auto-download</th>
+                        <th scope="col" class="py-3 px-4 text-center">Bypass approval</th>
+                        <th scope="col" class="py-3 px-4 text-right">Last seen</th>
+                    </tr>
+                </thead>
+                <tbody id="admin-users-body">
+                    {% for user in users %}
+                    {% set label = user.display_name or user.username or user.subject %}
+                    <tr class="border-b border-slate-800/60 hover:bg-slate-850/40 transition-colors" data-user-id="{{ user.id }}">
+                        <td data-label="User" class="py-3 px-4">
+                            <div class="font-semibold text-slate-100">{{ label }}</div>
+                            <div class="text-[11px] text-slate-500">{{ user.email or user.subject }}</div>
+                        </td>
+                        <td data-label="Groups" class="py-3 px-4">
+                            {% if user.groups %}
+                            <div class="flex flex-wrap gap-1">
+                                {% for group in user.groups %}
+                                <span class="px-1.5 py-0.5 rounded bg-slate-800/80 border border-slate-700 text-slate-300 text-[10px]">{{ group }}</span>
+                                {% endfor %}
+                            </div>
+                            {% else %}
+                            <span class="text-slate-500">—</span>
+                            {% endif %}
+                        </td>
+                        <td data-label="Role" class="py-3 px-4 text-center">
+                            {% if user.is_admin %}
+                            <span class="px-2 py-0.5 rounded-full bg-brand-500/15 text-brand-300 border border-brand-500/30 text-[10px] font-bold">Admin</span>
+                            {% else %}
+                            <span class="px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-300 text-[10px]">User</span>
+                            {% endif %}
+                        </td>
+                        <td data-label="Auto-download" class="py-3 px-4 text-center">
+                            <label class="inline-flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" role="switch" data-user-flag="auto_download" data-user="{{ user.id }}" onchange="setUserFlag({{ user.id }}, 'auto_download', this.checked)" class="w-4 h-4 rounded border-slate-700 bg-slate-950 text-brand-600 focus:ring-0" {% if user.auto_download %}checked{% endif %}>
+                                <span class="text-[11px] text-slate-400">off by default</span>
+                            </label>
+                        </td>
+                        <td data-label="Bypass approval" class="py-3 px-4 text-center">
+                            <label class="inline-flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" role="switch" data-user-flag="bypass_approval" data-user="{{ user.id }}" onchange="setUserFlag({{ user.id }}, 'bypass_approval', this.checked)" class="w-4 h-4 rounded border-slate-700 bg-slate-950 text-brand-600 focus:ring-0" {% if user.bypass_approval %}checked{% endif %}>
+                                <span class="text-[11px] text-slate-400">requests need approval</span>
+                            </label>
+                        </td>
+                        <td data-label="Last seen" class="py-3 px-4 text-right text-slate-400 font-mono text-[11px]">
+                            {{ user.last_seen|localtime if user.last_seen else '—' }}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div class="px-4 sm:px-6 py-3 bg-slate-900/60 border-t border-slate-800 text-[11px] text-slate-400">
+            Auto-download sends only that user's approved requests to the downloader. Bypass approval lets the user request directly; others wait in the approval queue.
+        </div>
+    </div>
+
+    <div class="bg-darkcard border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+        <div class="px-4 sm:px-6 py-4 border-b border-slate-800 flex items-center justify-between gap-3">
+            <h2 class="text-sm font-bold text-white flex items-center gap-2">
+                <i data-lucide="clipboard-check" class="w-4 h-4 text-amber-400"></i>
+                Pending requests
+            </h2>
+            <span class="text-[11px] text-slate-400" id="admin-approvals-count">{{ pending_approvals|length }} waiting</span>
+        </div>
+        <div id="admin-approvals" class="divide-y divide-slate-800/60 text-xs">
+            {% if pending_approvals %}
+            {% for item in pending_approvals %}
+            <div class="px-4 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center gap-2 justify-between" data-approval-id="{{ item.id }}">
+                <div class="min-w-0">
+                    <p class="font-semibold text-slate-100 break-words">{{ item.title }}</p>
+                    <p class="text-[11px] text-slate-400">
+                        requested by <span class="text-slate-300">{{ item.requester }}</span>
+                        · {{ item.series_name or '—' }}
+                        · {{ item.created_at|localtime }}
+                    </p>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                    <button type="button" onclick="decideApproval({{ item.id }}, 'approve')" class="px-3 py-1.5 rounded-lg bg-emerald-600/80 hover:bg-emerald-500 text-white text-xs font-semibold">Approve</button>
+                    <button type="button" onclick="decideApproval({{ item.id }}, 'reject')" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-900/40 border border-slate-700 text-rose-300 text-xs font-semibold">Reject</button>
+                </div>
+            </div>
+            {% endfor %}
+            {% else %}
+            <p class="px-4 sm:px-6 py-6 text-center text-slate-400">No requests are waiting for approval.</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<script>
+async function refreshAdminUsers() {
+    try {
+        const res = await fetch('/api/admin/users');
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Could not load users', 'error'); return; }
+        document.getElementById('admin-users-count').textContent = (data.users || []).length + ' known';
+        showToast('User list refreshed', 'success');
+    } catch (err) { showToast('Error: ' + err, 'error'); }
+}
+
+async function setUserFlag(userId, flag, checked) {
+    const body = {};
+    body[flag] = !!checked;
+    try {
+        const res = await fetch(`/api/admin/users/${userId}/flags`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            showToast(data.detail || 'Could not update the flag', 'error');
+            const input = document.querySelector(`[data-user-flag="${flag}"][data-user="${userId}"]`);
+            if (input) input.checked = !checked;
+            return;
+        }
+        showToast(flag === 'auto_download' ? 'Auto-download updated' : 'Approval bypass updated', 'success');
+    } catch (err) { showToast('Error: ' + err, 'error'); }
+}
+
+async function decideApproval(approvalId, decision) {
+    try {
+        const res = await fetch(`/api/admin/approvals/${approvalId}/${decision}`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Could not update the request', 'error'); return; }
+        showToast(decision === 'approve' ? 'Request approved' : 'Request rejected', 'success');
+        window.location.reload();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
+}
+</script>
+{% endblock %}

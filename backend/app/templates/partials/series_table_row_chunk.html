@@ -55,14 +55,18 @@
     </td>
     <td data-label="Actions" class="py-3 px-4 text-right mt-cell-actions">
         <div class="flex items-center justify-end gap-2">
+            {% if is_admin() %}
             <button type="button" onclick='openSeriesManage({{ s.id }}, {{ s.name|tojson }})' aria-label="Manage {{ s.name|escape }}: identity, synonyms and releases" title="Manage series identity, synonyms and releases" class="min-h-[36px] px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
                 <i data-lucide="settings-2" class="w-3.5 h-3.5 text-brand-400"></i>
                 <span>Manage</span>
             </button>
+            {% endif %}
+            {% if is_admin() %}
             <button type="button" onclick="backfillSeries({{ s.id }}, '{{ s.name|escape }}', this)" aria-label="Refresh metadata and Calibre info, then backfill {{ s.name|escape }}" title="Refresh metadata + Calibre info, then search Nyaa for all past releases and missing volumes of {{ s.name|escape }}" class="min-h-[36px] px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-brand-600/30 text-slate-300 hover:text-brand-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors">
                 <i data-lucide="history" class="w-3.5 h-3.5 text-brand-400"></i>
                 <span>Backfill</span>
             </button>
+            {% endif %}
             <button type="button" onclick="editSeriesLink({{ s.id }}, '{{ s.website_url|escape }}', '{{ s.name|escape }}')" aria-label="Edit website link for {{ s.name|escape }}" title="Edit website link" class="min-h-[36px] min-w-[36px] p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs flex items-center justify-center gap-1 transition-colors">
                 <i data-lucide="link" class="w-3.5 h-3.5"></i>
             </button>
