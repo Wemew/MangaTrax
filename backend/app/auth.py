@@ -17,7 +17,7 @@ One component, three deployment modes, selected by ``MANGATRAX_AUTH_MODE``:
     OpenID Connect (PocketID / any standard confidential client) implemented
     with **Authlib** - no hand-rolled JWT/JWKS crypto anywhere in this module.
     ``GET /auth/login`` redirects to the discovered authorization endpoint with
-    ``response_type=code``, ``scope=openid profile email``, ``state``, ``nonce``
+    ``response_type=code``, ``scope=openid profile email groups``, ``state``, ``nonce``
     and PKCE S256; ``GET /auth/callback`` verifies state+nonce, exchanges the
     code at the token endpoint, validates the ID token (``iss``/``aud``/``exp``/
     ``nonce``) against the discovered JWKS and sets a signed session cookie;
@@ -63,6 +63,12 @@ Variable                         Default    Meaning
                                             when ``MANGATRAX_PUBLIC_URL`` is set
                                             (Origin/Referer check).
 ``MANGATRAX_DEBUG_ACTIONS``      ``0``      Enable ``/api/debug/action``.
+``MANGATRAX_ADMIN_GROUPS``       ``mangatrax-admins``
+                                            Comma-separated IdP group names that
+                                            grant the Admin role. Groups are only
+                                            sent when the client requests the
+                                            ``groups`` scope (it does).
+``MANGATRAX_OIDC_GROUPS_CLAIM``  ``groups`` Claim carrying the group list.
 ===============================  =========  ====================================
 
 PocketID client setup
@@ -151,8 +157,10 @@ __all__ = [
 ]
 
 AUTH_MODES = ("none", "basic", "oidc")
-SCOPE = "openid profile email"
+SCOPE = "openid profile email groups"
 SESSION_COOKIE_NAME = "mangatrax_session"
+#: Bumped whenever the session payload gains data role decisions depend on.
+SESSION_GROUPS_VERSION = 2
 STATE_COOKIE_NAME = "mangatrax_oidc_state"
 DEFAULT_SESSION_MAX_AGE = 7 * 24 * 60 * 60  # 7 days
 STATE_TTL_SECONDS = 10 * 60
@@ -310,6 +318,7 @@ class Identity:
             "name": self.display_name,
             "src": self.auth_source,
             "groups": list(self.groups),
+            "gv": SESSION_GROUPS_VERSION,
         }
 
     @classmethod
@@ -1075,6 +1084,11 @@ class AuthManager:
         if self.config.mode == "oidc":
             payload = self.session_tokens.verify(_cookies_get(cookies, SESSION_COOKIE_NAME))
             if payload:
+                if payload.get("gv") != SESSION_GROUPS_VERSION:
+                    # A session minted before the groups scope existed cannot be
+                    # trusted for role decisions: force one fresh login.
+                    logger.debug("Stale OIDC session (no groups version); re-authentication required")
+                    return None
                 identity = Identity.from_session(payload)
                 if identity:
                     return identity
@@ -1246,6 +1260,10 @@ class AuthManager:
         token_response = oidc.exchange_code(code, code_verifier)
         claims = oidc.validate_id_token(token_response.get("id_token"), expected_nonce=stored_nonce, now=now)
         identity = Identity.from_oidc_claims(claims, self.config.oidc_groups_claim)
+        logger.info(
+            "OIDC login: subject=%s groups=%s admin=%s",
+            identity.subject, list(identity.groups), self.is_admin(identity),
+        )
         self.record_identity(identity, force=True)
         session_cookie = self.session_tokens.sign(identity.to_session(), now=now)
         redirect_url = sanitize_next_path(str(payload.get("next") or "/"))

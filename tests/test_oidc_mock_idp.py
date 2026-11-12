@@ -49,7 +49,7 @@ from app import auth
 from e2e.harness import E2ETestContext
 
 HS_SECRET = "mangatrax-mock-idp-hs256-secret-0123456789"
-SCOPE_EXPECTED = "openid profile email"
+SCOPE_EXPECTED = "openid profile email groups"
 REDIRECT_URI = "https://mangatrax.example.com/auth/callback"
 
 

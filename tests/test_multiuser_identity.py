@@ -29,6 +29,24 @@ def _db(tmp_path: str) -> MangaDatabase:
     return db
 
 
+def test_groups_scope_requested():
+    assert "groups" in auth_module.SCOPE.split(), auth_module.SCOPE
+
+
+def test_stale_session_requires_relogin():
+    config = AuthConfig(mode="oidc", session_secret="x" * 32, admin_groups=("admin",))
+    manager = AuthManager(config)
+    signer = auth_module.SignedToken(config.session_secret, 3600, "session")
+    current = signer.sign({
+        "sub": "oidc|red", "username": "red", "src": "oidc",
+        "groups": ["admin"], "gv": auth_module.SESSION_GROUPS_VERSION,
+    })
+    stale = signer.sign({"sub": "oidc|red", "username": "red", "src": "oidc"})
+    cookie = auth_module.SESSION_COOKIE_NAME
+    assert manager.resolve_identity({}, {cookie: current}) is not None
+    assert manager.resolve_identity({}, {cookie: stale}) is None, "pre-groups sessions must re-authenticate"
+
+
 def test_group_normalisation():
     assert auth_module.normalize_groups(None) == ()
     assert auth_module.normalize_groups([]) == ()
@@ -142,6 +160,8 @@ def test_user_flags_and_legacy_claim(tmp_path):
 
 
 def main():
+    test_groups_scope_requested()
+    test_stale_session_requires_relogin()
     test_group_normalisation()
     test_identity_claim_and_session()
     test_admin_resolution()

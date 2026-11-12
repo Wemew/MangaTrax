@@ -239,6 +239,41 @@ def test_bypass_user_downloads_to_own_staging(ctx, blue):
     assert pending == [], "bypass users skip the queue"
 
 
+def test_whoami_reports_groups_and_role(ctx):
+    original_mode = main_app.AUTH.config.mode
+    original_groups = main_app.AUTH.config.admin_groups
+    original_set = main_app.AUTH._admin_group_set
+    try:
+        main_app.AUTH.config.mode = "oidc"
+        main_app.AUTH.config.admin_groups = ("admin",)
+        main_app.AUTH._admin_group_set = {"admin"}
+
+        token = auth_module.set_current_identity(
+            Identity(subject="oidc|red", username="red", auth_source="oidc", groups=("admin",))
+        )
+        try:
+            data = ctx.client.get("/api/whoami").json()
+        finally:
+            auth_module.reset_current_identity(token)
+        assert data["subject"] == "oidc|red", data
+        assert data["groups"] == ["admin"], data
+        assert data["is_admin"] is True, data
+        assert data["admin_groups"] == ["admin"], data
+
+        token = auth_module.set_current_identity(
+            Identity(subject="oidc|blue", username="blue", auth_source="oidc", groups=("readers",))
+        )
+        try:
+            data = ctx.client.get("/api/whoami").json()
+        finally:
+            auth_module.reset_current_identity(token)
+        assert data["groups"] == ["readers"] and data["is_admin"] is False, data
+    finally:
+        main_app.AUTH.config.mode = original_mode
+        main_app.AUTH.config.admin_groups = original_groups
+        main_app.AUTH._admin_group_set = original_set
+
+
 def test_require_admin_gate(ctx, red, blue):
     original_mode = main_app.AUTH.config.mode
     original_groups = main_app.AUTH.config.admin_groups
@@ -376,6 +411,7 @@ def main():
         test_request_approval_flow(ctx, red, blue)
         test_approval_auto_download(ctx, red, blue)
         test_bypass_user_downloads_to_own_staging(ctx, blue)
+        test_whoami_reports_groups_and_role(ctx)
         test_require_admin_gate(ctx, red, blue)
         test_admin_surface_source_guards(ctx)
         test_staging_dir_scoping(ctx, red, blue)

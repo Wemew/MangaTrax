@@ -48,6 +48,10 @@ semantic versioning.
 - **Searchable manual series matches** in Settings (250 ms debounce, explicit no-match state).
 
 ### Changed
+- **Admin recognition fixed for PocketID:** the OIDC client now requests the `groups` scope
+  (PocketID only emits the claim when it is requested), so `MANGATRAX_ADMIN_GROUPS=admin`
+  matches the IdP group name; the login log records the received groups and `GET /api/whoami`
+  shows them. Sessions minted before the groups scope are re-authenticated once.
 - **Series pickers are debounced and stale-cancelling:** the release re-bind picker waits 500 ms
   and aborts the previous request (the Calibre match picker 250 ms); an identical already-rendered
   query is not refetched.

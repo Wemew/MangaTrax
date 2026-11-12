@@ -1213,6 +1213,25 @@ async def auth_logout():
     response.delete_cookie(auth_module.SESSION_COOKIE_NAME, path="/")
     return response
 
+@app.get("/api/whoami")
+async def api_whoami():
+    """What the IdP actually delivered for this session (never secret material).
+
+    Diagnoses role problems: if ``groups`` is empty, the client's ``groups``
+    scope or the IdP claim configuration is wrong, not MangaTrax's role mapping.
+    """
+    identity = auth_module.get_current_identity()
+    return JSONResponse({
+        "auth_mode": AUTH_CONFIG.mode,
+        "subject": identity.subject if identity else None,
+        "username": identity.username if identity else None,
+        "groups": list(identity.groups) if identity else [],
+        "groups_claim": AUTH_CONFIG.oidc_groups_claim,
+        "admin_groups": list(AUTH_CONFIG.admin_groups),
+        "is_admin": AUTH.is_admin(identity),
+    })
+
+
 # --- HTML UI Routes ---
 
 @app.get("/", response_class=HTMLResponse)

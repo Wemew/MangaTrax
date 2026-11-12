@@ -48,6 +48,10 @@ services:
       # - MANGATRAX_OIDC_ISSUER=https://pocketid.example.com
       # - MANGATRAX_OIDC_CLIENT_ID=your-client-id
       # - MANGATRAX_OIDC_CLIENT_SECRET=your-client-secret
+      # - MANGATRAX_ADMIN_GROUPS=admin        # IdP group name(s) granting Admin
+      # - MANGATRAX_OIDC_GROUPS_CLAIM=groups  # claim carrying the group list
+      #   The MangaTrax client requests the `groups` scope; make sure the
+      #   admin group is allowed on the client's Access page in PocketID.
 
       # -- basic -- also acts as break-glass during a PocketID outage when mode=oidc
       # - MANGATRAX_BASIC_USER=admin

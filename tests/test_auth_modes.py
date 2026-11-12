@@ -412,7 +412,7 @@ def test_oidc_login_flow_with_double():
         assert query["nonce"][0], "nonce missing from authorization request"
         assert query["code_challenge_method"] == ["S256"], query
         assert query["code_challenge"][0], "PKCE challenge missing"
-        assert query["scope"] == ["openid profile email"], query.get("scope")
+        assert query["scope"] == ["openid profile email groups"], query.get("scope")
         assert query["redirect_uri"] == [config.callback_url]
 
         result = manager.complete_login("good-code", state, start.state_cookie)
