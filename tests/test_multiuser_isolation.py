@@ -465,6 +465,61 @@ def test_staging_groups_split_by_owner(ctx):
     assert "applyStagingFilters" in template
 
 
+def test_admin_owner_bucket_merges_own_folder(ctx, red):
+    import zipfile
+    from app import staging_groups as staging_groups_module
+
+    red_folder = ctx.db.ensure_user_staging_folder(red["id"])
+    root = os.path.join(ctx.temp_dir, "admin-owner-staging")
+    os.makedirs(os.path.join(root, red_folder), exist_ok=True)
+    for relative in ("Legacy v01.cbz", f"{red_folder}/Own v01.cbz", "blue/Other v01.cbz"):
+        target = os.path.join(root, relative)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with zipfile.ZipFile(target, "w") as archive:
+            archive.writestr("001.jpg", b"x")
+
+    red_row = ctx.db.get_user_by_id(red["id"])
+    with patch.object(main_app, "_current_user_row", return_value=red_row):
+        labels = main_app._staging_owner_labels()
+        options = main_app._staging_owner_options(include_all=True)
+        groups = staging_groups_module.build_staging_groups(root, owner_labels=labels)
+
+    assert red_folder.lower() not in labels, labels
+    assert options[0] == {"value": "", "label": "Mine / shared"}, options
+    assert options[1]["value"] == "all", options
+    bucket = {
+        g["series"]: g["owner"]
+        for g in groups
+    }
+    assert bucket == {"Legacy": "", "Own": "", "Other": "blue"}, bucket
+
+
+def test_retag_is_scoped_to_owner(ctx):
+    import zipfile
+    from app import staging_groups as staging_groups_module
+    from app.tagger import cbz_tagger
+
+    root = os.path.join(ctx.temp_dir, "retag-owner-staging")
+    relative_files = ("Split Series v01.cbz", "blue/Split Series v01.cbz", "red/Split Series v01.cbz")
+    for relative in relative_files:
+        target = os.path.join(root, relative)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with zipfile.ZipFile(target, "w") as archive:
+            archive.writestr("001.jpg", b"x")
+
+    result = staging_groups_module.retag_staging_group(
+        ctx.db, root, "Split Series", "Split Renamed",
+        owner="blue", owner_labels={"blue": "Blue", "red": "Red"},
+    )
+    assert result["tagged"] == 1, result
+    blue_series = (cbz_tagger.read_comicinfo(os.path.join(root, "blue/Split Series v01.cbz")) or {}).get("Series")
+    root_series = (cbz_tagger.read_comicinfo(os.path.join(root, "Split Series v01.cbz")) or {}).get("Series")
+    red_series = (cbz_tagger.read_comicinfo(os.path.join(root, "red/Split Series v01.cbz")) or {}).get("Series")
+    assert blue_series == "Split Renamed", blue_series
+    assert not root_series, root_series
+    assert not red_series, red_series
+
+
 def test_staging_folders(ctx):
     one = ctx.db.upsert_user(subject="oidc|same-1", username="Same Name", auth_source="oidc")
     two = ctx.db.upsert_user(subject="oidc|same-2", username="Same Name", auth_source="oidc")
@@ -494,6 +549,8 @@ def main():
         test_staging_dir_scoping(ctx, red, blue)
         test_per_user_routing(ctx, blue)
         test_staging_groups_split_by_owner(ctx)
+        test_admin_owner_bucket_merges_own_folder(ctx, red)
+        test_retag_is_scoped_to_owner(ctx)
         test_staging_folders(ctx)
         print("multi-user isolation suite PASSED")
     finally:

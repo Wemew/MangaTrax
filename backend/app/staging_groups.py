@@ -119,17 +119,27 @@ def build_staging_groups(
 
 def retag_staging_group(db, staging_dir: str, source_series: str,
                         target_series: str, calibre_series: Optional[Dict[str, Any]] = None,
+                        owner: Optional[str] = None,
+                        owner_labels: Optional[Dict[str, str]] = None,
                         actor: str = "user", reporter=None) -> Dict[str, Any]:
-    """Rewrite ComicInfo <Series> for one staging group, then link/merge/alias."""
+    """Rewrite ComicInfo <Series> for one staging group, then link/merge/alias.
+
+    ``owner`` scopes the retag to one owner folder (``""`` = shared/root, a folder
+    name = that user) so an admin matching another user's group never retags the
+    same series staged by somebody else.
+    """
     root = os.path.realpath(staging_dir or "")
     if not root or not os.path.isdir(root):
         raise ValueError("staging_dir is unavailable")
     target = str(target_series or "").strip()
     if not target:
         raise ValueError("target series name is required")
-    groups = build_staging_groups(root)
+    groups = build_staging_groups(root, owner_labels=owner_labels)
+    wanted_owner = str(owner or "").strip().lower()
     group = next(
-        (item for item in groups if normalize_text(item["series"]) == normalize_text(source_series)),
+        (item for item in groups
+         if normalize_text(item["series"]) == normalize_text(source_series)
+         and str(item.get("owner") or "") == wanted_owner),
         None,
     )
     if not group:

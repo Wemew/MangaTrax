@@ -475,15 +475,24 @@ def _storage_health_payload(force: bool = False) -> Dict[str, Any]:
 
 
 def _staging_owner_labels() -> Dict[str, str]:
-    """Registered user staging-folder names mapped to human labels."""
+    """Registered user staging-folder names mapped to human labels.
+
+    The acting admin's own folder is deliberately left out: the admin scans the
+    root, so their files (root + ``staging/<their-folder>/``) form the single
+    "Mine / shared" bucket instead of being split across two owners.
+    """
     labels: Dict[str, str] = {}
     try:
         users = db.list_users()
     except Exception:
         users = []
+    current = _current_user_row()
+    own_folder = ""
+    if current is not None and current.get("is_admin"):
+        own_folder = str(current.get("staging_folder") or "").strip().lower()
     for user in users:
         folder = str(user.get("staging_folder") or "").strip().lower()
-        if not folder:
+        if not folder or folder == own_folder:
             continue
         labels[folder] = str(
             user.get("display_name") or user.get("username") or folder
@@ -502,8 +511,10 @@ def _staging_owner_options(include_all: bool = True) -> list:
     labels = _staging_owner_labels()
     if not labels:
         return []
-    options = [{"value": "all", "label": "All owners"}]
-    options.append({"value": "", "label": "Mine / shared root"})
+    # "Mine" is the default view: the admin's own feed stays separate from the
+    # other users' downloads; "All owners" is the opt-in overview.
+    options = [{"value": "", "label": "Mine / shared"}]
+    options.append({"value": "all", "label": "All owners"})
     for folder in sorted(labels):
         options.append({"value": folder, "label": labels[folder]})
     return options
@@ -3504,13 +3515,19 @@ async def api_staging_series_match(payload: Dict[str, Any]):
     source = str(payload.get("source_series") or "").strip()
     if not source:
         raise HTTPException(status_code=400, detail="source_series is required")
+    owner = str(payload.get("owner") or "").strip().lower()
+    owner_labels = _staging_owner_labels()
     groups = await asyncio.to_thread(
         staging_groups.build_staging_groups,
-        _staging_dir_setting(), owner_labels=_staging_owner_labels(),
+        _staging_dir_setting(), owner_labels=owner_labels,
     )
     from app.parser import normalize_text as _normalize_text
-    if not any(_normalize_text(group.get("series") or "") == _normalize_text(source) for group in groups):
-        raise HTTPException(status_code=404, detail=f"staging series '{source}' not found")
+    if not any(
+        _normalize_text(group.get("series") or "") == _normalize_text(source)
+        and str(group.get("owner") or "") == owner
+        for group in groups
+    ):
+        raise HTTPException(status_code=404, detail=f"staging series '{source}' not found for that owner")
     target = str(payload.get("target_series") or payload.get("new_series_title") or "").strip()
     calibre_series = None
     if not target:
@@ -3535,6 +3552,7 @@ async def api_staging_series_match(payload: Dict[str, Any]):
     def _worker(reporter):
         return staging_groups.retag_staging_group(
             db, staging_dir, source, target, calibre_series=calibre_series,
+            owner=owner, owner_labels=owner_labels,
             actor=actor, reporter=reporter.report,
         )
 

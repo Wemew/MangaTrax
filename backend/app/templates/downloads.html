@@ -531,7 +531,7 @@
                                     {% if group.needs_intervention %} · <span class="text-rose-300 font-semibold">{{ group.needs_intervention }} need naming intervention</span>{% endif %}
                                 </div>
                             </div>
-                            <button type="button" data-source-series="{{ group.series|e }}" onclick="event.preventDefault(); event.stopPropagation(); openStagingSeriesMatch(this.dataset.sourceSeries, this)" class="px-2.5 py-1.5 rounded-lg bg-amber-900/40 hover:bg-amber-900/60 border border-amber-700/50 text-amber-200 text-[11px] font-semibold self-start sm:self-center">Match series</button>
+                            <button type="button" data-source-series="{{ group.series|e }}" data-owner="{{ group.owner }}" onclick="event.preventDefault(); event.stopPropagation(); openStagingSeriesMatch(this.dataset.sourceSeries, this)" class="px-2.5 py-1.5 rounded-lg bg-amber-900/40 hover:bg-amber-900/60 border border-amber-700/50 text-amber-200 text-[11px] font-semibold self-start sm:self-center">Match series</button>
                         </div>
                     </summary>
                     <div class="overflow-x-auto border-t border-slate-800/60">
@@ -2031,7 +2031,10 @@ let _stagingSeriesTarget = null;
 let _stagingSeriesButton = null;
 function stagingSeriesEsc(value) { const div = document.createElement('div'); div.textContent = value == null ? '' : String(value); return div.innerHTML; }
 function openStagingSeriesMatch(source, button) {
-    _stagingSeriesMatch = { source: source || '' };
+    _stagingSeriesMatch = {
+        source: source || '',
+        owner: (button && button.dataset.owner) || '',
+    };
     _stagingSeriesTarget = null;
     _stagingSeriesButton = button || null;
     const modal = document.getElementById('staging-series-match-modal');
@@ -2065,7 +2068,11 @@ async function submitStagingSeriesMatch() {
     const newTitle = (document.getElementById('staging-series-match-new') || {}).value.trim();
     if (!_stagingSeriesMatch) return;
     if (!newTitle && _stagingSeriesTarget == null) { errorEl.textContent = 'Pick a Calibre series or enter a new title.'; errorEl.classList.remove('hidden'); return; }
-    const body = { source_series: _stagingSeriesMatch.source, confirm: true };
+    const body = {
+        source_series: _stagingSeriesMatch.source,
+        owner: _stagingSeriesMatch.owner || '',
+        confirm: true,
+    };
     if (newTitle) body.new_series_title = newTitle; else body.calibre_series_id = _stagingSeriesTarget;
     const submit = document.getElementById('staging-series-match-submit');
     submit.disabled = true;
