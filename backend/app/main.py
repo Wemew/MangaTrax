@@ -474,6 +474,41 @@ def _storage_health_payload(force: bool = False) -> Dict[str, Any]:
     return _refresh_storage_health("lazy")
 
 
+def _staging_owner_labels() -> Dict[str, str]:
+    """Registered user staging-folder names mapped to human labels."""
+    labels: Dict[str, str] = {}
+    try:
+        users = db.list_users()
+    except Exception:
+        users = []
+    for user in users:
+        folder = str(user.get("staging_folder") or "").strip().lower()
+        if not folder:
+            continue
+        labels[folder] = str(
+            user.get("display_name") or user.get("username") or folder
+        ).strip() or folder
+    return labels
+
+
+def _staging_owner_options(include_all: bool = True) -> list:
+    """Dropdown options for the staging owner filter (empty for single-folder views).
+
+    Only an admin (or the legacy no-login operator) scans the shared staging root;
+    a normal user sees just their own folder, so no filter is offered.
+    """
+    if not include_all:
+        return []
+    labels = _staging_owner_labels()
+    if not labels:
+        return []
+    options = [{"value": "all", "label": "All owners"}]
+    options.append({"value": "", "label": "Mine / shared root"})
+    for folder in sorted(labels):
+        options.append({"value": folder, "label": labels[folder]})
+    return options
+
+
 def _staging_cbz_entries() -> list:
     """Enumerate staged ``.cbz`` files (read-only; the 'existing staging scan')."""
     return cbz_tagger.scan_staging_cbz_files(_staging_dir_setting())
@@ -1911,11 +1946,17 @@ async def downloads_view(request: Request):
 
     # Check files in staging directory
     staging_dir = _staging_dir_setting()
+    current_user = _current_user_row()
+    admin_scope = current_user is None or bool(current_user.get("is_admin"))
+    staging_owner_labels = _staging_owner_labels()
+    staging_owner_options = _staging_owner_options(include_all=admin_scope)
     staging_files = []
     staging_groups_data = []
     if os.path.isdir(staging_dir):
         try:
-            staging_groups_data = staging_groups.build_staging_groups(staging_dir)
+            staging_groups_data = staging_groups.build_staging_groups(
+                staging_dir, owner_labels=staging_owner_labels,
+            )
         except Exception as exc:
             logger.debug("Could not build staging groups: %s", exc)
         for entry in cbz_tagger.scan_staging_cbz_files(staging_dir):
@@ -1955,6 +1996,8 @@ async def downloads_view(request: Request):
             "downloads_inventory_scanned_seconds": inventory_scanned_seconds,
             "staging_files": staging_files,
             "staging_groups": staging_groups_data,
+            "staging_owner_options": staging_owner_options,
+            "staging_owner_labels": staging_owner_labels,
             "awaiting_series": awaiting_series,
             "awaiting_total": awaiting_total,
             "settings": db.get_all_settings(),
@@ -3448,7 +3491,10 @@ async def api_download_failures_delete_all(payload: Optional[Dict[str, Any]] = N
 
 @app.get("/api/downloads/staging-groups")
 async def api_staging_groups():
-    groups = await asyncio.to_thread(staging_groups.build_staging_groups, _staging_dir_setting())
+    groups = await asyncio.to_thread(
+        staging_groups.build_staging_groups,
+        _staging_dir_setting(), owner_labels=_staging_owner_labels(),
+    )
     return JSONResponse({"status": "success", "groups": groups, "count": len(groups)})
 
 
@@ -3458,7 +3504,10 @@ async def api_staging_series_match(payload: Dict[str, Any]):
     source = str(payload.get("source_series") or "").strip()
     if not source:
         raise HTTPException(status_code=400, detail="source_series is required")
-    groups = await asyncio.to_thread(staging_groups.build_staging_groups, _staging_dir_setting())
+    groups = await asyncio.to_thread(
+        staging_groups.build_staging_groups,
+        _staging_dir_setting(), owner_labels=_staging_owner_labels(),
+    )
     from app.parser import normalize_text as _normalize_text
     if not any(_normalize_text(group.get("series") or "") == _normalize_text(source) for group in groups):
         raise HTTPException(status_code=404, detail=f"staging series '{source}' not found")

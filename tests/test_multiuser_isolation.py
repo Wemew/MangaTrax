@@ -437,6 +437,34 @@ def test_admin_surface_source_guards(ctx):
     assert "{% if is_admin() %}" in release_row, "catalog mutation buttons must be admin-only"
 
 
+def test_staging_groups_split_by_owner(ctx):
+    import zipfile
+    from app import staging_groups as staging_groups_module
+
+    root = os.path.join(ctx.temp_dir, "owner-staging")
+    for relative in ("Series A v01.cbz", "blue/Series A v02.cbz", "red/Other Series v01.cbz"):
+        target = os.path.join(root, relative)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with zipfile.ZipFile(target, "w") as archive:
+            archive.writestr("001.jpg", b"x")
+
+    groups = staging_groups_module.build_staging_groups(
+        root, owner_labels={"blue": "Blue", "red": "Red"},
+    )
+    owners = {(g["owner"], g["owner_label"], g["series"]) for g in groups}
+    assert ("", "Shared / legacy", "Series A") in owners, owners
+    assert ("blue", "Blue", "Series A") in owners, owners
+    assert ("red", "Red", "Other Series") in owners, owners
+    assert len(groups) == 3, owners
+    for group in groups:
+        assert all(f["owner"] == group["owner"] for f in group["files"]), group
+
+    template = open(os.path.join(BACKEND_DIR, "app", "templates", "downloads.html"), encoding="utf-8").read()
+    assert 'id="staging-owner-filter"' in template
+    assert 'data-owner="{{ group.owner }}"' in template
+    assert "applyStagingFilters" in template
+
+
 def test_staging_folders(ctx):
     one = ctx.db.upsert_user(subject="oidc|same-1", username="Same Name", auth_source="oidc")
     two = ctx.db.upsert_user(subject="oidc|same-2", username="Same Name", auth_source="oidc")
@@ -465,6 +493,7 @@ def main():
         test_admin_surface_source_guards(ctx)
         test_staging_dir_scoping(ctx, red, blue)
         test_per_user_routing(ctx, blue)
+        test_staging_groups_split_by_owner(ctx)
         test_staging_folders(ctx)
         print("multi-user isolation suite PASSED")
     finally:

@@ -13,12 +13,37 @@ from app import volume_naming
 logger = logging.getLogger("mangatrax.staging_groups")
 
 
-def build_staging_groups(staging_dir: str) -> List[Dict[str, Any]]:
-    """Group staged CBZs by ComicInfo <Series> (fallback: parsed filename)."""
+def build_staging_groups(
+    staging_dir: str, owner_labels: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """Group staged CBZs by owner folder and ComicInfo <Series>.
+
+    When ``owner_labels`` maps a top-level staging folder name to a user label, files
+    below that folder get ``owner``/``owner_label`` and are grouped per owner, so an
+    admin scanning the whole staging root can separate their own files from other
+    users' downloads. Files at the root belong to the legacy/shared owner (``""``).
+    """
     groups: Dict[str, Dict[str, Any]] = {}
     if not staging_dir or not os.path.isdir(staging_dir):
         return []
     root = os.path.realpath(staging_dir)
+    labels = {
+        str(folder).strip().lower(): str(label).strip()
+        for folder, label in (owner_labels or {}).items()
+        if str(folder).strip()
+    }
+
+    def _owner_of(relative: str) -> str:
+        candidate = str(relative or "").replace("\\", "/")
+        if "/" not in candidate:
+            return ""
+        head = candidate.split("/", 1)[0].strip().lower()
+        return head if head in labels else ""
+
+    def _owner_label(owner: str) -> str:
+        if not owner:
+            return "Shared / legacy"
+        return labels.get(owner, owner)
     previous_index = volume_naming.build_previous_volume_index(root)
     for entry in cbz_tagger.scan_staging_cbz_files(root):
         path = entry["path"]
@@ -36,9 +61,13 @@ def build_staging_groups(staging_dir: str) -> List[Dict[str, Any]]:
             parsed = {}
         if not series:
             series = str(parsed.get("series_name") or "").strip() or "Unknown Series"
-        key = normalize_text(series) or series.lower()
+        owner = _owner_of(entry.get("relative") or "")
+        owner_label = _owner_label(owner)
+        series_key = normalize_text(series) or series.lower()
+        key = f"{owner}|{series_key}" if owner else series_key
         group = groups.setdefault(key, {
             "series": series, "source_series": series, "files": [],
+            "owner": owner, "owner_label": owner_label,
             "count": 0, "tagged": 0, "untagged": 0, "volumes": set(), "size_bytes": 0,
             "needs_intervention": 0,
         })
@@ -71,6 +100,8 @@ def build_staging_groups(staging_dir: str) -> List[Dict[str, Any]]:
             "suggested_filename": suggested_filename or "",
             "suggested_title": suggested_title or "",
             "previous_filename": (previous or {}).get("filename") or "",
+            "owner": owner,
+            "owner_label": owner_label,
         })
         group["count"] += 1
         group["tagged"] += 1 if tags else 0
@@ -82,7 +113,7 @@ def build_staging_groups(staging_dir: str) -> List[Dict[str, Any]]:
         group["volumes"] = sorted(group["volumes"])
         group["files"].sort(key=lambda item: (item["volumes"] or [999999], item["relative"].lower()))
         result.append(group)
-    result.sort(key=lambda item: item["series"].lower())
+    result.sort(key=lambda item: (item.get("owner") or "", item["series"].lower()))
     return result
 
 

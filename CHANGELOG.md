@@ -26,6 +26,10 @@ semantic versioning.
 - **Per-user data tables:** `user_series`, `user_blacklist`, `user_prioritized_groups`,
   `release_requests` plus `users.groups_json/is_admin/auto_download/bypass_approval/staging_folder`
   and `releases.request_user_id` — all additive with defaults.
+- **Staging owner filter (admin):** each staged series group is labelled with its owner
+  (`Shared / legacy`, or the user's folder label) and an owner dropdown filters the
+  Staging tab, so an admin no longer sees other users' downloads mixed into their own list
+  as one undifferentiated feed. Normal users still see only their own folder, unfiltered.
 - **Staging isolation in the pipeline:** the shared routing pass and the flatten maintenance step skip
   registered per-user folders, so completed downloads under `downloads/<user>/` can only move into
   that user's `staging/<user>/` folder — never into the shared staging root.
