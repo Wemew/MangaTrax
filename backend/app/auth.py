@@ -69,6 +69,10 @@ Variable                         Default    Meaning
                                             sent when the client requests the
                                             ``groups`` scope (it does).
 ``MANGATRAX_OIDC_GROUPS_CLAIM``  ``groups`` Claim carrying the group list.
+``MANGATRAX_OIDC_SCOPES``        ``openid profile email groups``
+                                            Space/comma separated scopes. ``openid``
+                                            is always added. PocketID only sends
+                                            ``groups`` when that scope is requested.
 ===============================  =========  ====================================
 
 PocketID client setup
@@ -148,6 +152,9 @@ __all__ = [
     "current_actor",
     "current_identity",
     "normalize_groups",
+    "merge_group_claims",
+    "DEFAULT_SCOPES",
+    "SESSION_GROUPS_VERSION",
     "get_current_actor",
     "set_current_actor",
     "reset_current_actor",
@@ -157,7 +164,8 @@ __all__ = [
 ]
 
 AUTH_MODES = ("none", "basic", "oidc")
-SCOPE = "openid profile email groups"
+DEFAULT_SCOPES = "openid profile email groups"
+SCOPE = DEFAULT_SCOPES  # backwards-compatible alias for the default scope string
 SESSION_COOKIE_NAME = "mangatrax_session"
 #: Bumped whenever the session payload gains data role decisions depend on.
 SESSION_GROUPS_VERSION = 2
@@ -380,6 +388,38 @@ def _env_bool(value: Optional[str], default: bool = False) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def merge_group_claims(
+    claims: Mapping[str, Any],
+    userinfo: Optional[Mapping[str, Any]],
+    groups_claim: str = "groups",
+) -> Dict[str, Any]:
+    """Use the userinfo groups when the ID token carries none for *groups_claim*."""
+    merged = dict(claims)
+    if normalize_groups(merged.get(groups_claim)):
+        return merged
+    if isinstance(userinfo, Mapping) and normalize_groups(userinfo.get(groups_claim)):
+        merged[groups_claim] = userinfo.get(groups_claim)
+    return merged
+
+
+def _normalize_scopes(value: Any) -> Tuple[str, ...]:
+    """Split a scope string/list and guarantee the mandatory ``openid`` scope."""
+    raw: list = []
+    if isinstance(value, str):
+        raw = value.replace(",", " ").split()
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            raw.extend(str(item).replace(",", " ").split())
+    scopes: list = []
+    for item in raw:
+        clean = str(item).strip()
+        if clean and clean not in scopes:
+            scopes.append(clean)
+    if "openid" not in scopes:
+        scopes.insert(0, "openid")
+    return tuple(scopes) or ("openid",)
+
+
 @dataclass
 class AuthConfig:
     """Authentication configuration assembled from environment variables."""
@@ -395,6 +435,9 @@ class AuthConfig:
     session_max_age: int = DEFAULT_SESSION_MAX_AGE
     csrf_protection: bool = True
     debug_actions: bool = False
+    # OIDC scopes. ``groups`` is required for role mapping on PocketID; it can be
+    # overridden for other providers but ``openid`` is always included.
+    oidc_scopes: Tuple[str, ...] = ("openid", "profile", "email", "groups")
     # Groups claim the IdP puts its group list in (PocketID: "groups").
     oidc_groups_claim: str = "groups"
     # Comma-separated groups that grant the Admin role.
@@ -427,6 +470,7 @@ class AuthConfig:
             session_max_age=max_age,
             csrf_protection=_env_bool(get("MANGATRAX_CSRF_PROTECT", None), True),
             debug_actions=_env_bool(get("MANGATRAX_DEBUG_ACTIONS", None), False),
+            oidc_scopes=_normalize_scopes(get("MANGATRAX_OIDC_SCOPES", DEFAULT_SCOPES)),
             oidc_groups_claim=get("MANGATRAX_OIDC_GROUPS_CLAIM", "groups").strip() or "groups",
             admin_groups=normalize_groups(get("MANGATRAX_ADMIN_GROUPS", "mangatrax-admins"))
             or ("mangatrax-admins",),
@@ -528,6 +572,12 @@ class AuthConfig:
                     "MANGATRAX_AUTH_MODE=oidc is not fully configured; missing/invalid: "
                     + "; ".join(missing)
                 )
+            if self.admin_groups and "groups" not in self.oidc_scopes:
+                logger.warning(
+                    "MANGATRAX_ADMIN_GROUPS is set but the requested OIDC scopes (%s) do not "
+                    "include 'groups'; role mapping cannot receive the claim.",
+                    " ".join(self.oidc_scopes),
+                )
 
     def describe(self) -> Dict[str, Any]:
         """Configuration summary safe for startup logs (secrets masked)."""
@@ -544,6 +594,8 @@ class AuthConfig:
             "oidc_client_secret": PASSWORD_MASK if self.oidc_client_secret else "(unset)",
             "csrf_protection": self.csrf_protection,
             "debug_actions": self.debug_actions,
+            "oidc_scopes": " ".join(self.oidc_scopes),
+            "admin_groups": list(self.admin_groups),
         }
 
 
@@ -885,7 +937,7 @@ class OIDCClient:
             "response_type": "code",
             "client_id": self.config.oidc_client_id,
             "redirect_uri": self.config.callback_url,
-            "scope": SCOPE,
+            "scope": " ".join(self.config.oidc_scopes or (SCOPE,)),
             "state": state,
             "nonce": nonce,
             "code_challenge": code_challenge,
@@ -908,6 +960,30 @@ class OIDCClient:
         }
         token_response = self._http_post_form(str(document["token_endpoint"]), form)
         return token_response
+
+    def userinfo(self, access_token: str) -> Dict[str, Any]:
+        """Fetch the OIDC userinfo claims (fallback for providers that omit them from
+        the ID token). Returns ``{}`` when the provider advertises no endpoint."""
+        token = str(access_token or "").strip()
+        if not token:
+            return {}
+        document = self.discover()
+        endpoint = str(document.get("userinfo_endpoint") or "").strip()
+        if not endpoint:
+            return {}
+        request = urllib.request.Request(
+            endpoint,
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.http_timeout) as response:
+                if response.status != 200:
+                    return {}
+                payload = json.loads(response.read().decode("utf-8"))
+                return payload if isinstance(payload, dict) else {}
+        except Exception as exc:  # pragma: no cover - diagnostics only
+            logger.debug("OIDC userinfo lookup failed: %s", exc)
+            return {}
 
     def _get_jwks(self, force: bool = False) -> Dict[str, Any]:
         now = time.time()
@@ -1259,11 +1335,31 @@ class AuthManager:
 
         token_response = oidc.exchange_code(code, code_verifier)
         claims = oidc.validate_id_token(token_response.get("id_token"), expected_nonce=stored_nonce, now=now)
+        # Some providers keep the groups claim out of the ID token; merge userinfo
+        # when the requested scope produced nothing usable here.
+        if not normalize_groups(claims.get(self.config.oidc_groups_claim)):
+            userinfo_lookup = getattr(oidc, "userinfo", None)
+            userinfo_claims = (
+                userinfo_lookup(str(token_response.get("access_token") or ""))
+                if callable(userinfo_lookup) else None
+            )
+            if userinfo_claims:
+                claims = merge_group_claims(
+                    claims, userinfo_claims, self.config.oidc_groups_claim,
+                )
         identity = Identity.from_oidc_claims(claims, self.config.oidc_groups_claim)
         logger.info(
             "OIDC login: subject=%s groups=%s admin=%s",
             identity.subject, list(identity.groups), self.is_admin(identity),
         )
+        if not identity.groups and self._admin_group_set:
+            logger.warning(
+                "OIDC login for '%s' returned no groups; requested scopes=%s, claim='%s'. "
+                "Check the client's allowed scopes/claims at the provider.",
+                identity.username or identity.subject,
+                " ".join(self.config.oidc_scopes or (SCOPE,)),
+                self.config.oidc_groups_claim,
+            )
         self.record_identity(identity, force=True)
         session_cookie = self.session_tokens.sign(identity.to_session(), now=now)
         redirect_url = sanitize_next_path(str(payload.get("next") or "/"))

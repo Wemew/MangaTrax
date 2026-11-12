@@ -50,6 +50,7 @@ services:
       # - MANGATRAX_OIDC_CLIENT_SECRET=your-client-secret
       # - MANGATRAX_ADMIN_GROUPS=admin        # IdP group name(s) granting Admin
       # - MANGATRAX_OIDC_GROUPS_CLAIM=groups  # claim carrying the group list
+      # - MANGATRAX_OIDC_SCOPES=openid profile email groups
       #   The MangaTrax client requests the `groups` scope; make sure the
       #   admin group is allowed on the client's Access page in PocketID.
 

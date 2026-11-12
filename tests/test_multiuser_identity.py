@@ -47,6 +47,29 @@ def test_stale_session_requires_relogin():
     assert manager.resolve_identity({}, {cookie: stale}) is None, "pre-groups sessions must re-authenticate"
 
 
+def test_scopes_configuration_and_userinfo_fallback():
+    default = AuthConfig.from_env({})
+    assert default.oidc_scopes == ("openid", "profile", "email", "groups"), default.oidc_scopes
+    custom = AuthConfig.from_env({"MANGATRAX_OIDC_SCOPES": "profile groups"})
+    assert custom.oidc_scopes == ("openid", "profile", "groups"), custom.oidc_scopes
+    no_groups = AuthConfig.from_env({"MANGATRAX_OIDC_SCOPES": "openid profile email"})
+    assert "groups" not in no_groups.oidc_scopes
+    no_groups.validate() if False else None  # validate() needs a full OIDC config
+
+    claims = {"sub": "s", "name": "Red", "groups": []}
+    merged = auth_module.merge_group_claims(claims, {"groups": ["admin"]}, "groups")
+    assert merged["groups"] == ["admin"], merged
+    assert merged["name"] == "Red", merged
+    # An ID-token group list always wins over userinfo.
+    kept = auth_module.merge_group_claims(
+        {"sub": "s", "groups": ["readers"]}, {"groups": ["admin"]}, "groups",
+    )
+    assert kept["groups"] == ["readers"], kept
+    # No group information anywhere stays empty (never invents a role).
+    empty = auth_module.merge_group_claims({"sub": "s"}, {"email": "x@example.com"}, "groups")
+    assert auth_module.normalize_groups(empty.get("groups")) == (), empty
+
+
 def test_group_normalisation():
     assert auth_module.normalize_groups(None) == ()
     assert auth_module.normalize_groups([]) == ()
@@ -161,6 +184,7 @@ def test_user_flags_and_legacy_claim(tmp_path):
 
 def main():
     test_groups_scope_requested()
+    test_scopes_configuration_and_userinfo_fallback()
     test_stale_session_requires_relogin()
     test_group_normalisation()
     test_identity_claim_and_session()
