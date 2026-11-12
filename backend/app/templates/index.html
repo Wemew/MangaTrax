@@ -300,6 +300,11 @@ async function downloadRelease(relId) {
     try {
         const res = await fetch(`/api/releases/${relId}/download`, { method: 'POST' });
         const data = await res.json();
+        if (res.status === 202 || data.status === 'pending_approval' || data.status === 'already_pending') {
+            if (label) { label.textContent = 'Awaiting approval'; }
+            showToast(data.message || 'Request sent — waiting for an admin to approve it.', 'info');
+            return;
+        }
         if (data.status === 'success') {
             showToast('Sent release to downloader!', 'success');
             await pollDashboardRelease(relId, btn, label);

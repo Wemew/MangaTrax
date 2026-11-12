@@ -168,6 +168,53 @@ def test_request_approval_flow(ctx, red, blue):
     assert ctx.db.get_release_request(blue["id"], release2)["status"] == "pending"
 
 
+def test_approved_request_downloads_on_click(ctx, red, blue):
+    """Approval is a one-time gate: the next Download click must actually submit."""
+    ctx.db.set_user_flags(blue["id"], auto_download=False, bypass_approval=False)
+    blue = ctx.db.get_user_by_id(blue["id"])
+    release_id = _release(ctx, "appr-1", "Approved Release v01", "Approved Release")
+
+    with patch.object(main_app, "_current_user_row", return_value=blue):
+        first = ctx.client.post(f"/api/releases/{release_id}/download")
+        repeat = ctx.client.post(f"/api/releases/{release_id}/download")
+    assert first.status_code == 202 and first.json()["status"] == "pending_approval", first.text
+    assert repeat.status_code == 202 and repeat.json()["status"] == "already_pending", repeat.text
+
+    pending = [p for p in ctx.db.list_pending_approvals() if p["release_id"] == release_id]
+    with patch.object(main_app, "_current_user_row", return_value=red):
+        res = ctx.client.post(f"/api/admin/approvals/{pending[0]['id']}/approve")
+    assert res.status_code == 200 and res.json()["auto_download"] is False, res.text
+
+    seen = {}
+    class StubQbit:
+        enabled = True
+        def extract_torrent_hash(self, url):
+            return "approvedhash"
+        def add_torrent(self, url_or_magnet, savepath=None, category=None, tags=None):
+            seen["savepath"] = savepath
+            return True
+        def apply_selective_volume_download(self, torrent_hash, wanted_volumes):
+            return {"status": "pending_metadata"}
+
+    with patch.object(main_app, "_current_user_row", return_value=blue), \
+         patch.object(main_app.scheduler, "get_qbit_client", return_value=StubQbit()), \
+         patch.object(main_app, "resolve_downloader_engine", return_value="qbit"):
+        res = ctx.client.post(f"/api/releases/{release_id}/download")
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "success", res.text
+    folder = ctx.db.ensure_user_staging_folder(blue["id"])
+    assert seen["savepath"].replace("\\", "/").endswith(folder), seen
+    assert ctx.db.get_release_request(blue["id"], release_id)["status"] == "approved"
+
+
+def test_download_ui_handles_pending(ctx):
+    templates = os.path.join(BACKEND_DIR, "app", "templates")
+    for name in ("releases.html", "prioritized.html", "index.html"):
+        source = open(os.path.join(templates, name), encoding="utf-8").read()
+        assert "pending_approval" in source, name
+        assert "already_pending" in source, name
+
+
 def test_approval_auto_download(ctx, red, blue):
     """Approved requests submit automatically only when the admin enabled it."""
     ctx.db.set_user_flags(blue["id"], auto_download=True)
@@ -409,6 +456,8 @@ def main():
         test_per_user_monitor_toggle(ctx, red, blue)
         test_per_user_blacklist_and_groups(ctx, red, blue)
         test_request_approval_flow(ctx, red, blue)
+        test_approved_request_downloads_on_click(ctx, red, blue)
+        test_download_ui_handles_pending(ctx)
         test_approval_auto_download(ctx, red, blue)
         test_bypass_user_downloads_to_own_staging(ctx, blue)
         test_whoami_reports_groups_and_role(ctx)

@@ -682,6 +682,12 @@ async function downloadRelease(relId, button) {
     try {
         const res = await fetch(`/api/releases/${relId}/download`, { method: 'POST' });
         const data = await res.json();
+        if (res.status === 202 || data.status === 'pending_approval' || data.status === 'already_pending') {
+            // Normal users queue a request; approval is a one-time gate, not a retry loop.
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Awaiting approval'; }
+            showToast(data.message || 'Request sent — waiting for an admin to approve it.', 'info');
+            return;
+        }
         if (res.ok && (data.status === 'success' || data.status === 'skipped')) {
             const state = data.state || { state: 'downloading', label: 'Downloading', can_download: false };
             updateReleaseStateDom(relId, state);

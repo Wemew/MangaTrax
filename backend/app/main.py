@@ -2018,7 +2018,17 @@ async def api_approve_release_request(approval_id: int):
         raise HTTPException(status_code=404, detail="Pending request not found")
     request = result.get("request") or {}
     requester = await asyncio.to_thread(db.get_user_by_id, request.get("user_id")) or {}
-    payload = {"status": "success", "decision": "approved", "request": result}
+    payload = {
+        "status": "success",
+        "decision": "approved",
+        "request": result,
+        "auto_download": bool(requester.get("auto_download")),
+        "message": (
+            "Approved and sent to the downloader"
+            if requester.get("auto_download") else
+            "Approved — press Download on the release to start it (auto-download is off for this user)"
+        ),
+    }
     if requester.get("auto_download"):
         download_response = await api_release_download(int(request["release_id"]))
         raw_body = getattr(download_response, "body", None)
@@ -3992,19 +4002,31 @@ async def api_release_download(release_id: int):
     # direct-download behavior.
     requester = _current_user_row()
     if requester is not None and not requester.get("is_admin") and not requester.get("bypass_approval"):
-        pending = await asyncio.to_thread(
-            db.create_release_request, int(requester["id"]), release_id,
+        existing_request = await asyncio.to_thread(
+            db.get_release_request, int(requester["id"]), release_id,
         )
-        db.log_activity(
-            "RELEASE_REQUEST_PENDING",
-            f"Requested '{target.get('title')}' (awaiting admin approval)",
-            json.dumps({"release_id": release_id, "request_id": pending.get("id")}),
-        )
-        return JSONResponse({
-            "status": "pending_approval",
-            "message": "Your request is waiting for an admin to approve it.",
-            "request": pending,
-        }, status_code=202)
+        if not (existing_request and existing_request.get("status") == "approved"):
+            # First click (or a rejected request raised again) queues it; an
+            # already-approved request falls through and downloads normally so the
+            # user is never asked to seek approval twice.
+            pending = await asyncio.to_thread(
+                db.create_release_request, int(requester["id"]), release_id,
+            )
+            already_waiting = (existing_request or {}).get("status") == "pending"
+            db.log_activity(
+                "RELEASE_REQUEST_PENDING",
+                f"Requested '{target.get('title')}' (awaiting admin approval)",
+                json.dumps({"release_id": release_id, "request_id": pending.get("id")}),
+            )
+            return JSONResponse({
+                "status": "already_pending" if already_waiting else "pending_approval",
+                "message": (
+                    "This request is already waiting for an admin to approve it."
+                    if already_waiting else
+                    "Request sent — an admin must approve it before it downloads."
+                ),
+                "request": pending,
+            }, status_code=202)
     if requester is not None and not requester.get("is_admin"):
         # A bypassing user owns the routing target; an admin download keeps the
         # already-approved requester's folder.

@@ -159,7 +159,10 @@ async function decideApproval(approvalId, decision) {
         const res = await fetch(`/api/admin/approvals/${approvalId}/${decision}`, { method: 'POST' });
         const data = await res.json();
         if (!res.ok) { showToast(data.detail || 'Could not update the request', 'error'); return; }
-        showToast(decision === 'approve' ? 'Request approved' : 'Request rejected', 'success');
+        showToast(
+            data.message || (decision === 'approve' ? 'Request approved' : 'Request rejected'),
+            decision === 'approve' ? 'success' : 'info',
+        );
         window.location.reload();
     } catch (err) { showToast('Error: ' + err, 'error'); }
 }

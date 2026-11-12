@@ -16,6 +16,9 @@ semantic versioning.
   group/role view, and the pending-request queue. Sensitive surfaces (Settings, Logs, debug,
   maintenance/destructive actions, manual tagging, downloader configuration, feeds) return 403
   for non-admins; normal users keep their Library/Releases/Discovery/Downloads views.
+- **Approval is a one-time gate:** an approved request downloads when the user (or an admin)
+  presses Download; repeat clicks while pending report `already_pending` instead of re-queueing,
+  and all three download UIs show an "Awaiting approval" state instead of a failure.
 - **Request approval:** a normal user's download request enters `release_requests` as `pending`
   (HTTP 202) and becomes `REQUESTED` only when an admin approves; a per-user admin toggle bypasses
   the queue. Approved requests remember their requester so downloads route to that user's
