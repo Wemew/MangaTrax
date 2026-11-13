@@ -1396,6 +1396,27 @@ function closeTagModalDialog(modal) {
     modal.classList.add('hidden');
     modal.classList.remove('flex');
 }
+function applyOmnibusToggle() {
+    const box = document.getElementById('tag-field-omnibus');
+    const titleEl = document.getElementById('tag-field-title');
+    const seriesEl = document.getElementById('tag-field-series');
+    if (!box || !titleEl) return;
+    const series = (seriesEl ? seriesEl.value : '').trim();
+    let title = String(titleEl.value || '').trim();
+    if (box.checked) {
+        title = title.replace(/\s+v\d+(?:\.\d+)?(?:\s*[-–]\s*v?\d+(?:\.\d+)?)?\s*$/i, '').trim();
+        if (!title) {
+            title = series ? series + ' Omnibus' : 'Omnibus';
+        } else if (!title.toLowerCase().endsWith('omnibus')) {
+            title = title + ' Omnibus';
+        }
+    } else {
+        title = title.replace(/\s+omnibus\s*$/i, '').trim();
+    }
+    titleEl.value = title;
+    _tagModalDirty = true;
+}
+
 async function openTagModal(filename, options) {
     _tagModalFile = filename;
     _tagModalOptions = options || {};
@@ -1416,6 +1437,10 @@ async function openTagModal(filename, options) {
         document.getElementById('tag-field-series').value = info.Series || (data.parsed && data.parsed.series_name) || '';
         document.getElementById('tag-field-volume').value = info.Volume || info.Number || '';
         document.getElementById('tag-field-title').value = _tagModalOptions.suggestedTitle || info.Title || '';
+        const omnibusBox = document.getElementById('tag-field-omnibus');
+        if (omnibusBox) {
+            omnibusBox.checked = /\bomnibus\b/i.test(String(info.Title || ''));
+        }
         document.getElementById('tag-field-writer').value = info.Writer || '';
         document.getElementById('tag-field-publisher').value = info.Publisher || '';
         document.getElementById('tag-field-genre').value = info.Genre || '';
@@ -1456,6 +1481,7 @@ async function saveManualTag() {
         writer: document.getElementById('tag-field-writer').value.trim(),
         publisher: document.getElementById('tag-field-publisher').value.trim(),
         genre: document.getElementById('tag-field-genre').value.trim(),
+        omnibus: !!(document.getElementById('tag-field-omnibus') || {}).checked,
         new_filename: document.getElementById('tag-field-filename').value.trim()
     };
     if (!payload.series) {
@@ -2328,7 +2354,13 @@ document.addEventListener('DOMContentLoaded', function () {
                 <input type="text" id="tag-field-series" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
             </div>
             <div>
-                <label class="block text-xs font-semibold text-slate-300 mb-1">Volume</label>
+                <div class="flex items-center justify-between gap-2 mb-1">
+                    <label for="tag-field-volume" class="block text-xs font-semibold text-slate-300">Volume</label>
+                    <label class="inline-flex items-center gap-1.5 cursor-pointer text-[11px] font-semibold text-slate-300" title="Omnibus: title ends with 'Omnibus' instead of a volume marker; later volumes for this series are flagged for review">
+                        <input type="checkbox" id="tag-field-omnibus" onchange="applyOmnibusToggle()" class="w-3.5 h-3.5 rounded border-slate-700 bg-slate-950 text-cyan-500 focus:ring-0">
+                        Omnibus
+                    </label>
+                </div>
                 <input type="text" id="tag-field-volume" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-500">
             </div>
             <div>

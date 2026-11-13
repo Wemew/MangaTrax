@@ -499,6 +499,56 @@ def test_anilist_negative_volume_cache(ctx):
     assert fetch.call_count == 2, fetch.call_count  # one normal + one forced; cached miss avoided
 
 
+def test_manual_tag_omnibus_and_later_volume_flag(ctx, red):
+    import zipfile
+    from app.tagger import cbz_tagger
+
+    root = ctx.staging_dir
+    name = "Omnibus Test (Omnibus Edition).cbz"
+    with zipfile.ZipFile(os.path.join(root, name), "w") as archive:
+        archive.writestr("001.jpg", b"x")
+
+    with patch.object(main_app, "_current_user_row", return_value=red):
+        res = ctx.client.post("/api/tagger/manual-tag", json_data={
+            "filename": name,
+            "series": "Omnibus Test",
+            "volume": "1",
+            "title": "Omnibus Test v01",
+            "omnibus": True,
+        })
+    assert res.status_code == 200, res.text
+    info = res.json()["comicinfo"]
+    assert info["Title"] == "Omnibus Test Omnibus", info
+    assert info["Volume"] == "1" and info["Number"] == "1", info
+    assert "v01" not in info["Title"] and "Vol." not in info["Title"], info
+
+    # A later volume for the same series is flagged and gets a vNN suggestion.
+    later = os.path.join(root, "Omnibus Test v02.cbz")
+    with zipfile.ZipFile(later, "w") as archive:
+        archive.writestr("001.jpg", b"x")
+    xml = cbz_tagger.build_comicinfo_xml(None, {
+        "Series": "Omnibus Test", "Title": "Omnibus Test", "Volume": "2", "Number": "2",
+    })
+    cbz_tagger.rewrite_comicinfo(later, xml)
+
+    from app import staging_groups as staging_groups_module
+    groups = staging_groups_module.build_staging_groups(root)
+    group = next(g for g in groups if g["series"] == "Omnibus Test")
+    by_name = {f["name"]: f for f in group["files"]}
+    later_row = by_name["Omnibus Test v02.cbz"]
+    assert later_row["needs_intervention"] is True, later_row
+    assert "Omnibus" in later_row["intervention_reason"], later_row
+    assert later_row["suggested_title"] == "Omnibus Test v02", later_row
+    # The omnibus file itself is not flagged.
+    assert by_name[name]["needs_intervention"] is False, by_name[name]
+    assert not by_name[name]["intervention_reason"], by_name[name]
+
+    template = open(os.path.join(BACKEND_DIR, "app", "templates", "downloads.html"), encoding="utf-8").read()
+    assert 'id="tag-field-omnibus"' in template
+    assert "applyOmnibusToggle" in template
+    assert "omnibus: !!" in template
+
+
 def test_torbox_force_whole_override(ctx, red):
     ctx.db.set_setting("torbox_strict_volume_selection", "true")
     release_id = _release(ctx, "force-1", "Force Me v01", "Force Me", status="REQUESTED")
@@ -779,6 +829,7 @@ def main():
         test_staging_dir_scoping(ctx, red, blue)
         test_per_user_routing(ctx, blue)
         test_complete_expansion_stops_requerying(ctx)
+        test_manual_tag_omnibus_and_later_volume_flag(ctx, red)
         test_torbox_force_whole_override(ctx, red)
         test_unresolved_series_queue_and_manual_link(ctx, red)
         test_ignored_anilist_failures_stop_retrying(ctx, red)

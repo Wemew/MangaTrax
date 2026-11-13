@@ -61,6 +61,10 @@ semantic versioning.
 - **Searchable manual series matches** in Settings (250 ms debounce, explicit no-match state).
 
 ### Changed
+- **Omnibus tagging:** the Preview & Manual Tag modal gained an Omnibus toggle next to Volume.
+  The ComicInfo Title ends in "Omnibus" instead of a `vNN` marker, the omnibus file is not flagged
+  for its missing volume marker, and a later volume for the same series is flagged for manual
+  review with a `vNN` title suggestion.
 - **"No volume data" mark for unresolved series:** an admin can stop the background lookup from
   retrying a series that will never have usable volume numbers. Marked entries move into a
   collapsed "Marked as having no volume data" foldout directly below the active list, keep

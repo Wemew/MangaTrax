@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import math
 import difflib
@@ -3109,7 +3110,20 @@ def _manual_tag_updates(model) -> Dict[str, Any]:
     if volume:
         updates["Number"] = volume
         updates["Volume"] = volume
-    if model.title:
+    if getattr(model, "omnibus", False):
+        # An omnibus must not look like volume 1: strip a trailing volume marker and
+        # append "Omnibus" instead (the marker later volumes are checked against).
+        title = str(model.title or "").strip()
+        title = re.sub(
+            r"\s+v\d+(?:\.\d+)?(?:\s*[-–]\s*v?\d+(?:\.\d+)?)?\s*$", "", title,
+            flags=re.IGNORECASE,
+        ).strip()
+        if not title:
+            title = f"{model.series} Omnibus"
+        elif not title.lower().endswith("omnibus"):
+            title = f"{title} Omnibus"
+        updates["Title"] = title
+    elif model.title:
         updates["Title"] = model.title
     if model.writer:
         updates["Writer"] = model.writer
@@ -3131,10 +3145,13 @@ def _manual_tag_staging_cbz(entry: Dict[str, Any], model) -> Dict[str, Any]:
 
     updates = _manual_tag_updates(model)
     volume = updates.get("Volume")
-    defaults = {
-        "Title": f"{model.series} Vol. {volume}" if volume else model.series,
-        "Manga": "YesAndRightToLeft",
-    }
+    if getattr(model, "omnibus", False):
+        defaults = {"Title": f"{model.series} Omnibus", "Manga": "YesAndRightToLeft"}
+    else:
+        defaults = {
+            "Title": f"{model.series} Vol. {volume}" if volume else model.series,
+            "Manga": "YesAndRightToLeft",
+        }
 
     def _with_defaults(base: Dict[str, Any]) -> Dict[str, Any]:
         merged = dict(defaults)

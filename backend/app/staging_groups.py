@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from app.parser import extract_manga_bundle_and_volumes, normalize_text
@@ -91,6 +92,7 @@ def build_staging_groups(
             "size_mb": entry["size_mb"],
             "tagged": bool(tags),
             "comic_series": series,
+            "comic_title": str(tags.get("Title") or ""),
             "volumes": sorted(volumes),
             "parsed_series": assessment.get("parsed_series") or "",
             "parsed_volume": assessment.get("parsed_volume"),
@@ -112,6 +114,48 @@ def build_staging_groups(
     for group in groups.values():
         group["volumes"] = sorted(group["volumes"])
         group["files"].sort(key=lambda item: (item["volumes"] or [999999], item["relative"].lower()))
+        # A series with an Omnibus release cannot also have a v01/v02 file without a
+        # decision: flag the other volumes for review and suggest the volume marker.
+        def _is_omnibus_file(item: Dict[str, Any]) -> bool:
+            # The marker is a trailing "Omnibus" word, never the series name itself
+            # (a series may legitimately be called "Omnibus Test").
+            title = str(item.get("comic_title") or "").strip().lower()
+            if title:
+                return title.endswith("omnibus")
+            stem = os.path.splitext(str(item.get("name") or ""))[0].strip().lower()
+            return stem.endswith("omnibus")
+
+        omnibus_files = [item for item in group["files"] if _is_omnibus_file(item)]
+        if omnibus_files:
+            from app.tagger.naming import format_comicinfo_title
+
+            # An Omnibus is intentionally volume-less: the generic "unparseable
+            # volume" intervention does not apply to the omnibus file itself.
+            for item in omnibus_files:
+                reason = str(item.get("intervention_reason") or "")
+                if item.get("needs_intervention") and "volume" in reason.lower():
+                    item["needs_intervention"] = False
+                    item["intervention_reason"] = ""
+                    group["needs_intervention"] = max(0, group["needs_intervention"] - 1)
+
+            for item in group["files"]:
+                if item in omnibus_files:
+                    continue
+                was_flagged = bool(item.get("needs_intervention"))
+                item["needs_intervention"] = True
+                omnibus_reason = (
+                    "Series already has an Omnibus release; confirm this volume's numbering"
+                )
+                existing = str(item.get("intervention_reason") or "").strip()
+                item["intervention_reason"] = (
+                    f"{existing}; {omnibus_reason}" if existing and omnibus_reason not in existing
+                    else omnibus_reason
+                )
+                volume = (item.get("volumes") or [None])[0]
+                if volume is not None and not re.search(r"\bv\d", item.get("comic_title") or "", re.IGNORECASE):
+                    item["suggested_title"] = format_comicinfo_title(group["series"], volume=volume)
+                if not was_flagged:
+                    group["needs_intervention"] += 1
         result.append(group)
     result.sort(key=lambda item: (item.get("owner") or "", item["series"].lower()))
     return result

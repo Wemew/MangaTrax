@@ -1032,6 +1032,9 @@ class ManualTagRequest(BaseModel):
     writer: Optional[str] = Field(default=None, max_length=500)
     publisher: Optional[str] = Field(default=None, max_length=500)
     genre: Optional[str] = Field(default=None, max_length=500)
+    # Omnibus releases: the Title gets an "Omnibus" suffix instead of a volume
+    # marker, and later volumes for the same series are flagged for review.
+    omnibus: Optional[bool] = False
 
     @field_validator("filename")
     @classmethod
