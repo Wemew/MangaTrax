@@ -7,6 +7,11 @@ semantic versioning.
 ## [Unreleased]
 
 ### Added
+- **Settings → AniList lookups (unresolved series):** background volume lookups that found
+  nothing are recorded in `anilist_lookup_failures` (series, release, attempts, last try) and
+  listed for admins. Pasting an AniList URL/id pins that exact entry, locks the mapping, caches
+  the metadata, clears the throttle marker and retries complete-series expansion immediately;
+  entries can also be dismissed until the next failed lookup.
 - **Multi-user mode through OIDC groups:** each login owns its tracked series, monitor state,
   blacklist, prioritized groups and a private `staging/<user>/` folder (flat inside), while the Calibre
   library, cached metadata and the "in staging" indicator stay shared. Admin comes from

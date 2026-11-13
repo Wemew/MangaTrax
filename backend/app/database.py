@@ -971,6 +971,21 @@ class MangaDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_release_requests_status "
                 "ON release_requests(status);"
             )
+            # Series whose AniList/MangaUpdates metadata lookup failed (no volume
+            # count), surfaced in Settings so an admin can pin an exact AniList id.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS anilist_lookup_failures (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    series_norm TEXT UNIQUE NOT NULL,
+                    series_name TEXT NOT NULL,
+                    release_id INTEGER,
+                    release_title TEXT DEFAULT '',
+                    reason TEXT DEFAULT '',
+                    attempts INTEGER DEFAULT 1,
+                    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_attempt_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
             # Release rows route downloads to the requesting user's staging folder.
             cur.execute("PRAGMA table_info(releases);")
             release_cols = [r["name"] for r in cur.fetchall()]
@@ -2427,6 +2442,82 @@ class MangaDatabase:
             )
             conn.commit()
             return cur.rowcount > 0
+
+    # --- AniList lookup failures (manual pin queue) ---
+
+    def record_anilist_failure(
+        self, series_name: str, release_id: Optional[int] = None,
+        release_title: str = "", reason: str = "no volume count",
+    ) -> None:
+        """Upsert one unresolved series so an admin can link it manually."""
+        from app.parser import normalize_text
+
+        clean_name = str(series_name or "").strip()
+        norm = normalize_text(clean_name)
+        if not norm:
+            return
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO anilist_lookup_failures (
+                    series_norm, series_name, release_id, release_title, reason,
+                    attempts, first_seen, last_attempt_at
+                ) VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(series_norm) DO UPDATE SET
+                    series_name = excluded.series_name,
+                    release_id = COALESCE(excluded.release_id, anilist_lookup_failures.release_id),
+                    release_title = CASE WHEN excluded.release_title != ''
+                                         THEN excluded.release_title
+                                         ELSE anilist_lookup_failures.release_title END,
+                    reason = excluded.reason,
+                    attempts = anilist_lookup_failures.attempts + 1,
+                    last_attempt_at = CURRENT_TIMESTAMP;
+                """,
+                (
+                    norm, clean_name,
+                    None if release_id is None else int(release_id),
+                    str(release_title or ""), str(reason or ""),
+                ),
+            )
+            conn.commit()
+
+    def clear_anilist_failure(self, series_name: str) -> bool:
+        from app.parser import normalize_text
+
+        norm = normalize_text(str(series_name or "").strip())
+        if not norm:
+            return False
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM anilist_lookup_failures WHERE series_norm = ?;", (norm,))
+            conn.commit()
+            return cur.rowcount > 0
+
+    def get_anilist_failure(self, failure_id: int) -> Optional[Dict[str, Any]]:
+        try:
+            fid = int(failure_id)
+        except (TypeError, ValueError):
+            return None
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM anilist_lookup_failures WHERE id = ?;", (fid,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_anilist_failures(self) -> List[Dict[str, Any]]:
+        """Unresolved series plus the tracker/AniList state an admin needs to link them."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT f.*, st.id AS series_id, st.anilist_id AS pinned_anilist_id,
+                       st.anilist_locked AS anilist_locked
+                FROM anilist_lookup_failures f
+                LEFT JOIN series_tracking st ON lower(trim(st.name)) = lower(trim(f.series_name))
+                ORDER BY f.attempts DESC, f.last_attempt_at DESC, f.series_name COLLATE NOCASE ASC;
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     # --- Request approvals ---
 

@@ -67,6 +67,9 @@
                 <a href="#section-groups" data-settings-nav="section-groups" class="settings-nav-link shrink-0 whitespace-nowrap flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border border-transparent text-slate-400 hover:text-white hover:bg-slate-800/70 transition-colors">
                     <i data-lucide="star" class="w-3.5 h-3.5"></i> Groups
                 </a>
+                <a href="#section-anilist-failures" data-settings-nav="section-anilist-failures" class="settings-nav-link shrink-0 whitespace-nowrap flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border border-transparent text-slate-400 hover:text-white hover:bg-slate-800/70 transition-colors">
+                    <i data-lucide="search-x" class="w-3.5 h-3.5"></i> AniList lookups
+                </a>
                 <a href="#section-maintenance" data-settings-nav="section-maintenance" class="settings-nav-link shrink-0 whitespace-nowrap flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold border border-transparent text-slate-400 hover:text-white hover:bg-slate-800/70 transition-colors">
                     <i data-lucide="wrench" class="w-3.5 h-3.5"></i> Maintenance
                 </a>
@@ -516,6 +519,28 @@
                     <i data-lucide="plus" class="w-3.5 h-3.5"></i>
                     Add Group
                 </button>
+            </div>
+        </div>
+
+        <!-- AniList lookup failures: manual pin queue for unresolved series -->
+        <div id="section-anilist-failures" data-settings-card="section-anilist-failures" data-settings-ignore class="scroll-mt-24 bg-darkcard border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                <i data-lucide="search-x" class="w-4 h-4 text-rose-400"></i>
+                AniList lookups (unresolved series)
+            </h3>
+            <p class="text-xs text-slate-400">
+                Series whose background volume lookup found nothing on AniList or MangaUpdates. Pin the
+                exact AniList entry by pasting its URL or numeric id; MangaTrax locks the mapping, caches
+                the metadata and retries the complete-series expansion immediately.
+            </p>
+            <div class="flex items-center justify-between gap-2">
+                <span id="anilist-failures-count" class="text-[11px] text-slate-400">Loading…</span>
+                <button type="button" onclick="loadAnilistFailures()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5">
+                    <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-rose-400"></i> Refresh
+                </button>
+            </div>
+            <div id="anilist-failures-body" class="divide-y divide-slate-800/60 text-[11px]">
+                <p class="py-3 text-slate-400">Loading unresolved series…</p>
             </div>
         </div>
 
@@ -1654,7 +1679,12 @@ function hideSettingsSaveBar() {
     document.body.classList.remove('mt-save-open');
 }
 
-function markSettingsDirty() {
+function markSettingsDirty(event) {
+    // Elements flagged data-settings-ignore (e.g. the AniList pin queue) do not
+    // belong to the settings form state, so typing there must not arm the save bar.
+    if (event && event.target && event.target.closest && event.target.closest('[data-settings-ignore]')) {
+        return;
+    }
     _settingsDirty = true;
     showSettingsSaveBar();
 }
@@ -1920,5 +1950,85 @@ async function cleanupLightNovels(action, button) {
         await auditLightNovels();
     } catch (err) { showToast('Cleanup failed: ' + err, 'error'); }
 }
+
+// --- AniList unresolved-series queue (manual pin) ---
+function _anilistFailureEsc(value) {
+    const div = document.createElement('div');
+    div.textContent = value === null || value === undefined ? '' : String(value);
+    return div.innerHTML;
+}
+
+async function loadAnilistFailures() {
+    const body = document.getElementById('anilist-failures-body');
+    const count = document.getElementById('anilist-failures-count');
+    if (!body) return;
+    try {
+        const res = await fetch('/api/admin/anilist-failures');
+        const data = await res.json();
+        if (!res.ok) { body.innerHTML = `<p class="py-3 text-rose-300">${_anilistFailureEsc(data.detail || 'Could not load failures')}</p>`; return; }
+        const rows = data.failures || [];
+        if (count) count.textContent = rows.length ? `${rows.length} unresolved series` : 'No unresolved series';
+        body.innerHTML = rows.length ? rows.map(function (row) {
+            const pinned = row.pinned_anilist_id
+                ? `<span class="px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300">pinned #${_anilistFailureEsc(row.pinned_anilist_id)}</span>`
+                : '';
+            const release = row.release_title
+                ? `<div class="text-slate-500">${_anilistFailureEsc(row.release_title)}</div>` : '';
+            return `<div class="py-3 space-y-1.5" data-failure-id="${Number(row.id)}">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div class="min-w-0">
+                        <span class="font-semibold text-slate-100">${_anilistFailureEsc(row.series_name)}</span>
+                        <span class="text-slate-500"> · ${Number(row.attempts || 0)} attempt(s) · last ${_anilistFailureEsc(row.last_attempt_at || '')}</span>
+                        ${pinned}
+                        ${release}
+                    </div>
+                    <button type="button" onclick="dismissAnilistFailure(${Number(row.id)})" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-rose-900/40 border border-slate-700 text-rose-300" title="Ignore this series until the lookup fails again">Dismiss</button>
+                </div>
+                <div class="flex flex-wrap items-center gap-1.5">
+                    <input type="text" data-anilist-ref placeholder="AniList URL or id…" autocomplete="off"
+                           onkeydown="if(event.key==='Enter'){event.preventDefault();linkAnilistFailure(${Number(row.id)}, this);}"
+                           class="flex-1 min-w-[12rem] bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                    <button type="button" onclick="linkAnilistFailure(${Number(row.id)}, this.previousElementSibling)" class="px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold">Link</button>
+                </div>
+            </div>`;
+        }).join('') : '<p class="py-3 text-slate-400">No unresolved series — every background lookup has a result.</p>';
+    } catch (err) {
+        body.innerHTML = `<p class="py-3 text-rose-300">Could not load failures: ${_anilistFailureEsc(err)}</p>`;
+    }
+}
+
+async function linkAnilistFailure(failureId, inputEl) {
+    const ref = inputEl ? String(inputEl.value || '').trim() : '';
+    if (!ref) { showToast('Paste an AniList URL or id first', 'error'); return; }
+    if (inputEl) inputEl.disabled = true;
+    try {
+        const res = await fetch(`/api/admin/anilist-failures/${failureId}/link`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ anilist_id: ref }),
+        });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Could not link that AniList entry', 'error'); return; }
+        showToast(`Pinned #${data.anilist_id}${data.canonical_title ? ' · ' + data.canonical_title : ''} — ${data.expanded || 0} release(s) expanded`, 'success');
+        await loadAnilistFailures();
+    } catch (err) {
+        showToast('Error: ' + err, 'error');
+    } finally {
+        if (inputEl) inputEl.disabled = false;
+    }
+}
+
+async function dismissAnilistFailure(failureId) {
+    try {
+        const res = await fetch(`/api/admin/anilist-failures/${failureId}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Could not dismiss the entry', 'error'); return; }
+        showToast('Dismissed until the next failed lookup', 'info');
+        await loadAnilistFailures();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    if (document.getElementById('anilist-failures-body')) loadAnilistFailures();
+});
 </script>
 {% endblock %}

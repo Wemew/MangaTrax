@@ -5288,6 +5288,22 @@ class MangaScheduler:
                     except Exception:
                         pass
 
+            if not tot:
+                # Persist the unresolved series so an admin can pin an AniList id
+                # from Settings instead of waiting for a fuzzy match.
+                try:
+                    self.db.record_anilist_failure(
+                        s_name or title, rel_id, title,
+                        "no volume count from AniList or MangaUpdates",
+                    )
+                except Exception as exc:  # pragma: no cover - ledger is best effort
+                    logger.debug("Could not record AniList failure for '%s': %s", s_name or title, exc)
+            else:
+                try:
+                    self.db.clear_anilist_failure(s_name or title)
+                except Exception:
+                    pass
+
             try:
                 with self.db.get_connection() as conn:
                     conn.execute(

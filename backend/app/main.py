@@ -2105,6 +2105,85 @@ async def api_reject_release_request(approval_id: int):
     return JSONResponse({"status": "success", "decision": "rejected", "request": result})
 
 
+@app.get("/api/admin/anilist-failures", dependencies=[Depends(require_admin)])
+async def api_admin_anilist_failures():
+    """Series whose AniList/MangaUpdates volume lookup failed (manual pin queue)."""
+    rows = await asyncio.to_thread(db.list_anilist_failures)
+    return JSONResponse({"status": "success", "failures": rows, "count": len(rows)})
+
+
+@app.post("/api/admin/anilist-failures/{failure_id}/link", dependencies=[Depends(require_admin)])
+async def api_admin_link_anilist_failure(
+    failure_id: int, payload: Optional[Dict[str, Any]] = None,
+):
+    """Pin one unresolved series to an exact AniList entry, then retry expansion."""
+    body = payload or {}
+    failure = await asyncio.to_thread(db.get_anilist_failure, failure_id)
+    if not failure:
+        raise HTTPException(status_code=404, detail="Failure entry not found")
+    ref = body.get("anilist_id", body.get("anilist_url"))
+    anilist_id = parse_anilist_id(ref)
+    if anilist_id is None:
+        query = str(body.get("query") or "").strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="anilist_id, anilist_url or query is required")
+        meta = await asyncio.to_thread(scheduler.anilist.resolve_manga_series, query, True)
+        anilist_id = parse_anilist_id((meta or {}).get("anilist_id"))
+    else:
+        meta = await asyncio.to_thread(scheduler.anilist.resolve_by_anilist_id, anilist_id, True)
+    if not meta or anilist_id is None:
+        raise HTTPException(status_code=404, detail="No AniList entry found for that reference")
+
+    series_name = str(failure.get("series_name") or "").strip()
+    tracked = await asyncio.to_thread(db.get_series_by_name, series_name)
+    if tracked:
+        await asyncio.to_thread(
+            db.set_series_anilist_mapping, int(tracked["id"]), anilist_id, meta,
+            actor=auth_module.get_current_actor(),
+        )
+    else:
+        await asyncio.to_thread(db.cache_manga_metadata, series_name, meta)
+    # Drop the throttle marker for its releases and expand immediately: the pinned
+    # metadata (or the cached entry) now carries the volume count.
+    await asyncio.to_thread(db.clear_anilist_failure, series_name)
+    with db.get_connection() as conn:
+        conn.execute(
+            "UPDATE releases SET complete_expand_attempted_at = '' "
+            "WHERE lower(trim(series_name)) = lower(trim(?));",
+            (series_name,),
+        )
+        conn.commit()
+    try:
+        expanded = await asyncio.to_thread(
+            scheduler.expand_unresolved_complete_releases, None, series_name,
+        )
+    except Exception as exc:  # pragma: no cover - expansion is best effort
+        logger.warning("Expansion after AniList link failed for '%s': %s", series_name, exc)
+        expanded = 0
+    db.log_activity(
+        "ANILIST_FAILURE_LINKED",
+        f"Pinned AniList #{anilist_id} for unresolved series '{series_name}'",
+        json.dumps({"anilist_id": anilist_id, "failure_id": int(failure_id), "expanded": expanded}),
+        actor=auth_module.get_current_actor(),
+    )
+    return JSONResponse({
+        "status": "success",
+        "series_name": series_name,
+        "anilist_id": anilist_id,
+        "canonical_title": str(meta.get("canonical_title") or ""),
+        "expanded": int(expanded or 0),
+    })
+
+
+@app.delete("/api/admin/anilist-failures/{failure_id}", dependencies=[Depends(require_admin)])
+async def api_admin_dismiss_anilist_failure(failure_id: int):
+    failure = await asyncio.to_thread(db.get_anilist_failure, failure_id)
+    if not failure:
+        raise HTTPException(status_code=404, detail="Failure entry not found")
+    await asyncio.to_thread(db.clear_anilist_failure, str(failure.get("series_name") or ""))
+    return JSONResponse({"status": "success", "dismissed": True})
+
+
 @app.get("/api/admin/users", dependencies=[Depends(require_admin)])
 async def api_admin_users():
     return JSONResponse({"status": "success", "users": db.list_users()})

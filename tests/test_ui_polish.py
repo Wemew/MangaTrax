@@ -47,6 +47,7 @@ def test_settings_section_nav():
         ("Tracker", "section-tracker"),
         ("Webhooks", "section-webhooks"),
         ("Groups", "section-groups"),
+        ("AniList lookups", "section-anilist-failures"),
         ("Maintenance", "section-maintenance"),
         ("Advanced", "section-advanced"),
     ]
@@ -57,7 +58,7 @@ def test_settings_section_nav():
         assert 'id="%s"' % anchor in source, (label, anchor)
         assert "data-settings-nav=\"%s\"" % anchor in source, (label, anchor)
         assert "> %s" % label in source or ">%s" % label in source, (label, anchor)
-    # Exactly the 8 anchors, no strays.
+    # Exactly the documented anchors, no strays.
     anchors = re.findall(r'data-settings-nav="([^"]+)"', source)
     assert anchors == [anchor for _label, anchor in expected], anchors
 

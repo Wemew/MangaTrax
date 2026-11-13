@@ -499,6 +499,64 @@ def test_anilist_negative_volume_cache(ctx):
     assert fetch.call_count == 2, fetch.call_count  # one normal + one forced; cached miss avoided
 
 
+def test_unresolved_series_queue_and_manual_link(ctx, red):
+    with ctx.db.get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO releases (guid, title, series_name, status, is_complete) VALUES (?,?,?,?,?)",
+            ("unresolved-1", "Mystery Saga (Complete)", "Mystery Saga", "DISCOVERY", 1),
+        )
+        release_id = cur.lastrowid
+        conn.commit()
+
+    def _no_meta(name, *args, **kwargs):
+        return {}
+
+    with patch.object(ctx.scheduler.anilist, "resolve_manga_series", side_effect=_no_meta), \
+         patch.object(ctx.scheduler.mangaupdates, "get_series_info", return_value={}):
+        ctx.scheduler.expand_unresolved_complete_releases()
+    failures = [f for f in ctx.db.list_anilist_failures() if f["series_name"] == "Mystery Saga"]
+    assert len(failures) == 1, failures
+    entry = failures[0]
+    assert int(entry["attempts"]) == 1, entry
+    assert int(entry["release_id"]) == release_id, entry
+
+    with patch.object(main_app, "_current_user_row", return_value=red):
+        listed = ctx.client.get("/api/admin/anilist-failures")
+    assert listed.status_code == 200, listed.text
+    assert any(f["series_name"] == "Mystery Saga" for f in listed.json()["failures"]), listed.text
+
+    meta = {
+        "anilist_id": 5555, "canonical_title": "Mystery Saga", "romaji_title": "",
+        "cover_url": "", "total_volumes": 3, "status": "FINISHED", "synopsis": "",
+        "source": "anilist", "synonyms": [], "genres": [], "tags": [], "tags_sorted": [],
+        "matched_term": "mystery saga",
+    }
+    with patch.object(main_app, "_current_user_row", return_value=red), \
+         patch.object(ctx.scheduler.anilist, "resolve_by_anilist_id", return_value=meta):
+        linked = ctx.client.post(
+            f"/api/admin/anilist-failures/{entry['id']}/link",
+            json_data={"anilist_id": "https://anilist.co/manga/5555/Mystery-Saga"},
+        )
+    assert linked.status_code == 200, linked.text
+    body = linked.json()
+    assert body["anilist_id"] == 5555 and body["expanded"] >= 1, body
+    assert [f for f in ctx.db.list_anilist_failures() if f["series_name"] == "Mystery Saga"] == []
+    assert ctx.db.get_release_by_id(release_id)["volumes"] == [1.0, 2.0, 3.0]
+
+    # Dismiss removes an entry without touching the release state.
+    ctx.db.record_anilist_failure("Dismiss Me", None, "", "test")
+    with patch.object(main_app, "_current_user_row", return_value=red):
+        rows = ctx.client.get("/api/admin/anilist-failures").json()["failures"]
+        dismiss_id = next(row["id"] for row in rows if row["series_name"] == "Dismiss Me")
+        res = ctx.client.delete(f"/api/admin/anilist-failures/{dismiss_id}")
+    assert res.status_code == 200
+    assert [f for f in ctx.db.list_anilist_failures() if f["series_name"] == "Dismiss Me"] == []
+
+    settings_html = open(os.path.join(BACKEND_DIR, "app", "templates", "settings.html"), encoding="utf-8").read()
+    assert 'id="section-anilist-failures"' in settings_html
+    assert "/api/admin/anilist-failures" in settings_html
+
+
 def test_staging_groups_split_by_owner(ctx):
     import zipfile
     from app import staging_groups as staging_groups_module
@@ -611,6 +669,7 @@ def main():
         test_staging_dir_scoping(ctx, red, blue)
         test_per_user_routing(ctx, blue)
         test_complete_expansion_stops_requerying(ctx)
+        test_unresolved_series_queue_and_manual_link(ctx, red)
         test_anilist_negative_volume_cache(ctx)
         test_staging_groups_split_by_owner(ctx)
         test_admin_owner_bucket_merges_own_folder(ctx, red)
