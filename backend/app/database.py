@@ -558,10 +558,6 @@ class MangaDatabase:
             # click after a strict-volume skip); bypasses per-volume selection.
             if "torbox_force_whole" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN torbox_force_whole INTEGER DEFAULT 0;")
-            # Direct per-post source/download link found in the feed body (jnovels
-            # "VOLUME N" anchor); exposed as a per-release button.
-            if "source_link" not in r_cols:
-                cur.execute("ALTER TABLE releases ADD COLUMN source_link TEXT DEFAULT '';")
             # Downloaded-file tracking (task-30): files fetched by an engine, when they
             # arrived, and when routing moved them out of the raw downloads folder.
             if "download_files_json" not in r_cols:
@@ -3596,7 +3592,6 @@ class MangaDatabase:
                         missing_vols_json = ?,
                         download_url = ?,
                         link = ?,
-                        source_link = CASE WHEN ? != '' THEN ? ELSE source_link END,
                         cover_url = ?,
                         revision = CASE WHEN COALESCE(?, 0) > COALESCE(revision, 0) THEN ? ELSE revision END,
                         publisher = CASE WHEN ? != '' THEN ? ELSE publisher END,
@@ -3626,8 +3621,6 @@ class MangaDatabase:
                     missing_json,
                     rel.get("download_url"),
                     rel.get("link"),
-                    rel.get("source_link", ""),
-                    rel.get("source_link", ""),
                     rel.get("cover_url"),
                     revision,
                     revision,
@@ -3648,9 +3641,9 @@ class MangaDatabase:
                     INSERT INTO releases (
                         guid, title, series_name, release_group, release_groups_json, description, mangaupdates_url,
                         is_bundle, is_complete, volume_start, volume_end, volumes_json, missing_vols_json,
-                        download_url, link, source_link, cover_url, source_feed_name, status, download_status, torrent_hash,
+                        download_url, link, cover_url, source_feed_name, status, download_status, torrent_hash,
                         revision, publisher, inferred_volumes, published_at, is_light_novel
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
                     guid,
                     rel["title"],
@@ -3667,7 +3660,6 @@ class MangaDatabase:
                     missing_json,
                     rel.get("download_url"),
                     rel.get("link"),
-                    rel.get("source_link") or "",
                     rel.get("cover_url"),
                     rel.get("source_feed_name"),
                     resolve_status(None, rel.get("status")) or "REQUESTED",

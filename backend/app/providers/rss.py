@@ -9,32 +9,6 @@ from app.parser import extract_manga_bundle_and_volumes, is_chapter_only, is_lig
 
 logger = logging.getLogger("mangatrax.providers.rss")
 
-#: Source pages (jnovels and similar) put the actual download behind an anchor like
-#: ``<a href="https://charexempire.com/xxxx">VOLUME 23</a>``. Keep that link so the
-#: row can show a direct button instead of requiring a trip through the article.
-_SOURCE_VOLUME_ANCHOR_RE = re.compile(
-    r'<a\b[^>]*href=["\'](?P<href>https?://[^"\']+)["\'][^>]*>\s*(?:volume|vol\.?)\s*\d+',
-    re.IGNORECASE | re.DOTALL,
-)
-_SOURCE_HOST_FALLBACK_RE = re.compile(r'https?://charexempire\.com/[^\s"\'<>]+', re.IGNORECASE)
-
-
-def extract_source_link(summary: str) -> str:
-    """Extract a per-post direct download link (e.g. jnovels' VOLUME anchor).
-
-    Returns an empty string when the post has no such anchor, so ordinary RSS feeds
-    are unaffected. The first matching anchor wins; a charexempire link is used as a
-    fallback for anchors whose text was altered.
-    """
-    html = str(summary or "")
-    if not html:
-        return ""
-    match = _SOURCE_VOLUME_ANCHOR_RE.search(html)
-    if match:
-        return match.group("href").strip()
-    fallback = _SOURCE_HOST_FALLBACK_RE.search(html)
-    return fallback.group(0).strip() if fallback else ""
-
 FEED_FETCH_TIMEOUT_SECONDS = 15.0
 
 
@@ -217,7 +191,6 @@ class RSSFeedProvider(BaseFeedProvider):
                 description=clean_desc,
                 guid=entry.get("id") or entry.get("guid") or web_post_link,
                 source_feed_name=self.name,
-                source_link=extract_source_link(summary),
                 raw_data={
                     "confidence": parsed["confidence"],
                     "post_size": post_size,

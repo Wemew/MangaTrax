@@ -36,8 +36,7 @@ class ReleaseItem:
         authors: Optional[List[str]] = None,
         revision: Optional[int] = None,
         publisher: Optional[str] = None,
-        raw_data: Optional[Dict[str, Any]] = None,
-        source_link: Optional[str] = None,
+        raw_data: Optional[Dict[str, Any]] = None
     ):
         self.title = title.strip()
         self.link = link.strip()
@@ -61,9 +60,6 @@ class ReleaseItem:
         self.description = description or ""
         self.source_feed_name = source_feed_name or ""
         self.raw_data = raw_data or {}
-        # Direct download/source link found inside a provider's post body (e.g. the
-        # jnovels "VOLUME N" anchor), shown as a per-release button.
-        self.source_link = str(source_link or "").strip()
 
         # Consistent GUID if not provided
         if not guid:
@@ -93,7 +89,6 @@ class ReleaseItem:
             "cover_url": self.cover_url,
             "description": self.description,
             "source_feed_name": self.source_feed_name,
-            "source_link": self.source_link,
             "raw_data": self.raw_data
         }
 
