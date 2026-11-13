@@ -2175,6 +2175,32 @@ async def api_admin_link_anilist_failure(
     })
 
 
+@app.post("/api/admin/anilist-failures/{failure_id}/ignore", dependencies=[Depends(require_admin)])
+async def api_admin_ignore_anilist_failure(
+    failure_id: int, payload: Optional[Dict[str, Any]] = None,
+):
+    """Mark an unresolved series as "no volume data expected" (or reopen it).
+
+    Ignored entries stop being retried by the background expansion pass but stay
+    listed in a foldout so the admin can still pin an AniList id later.
+    """
+    body = payload or {}
+    ignored = body.get("ignored", True)
+    if not isinstance(ignored, bool):
+        raise HTTPException(status_code=400, detail="ignored must be a boolean")
+    updated = await asyncio.to_thread(db.set_anilist_failure_ignored, failure_id, ignored)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Failure entry not found")
+    db.log_activity(
+        "ANILIST_FAILURE_IGNORED" if ignored else "ANILIST_FAILURE_REOPENED",
+        f"{'Marked' if ignored else 'Reopened'} unresolved series '{updated.get('series_name')}'"
+        + (" as having no volume data" if ignored else ""),
+        json.dumps({"failure_id": int(failure_id), "ignored": ignored}),
+        actor=auth_module.get_current_actor(),
+    )
+    return JSONResponse({"status": "success", "failure": updated})
+
+
 @app.delete("/api/admin/anilist-failures/{failure_id}", dependencies=[Depends(require_admin)])
 async def api_admin_dismiss_anilist_failure(failure_id: int):
     failure = await asyncio.to_thread(db.get_anilist_failure, failure_id)

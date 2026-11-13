@@ -986,10 +986,18 @@ class MangaDatabase:
                     release_title TEXT DEFAULT '',
                     reason TEXT DEFAULT '',
                     attempts INTEGER DEFAULT 1,
+                    ignored INTEGER DEFAULT 0,
+                    ignored_at TIMESTAMP,
                     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_attempt_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            cur.execute("PRAGMA table_info(anilist_lookup_failures);")
+            failure_cols = [r["name"] for r in cur.fetchall()]
+            if "ignored" not in failure_cols:
+                cur.execute("ALTER TABLE anilist_lookup_failures ADD COLUMN ignored INTEGER DEFAULT 0;")
+            if "ignored_at" not in failure_cols:
+                cur.execute("ALTER TABLE anilist_lookup_failures ADD COLUMN ignored_at TIMESTAMP;")
             # Release rows route downloads to the requesting user's staging folder.
             cur.execute("PRAGMA table_info(releases);")
             release_cols = [r["name"] for r in cur.fetchall()]
@@ -2485,6 +2493,36 @@ class MangaDatabase:
                 ),
             )
             conn.commit()
+
+    def set_anilist_failure_ignored(self, failure_id: int, ignored: bool) -> Optional[Dict[str, Any]]:
+        """Mark a series as "no volume data expected" (stop retrying) or reopen it."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE anilist_lookup_failures SET ignored = ?, "
+                "ignored_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END "
+                "WHERE id = ?;",
+                (1 if ignored else 0, 1 if ignored else 0, int(failure_id)),
+            )
+            conn.commit()
+            if cur.rowcount <= 0:
+                return None
+            row = cur.execute(
+                "SELECT * FROM anilist_lookup_failures WHERE id = ?;", (int(failure_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def is_anilist_failure_ignored(self, series_name: str) -> bool:
+        from app.parser import normalize_text
+
+        norm = normalize_text(str(series_name or "").strip())
+        if not norm:
+            return False
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT ignored FROM anilist_lookup_failures WHERE series_norm = ?;", (norm,),
+            ).fetchone()
+        return bool(row and row["ignored"])
 
     def clear_anilist_failure(self, series_name: str) -> bool:
         from app.parser import normalize_text

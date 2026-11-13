@@ -542,6 +542,16 @@
             <div id="anilist-failures-body" class="divide-y divide-slate-800/60 text-[11px]">
                 <p class="py-3 text-slate-400">Loading unresolved series…</p>
             </div>
+            <details id="anilist-failures-ignored-wrap" class="rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2">
+                <summary class="cursor-pointer select-none flex items-center justify-between gap-2 text-[11px] font-semibold text-slate-300">
+                    <span class="flex items-center gap-1.5"><i data-lucide="archive" class="w-3.5 h-3.5 text-slate-400"></i> Marked as having no volume data</span>
+                    <span id="anilist-failures-ignored-count" class="text-slate-500">0</span>
+                </summary>
+                <p class="text-[11px] text-slate-500 pt-1">These are ignored by the background lookup but can still be linked to an AniList id.</p>
+                <div id="anilist-failures-ignored" class="divide-y divide-slate-800/60 text-[11px]">
+                    <p class="py-2 text-slate-500">Nothing marked yet.</p>
+                </div>
+            </details>
         </div>
 
         <!-- Maintenance (always available: safe, re-fetchable cleanups only) -->
@@ -1958,8 +1968,40 @@ function _anilistFailureEsc(value) {
     return div.innerHTML;
 }
 
+function _anilistFailureRow(row, ignored) {
+    const pinned = row.pinned_anilist_id
+        ? `<span class="px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300">pinned #${_anilistFailureEsc(row.pinned_anilist_id)}</span>`
+        : '';
+    const release = row.release_title
+        ? `<div class="text-slate-500">${_anilistFailureEsc(row.release_title)}</div>` : '';
+    const action = ignored
+        ? `<div class="flex items-center gap-1.5">
+               <button type="button" onclick="setAnilistFailureIgnored(${Number(row.id)}, false)" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200" title="Retry this series in future background passes">Reopen</button>
+               <button type="button" onclick="dismissAnilistFailure(${Number(row.id)})" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-rose-900/40 border border-slate-700 text-rose-300" title="Forget this entry entirely">Forget</button>
+           </div>`
+        : `<button type="button" onclick="setAnilistFailureIgnored(${Number(row.id)}, true)" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200" title="Stop retrying: this series has no usable volume numbers">No volume data</button>`;
+    return `<div class="py-3 space-y-1.5" data-failure-id="${Number(row.id)}">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+            <div class="min-w-0">
+                <span class="font-semibold text-slate-100">${_anilistFailureEsc(row.series_name)}</span>
+                <span class="text-slate-500"> · ${Number(row.attempts || 0)} attempt(s) · last ${_anilistFailureEsc(row.last_attempt_at || '')}</span>
+                ${pinned}
+                ${release}
+            </div>
+            ${action}
+        </div>
+        <div class="flex flex-wrap items-center gap-1.5">
+            <input type="text" data-anilist-ref placeholder="AniList URL or id…" autocomplete="off"
+                   onkeydown="if(event.key==='Enter'){event.preventDefault();linkAnilistFailure(${Number(row.id)}, this);}"
+                   class="flex-1 min-w-[12rem] bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+            <button type="button" onclick="linkAnilistFailure(${Number(row.id)}, this.previousElementSibling)" class="px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold">Link</button>
+        </div>
+    </div>`;
+}
+
 async function loadAnilistFailures() {
     const body = document.getElementById('anilist-failures-body');
+    const ignoredBody = document.getElementById('anilist-failures-ignored');
     const count = document.getElementById('anilist-failures-count');
     if (!body) return;
     try {
@@ -1967,34 +2009,37 @@ async function loadAnilistFailures() {
         const data = await res.json();
         if (!res.ok) { body.innerHTML = `<p class="py-3 text-rose-300">${_anilistFailureEsc(data.detail || 'Could not load failures')}</p>`; return; }
         const rows = data.failures || [];
-        if (count) count.textContent = rows.length ? `${rows.length} unresolved series` : 'No unresolved series';
-        body.innerHTML = rows.length ? rows.map(function (row) {
-            const pinned = row.pinned_anilist_id
-                ? `<span class="px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300">pinned #${_anilistFailureEsc(row.pinned_anilist_id)}</span>`
-                : '';
-            const release = row.release_title
-                ? `<div class="text-slate-500">${_anilistFailureEsc(row.release_title)}</div>` : '';
-            return `<div class="py-3 space-y-1.5" data-failure-id="${Number(row.id)}">
-                <div class="flex flex-wrap items-center justify-between gap-2">
-                    <div class="min-w-0">
-                        <span class="font-semibold text-slate-100">${_anilistFailureEsc(row.series_name)}</span>
-                        <span class="text-slate-500"> · ${Number(row.attempts || 0)} attempt(s) · last ${_anilistFailureEsc(row.last_attempt_at || '')}</span>
-                        ${pinned}
-                        ${release}
-                    </div>
-                    <button type="button" onclick="dismissAnilistFailure(${Number(row.id)})" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-rose-900/40 border border-slate-700 text-rose-300" title="Ignore this series until the lookup fails again">Dismiss</button>
-                </div>
-                <div class="flex flex-wrap items-center gap-1.5">
-                    <input type="text" data-anilist-ref placeholder="AniList URL or id…" autocomplete="off"
-                           onkeydown="if(event.key==='Enter'){event.preventDefault();linkAnilistFailure(${Number(row.id)}, this);}"
-                           class="flex-1 min-w-[12rem] bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
-                    <button type="button" onclick="linkAnilistFailure(${Number(row.id)}, this.previousElementSibling)" class="px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold">Link</button>
-                </div>
-            </div>`;
-        }).join('') : '<p class="py-3 text-slate-400">No unresolved series — every background lookup has a result.</p>';
+        const active = rows.filter(function (row) { return !row.ignored; });
+        const ignored = rows.filter(function (row) { return !!row.ignored; });
+        if (count) count.textContent = active.length ? `${active.length} unresolved series` : 'No unresolved series';
+        body.innerHTML = active.length
+            ? active.map(function (row) { return _anilistFailureRow(row, false); }).join('')
+            : '<p class="py-3 text-slate-400">No unresolved series — every background lookup has a result.</p>';
+        if (ignoredBody) {
+            ignoredBody.innerHTML = ignored.length
+                ? ignored.map(function (row) { return _anilistFailureRow(row, true); }).join('')
+                : '<p class="py-2 text-slate-500">Nothing marked yet.</p>';
+        }
+        const ignoredCount = document.getElementById('anilist-failures-ignored-count');
+        if (ignoredCount) ignoredCount.textContent = String(ignored.length);
     } catch (err) {
         body.innerHTML = `<p class="py-3 text-rose-300">Could not load failures: ${_anilistFailureEsc(err)}</p>`;
     }
+}
+
+async function setAnilistFailureIgnored(failureId, ignored) {
+    try {
+        const res = await fetch(`/api/admin/anilist-failures/${failureId}/ignore`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ignored: !!ignored }),
+        });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.detail || 'Could not update the entry', 'error'); return; }
+        showToast(ignored
+            ? 'Marked as having no volume data — future passes will skip it'
+            : 'Reopened — the background lookup may retry this series', 'success');
+        await loadAnilistFailures();
+    } catch (err) { showToast('Error: ' + err, 'error'); }
 }
 
 async function linkAnilistFailure(failureId, inputEl) {

@@ -61,6 +61,11 @@ semantic versioning.
 - **Searchable manual series matches** in Settings (250 ms debounce, explicit no-match state).
 
 ### Changed
+- **"No volume data" mark for unresolved series:** an admin can stop the background lookup from
+  retrying a series that will never have usable volume numbers. Marked entries move into a
+  collapsed "Marked as having no volume data" foldout directly below the active list, keep
+  their manual AniList link input (pinning still works and clears the entry), and can be
+  reopened or forgotten at any time.
 - **Force a whole-torrent download:** when Torbox skips a release as "nothing missing", the
   Download button arms a 4-second retry ("Download whole torrent"). The second click submits
   the entire release and disables strict per-volume selection for it, so every file downloads

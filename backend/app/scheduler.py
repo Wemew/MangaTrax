@@ -5234,6 +5234,14 @@ class MangaScheduler:
             # the state; re-expanding would re-query AniList for the same series on
             # every background pass.
             if not v_list:
+                failure_key = str(r.get("series_name") or r.get("title") or "").strip()
+                try:
+                    if self.db.is_anilist_failure_ignored(failure_key):
+                        # Admin marked this series as having no usable volume data:
+                        # never re-query or bump its failure entry again.
+                        continue
+                except Exception as exc:  # pragma: no cover - ledger is best effort
+                    logger.debug("Could not read AniList ignore flag for '%s': %s", failure_key, exc)
                 attempted_raw = str(r.get("complete_expand_attempted_at") or "").strip()
                 attempted_at = 0.0
                 if attempted_raw:

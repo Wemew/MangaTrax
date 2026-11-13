@@ -625,6 +625,48 @@ def test_unresolved_series_queue_and_manual_link(ctx, red):
     assert "/api/admin/anilist-failures" in settings_html
 
 
+def test_ignored_anilist_failures_stop_retrying(ctx, red):
+    with ctx.db.get_connection() as conn:
+        conn.execute(
+            "INSERT INTO releases (guid, title, series_name, status, is_complete) VALUES (?,?,?,?,?)",
+            ("ignored-1", "No Volumes Ever (Complete)", "No Volumes Ever", "DISCOVERY", 1),
+        )
+        conn.commit()
+    ctx.db.record_anilist_failure("No Volumes Ever", None, "No Volumes Ever (Complete)", "no volume count")
+    entry = next(f for f in ctx.db.list_anilist_failures() if f["series_name"] == "No Volumes Ever")
+
+    with patch.object(main_app, "_current_user_row", return_value=red):
+        res = ctx.client.post(f"/api/admin/anilist-failures/{entry['id']}/ignore", json_data={"ignored": True})
+    assert res.status_code == 200, res.text
+    assert res.json()["failure"]["ignored"] == 1
+    assert ctx.db.is_anilist_failure_ignored("No Volumes Ever") is True
+    # The flag survives another upsert (a failed retry elsewhere must not reopen it).
+    ctx.db.record_anilist_failure("No Volumes Ever", None, "No Volumes Ever (Complete)", "no volume count")
+    assert ctx.db.is_anilist_failure_ignored("No Volumes Ever") is True
+
+    calls = []
+    def _identity(name, *args, **kwargs):
+        calls.append(name)
+        return {}
+
+    with patch.object(ctx.scheduler.anilist, "resolve_manga_series", side_effect=_identity), \
+         patch.object(ctx.scheduler.mangaupdates, "get_series_info", return_value={}):
+        expanded = ctx.scheduler.expand_unresolved_complete_releases()
+    assert expanded == 0 and calls == [], calls
+    attempts = next(f for f in ctx.db.list_anilist_failures() if f["series_name"] == "No Volumes Ever")["attempts"]
+    assert int(attempts) >= 2, attempts  # no new background attempt was recorded
+
+    # Reopening puts it back in the retry set.
+    with patch.object(main_app, "_current_user_row", return_value=red):
+        res = ctx.client.post(f"/api/admin/anilist-failures/{entry['id']}/ignore", json_data={"ignored": False})
+    assert res.status_code == 200 and res.json()["failure"]["ignored"] == 0, res.text
+
+    settings_html = open(os.path.join(BACKEND_DIR, "app", "templates", "settings.html"), encoding="utf-8").read()
+    assert "No volume data" in settings_html
+    assert "anilist-failures-ignored" in settings_html
+    assert "/ignore" in settings_html
+
+
 def test_staging_groups_split_by_owner(ctx):
     import zipfile
     from app import staging_groups as staging_groups_module
@@ -739,6 +781,7 @@ def main():
         test_complete_expansion_stops_requerying(ctx)
         test_torbox_force_whole_override(ctx, red)
         test_unresolved_series_queue_and_manual_link(ctx, red)
+        test_ignored_anilist_failures_stop_retrying(ctx, red)
         test_anilist_negative_volume_cache(ctx)
         test_staging_groups_split_by_owner(ctx)
         test_admin_owner_bucket_merges_own_folder(ctx, red)
