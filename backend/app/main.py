@@ -1962,12 +1962,14 @@ async def downloads_view(request: Request):
     admin_scope = current_user is None or bool(current_user.get("is_admin"))
     staging_owner_labels = _staging_owner_labels()
     staging_owner_options = _staging_owner_options(include_all=admin_scope)
+    staging_omnibus = db.get_series_omnibus_norms()
     staging_files = []
     staging_groups_data = []
     if os.path.isdir(staging_dir):
         try:
             staging_groups_data = staging_groups.build_staging_groups(
                 staging_dir, owner_labels=staging_owner_labels,
+                omnibus_series=staging_omnibus,
             )
         except Exception as exc:
             logger.debug("Could not build staging groups: %s", exc)
@@ -3142,6 +3144,10 @@ def _manual_tag_staging_cbz(entry: Dict[str, Any], model) -> Dict[str, Any]:
         existing_xml = cbz_tagger.read_comicinfo_xml(entry["path"])
     except cbz_tagger.ComicInfoError as exc:
         raise HTTPException(status_code=422, detail=f"Unreadable .cbz archive: {exc}") from exc
+    try:
+        previous_fields = cbz_tagger.read_comicinfo(entry["path"]) or {}
+    except Exception:
+        previous_fields = {}
 
     updates = _manual_tag_updates(model)
     volume = updates.get("Volume")
@@ -3197,6 +3203,24 @@ def _manual_tag_staging_cbz(entry: Dict[str, Any], model) -> Dict[str, Any]:
             )
             entry = dict(entry, path=target, name=new_filename,
                          relative=os.path.relpath(target, staging_root).replace(os.sep, "/"))
+    # Persist the omnibus marker: later volumes for this series must be reviewed
+    # even after this file leaves staging. Unchecking an Omnibus title clears it
+    # when no other staged file for the series carries the marker.
+    try:
+        if getattr(model, "omnibus", False):
+            db.mark_series_omnibus(model.series, actor=auth_module.get_current_actor())
+        elif str(previous_fields.get("Title") or "").strip().lower().endswith("omnibus"):
+            siblings = cbz_tagger.scan_staging_cbz_files(os.path.dirname(entry["path"]))
+            still_omnibus = any(
+                str((cbz_tagger.read_comicinfo(item["path"]) or {}).get("Title") or "")
+                .strip().lower().endswith("omnibus")
+                for item in siblings
+                if item["path"] != entry["path"]
+            )
+            if not still_omnibus:
+                db.clear_series_omnibus(model.series)
+    except Exception as exc:  # pragma: no cover - marker bookkeeping is best effort
+        logger.debug("Could not update the Omnibus marker for '%s': %s", model.series, exc)
     try:
         from app.staged_ownership import invalidate_staged_ownership_cache
         invalidate_staged_ownership_cache()
@@ -3627,6 +3651,7 @@ async def api_staging_groups():
     groups = await asyncio.to_thread(
         staging_groups.build_staging_groups,
         _staging_dir_setting(), owner_labels=_staging_owner_labels(),
+        omnibus_series=db.get_series_omnibus_norms(),
     )
     return JSONResponse({"status": "success", "groups": groups, "count": len(groups)})
 
@@ -3642,6 +3667,7 @@ async def api_staging_series_match(payload: Dict[str, Any]):
     groups = await asyncio.to_thread(
         staging_groups.build_staging_groups,
         _staging_dir_setting(), owner_labels=owner_labels,
+        omnibus_series=db.get_series_omnibus_norms(),
     )
     from app.parser import normalize_text as _normalize_text
     if not any(

@@ -15,7 +15,9 @@ logger = logging.getLogger("mangatrax.staging_groups")
 
 
 def build_staging_groups(
-    staging_dir: str, owner_labels: Optional[Dict[str, str]] = None,
+    staging_dir: str,
+    owner_labels: Optional[Dict[str, str]] = None,
+    omnibus_series: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """Group staged CBZs by owner folder and ComicInfo <Series>.
 
@@ -33,6 +35,7 @@ def build_staging_groups(
         for folder, label in (owner_labels or {}).items()
         if str(folder).strip()
     }
+    omnibus_norms = {str(value).strip().lower() for value in (omnibus_series or ()) if str(value).strip()}
 
     def _owner_of(relative: str) -> str:
         candidate = str(relative or "").replace("\\", "/")
@@ -126,7 +129,10 @@ def build_staging_groups(
             return stem.endswith("omnibus")
 
         omnibus_files = [item for item in group["files"] if _is_omnibus_file(item)]
-        if omnibus_files:
+        # The persisted marker keeps the rule alive after the omnibus file has been
+        # imported/removed from staging.
+        series_is_omnibus = bool(omnibus_files) or normalize_text(group["series"]) in omnibus_norms
+        if series_is_omnibus:
             from app.tagger.naming import format_comicinfo_title
 
             # An Omnibus is intentionally volume-less: the generic "unparseable
@@ -178,7 +184,10 @@ def retag_staging_group(db, staging_dir: str, source_series: str,
     target = str(target_series or "").strip()
     if not target:
         raise ValueError("target series name is required")
-    groups = build_staging_groups(root, owner_labels=owner_labels)
+    groups = build_staging_groups(
+        root, owner_labels=owner_labels,
+        omnibus_series=db.get_series_omnibus_norms() if db is not None else None,
+    )
     wanted_owner = str(owner or "").strip().lower()
     group = next(
         (item for item in groups

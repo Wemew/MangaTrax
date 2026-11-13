@@ -975,6 +975,16 @@ class MangaDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_release_requests_status "
                 "ON release_requests(status);"
             )
+            # Series that have an Omnibus release. The marker outlives the staged
+            # file: once the omnibus is imported, later volumes still need review.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS series_omnibus (
+                    series_norm TEXT PRIMARY KEY,
+                    series_name TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    actor TEXT DEFAULT 'user'
+                );
+            """)
             # Series whose AniList/MangaUpdates metadata lookup failed (no volume
             # count), surfaced in Settings so an admin can pin an exact AniList id.
             cur.execute("""
@@ -2454,6 +2464,56 @@ class MangaDatabase:
             )
             conn.commit()
             return cur.rowcount > 0
+
+    # --- Omnibus series markers ---
+
+    def mark_series_omnibus(self, series_name: str, actor: str = "user") -> None:
+        from app.parser import normalize_text
+
+        clean = str(series_name or "").strip()
+        norm = normalize_text(clean)
+        if not norm:
+            return
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO series_omnibus (series_norm, series_name, created_at, actor)
+                VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+                ON CONFLICT(series_norm) DO UPDATE SET
+                    series_name = excluded.series_name, actor = excluded.actor;
+                """,
+                (norm, clean, str(actor or "user")),
+            )
+            conn.commit()
+
+    def clear_series_omnibus(self, series_name: str) -> bool:
+        from app.parser import normalize_text
+
+        norm = normalize_text(str(series_name or "").strip())
+        if not norm:
+            return False
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM series_omnibus WHERE series_norm = ?;", (norm,))
+            conn.commit()
+            return cur.rowcount > 0
+
+    def get_series_omnibus_norms(self) -> Set[str]:
+        with self.get_connection() as conn:
+            rows = conn.execute("SELECT series_norm FROM series_omnibus;").fetchall()
+        return {str(row["series_norm"]) for row in rows if row["series_norm"]}
+
+    def is_series_omnibus(self, series_name: str) -> bool:
+        from app.parser import normalize_text
+
+        norm = normalize_text(str(series_name or "").strip())
+        if not norm:
+            return False
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM series_omnibus WHERE series_norm = ? LIMIT 1;", (norm,),
+            ).fetchone()
+        return row is not None
 
     # --- AniList lookup failures (manual pin queue) ---
 

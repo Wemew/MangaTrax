@@ -542,6 +542,33 @@ def test_manual_tag_omnibus_and_later_volume_flag(ctx, red):
     # The omnibus file itself is not flagged.
     assert by_name[name]["needs_intervention"] is False, by_name[name]
     assert not by_name[name]["intervention_reason"], by_name[name]
+    assert ctx.db.is_series_omnibus("Omnibus Test") is True
+
+    # The marker survives the omnibus file leaving staging (imported/moved).
+    valid_v03 = os.path.join(root, "Omnibus Test v03.cbz")
+    with zipfile.ZipFile(valid_v03, "w") as archive:
+        archive.writestr("001.jpg", b"x")
+    cbz_tagger.rewrite_comicinfo(valid_v03, cbz_tagger.build_comicinfo_xml(None, {
+        "Series": "Omnibus Test", "Title": "Omnibus Test v03", "Volume": "3", "Number": "3",
+    }))
+    os.remove(os.path.join(root, name))
+    plain_groups = staging_groups_module.build_staging_groups(root)
+    plain_v03 = next(
+        f for g in plain_groups if g["series"] == "Omnibus Test"
+        for f in g["files"] if f["name"] == "Omnibus Test v03.cbz"
+    )
+    assert plain_v03["needs_intervention"] is False, plain_v03
+    marked_groups = staging_groups_module.build_staging_groups(
+        root, omnibus_series=ctx.db.get_series_omnibus_norms(),
+    )
+    marked_v03 = next(
+        f for g in marked_groups if g["series"] == "Omnibus Test"
+        for f in g["files"] if f["name"] == "Omnibus Test v03.cbz"
+    )
+    assert marked_v03["needs_intervention"] is True, marked_v03
+    assert "Omnibus" in marked_v03["intervention_reason"], marked_v03
+    # v03 already carries its marker, so no title suggestion is needed.
+    assert not marked_v03["suggested_title"], marked_v03
 
     template = open(os.path.join(BACKEND_DIR, "app", "templates", "downloads.html"), encoding="utf-8").read()
     assert 'id="tag-field-omnibus"' in template
