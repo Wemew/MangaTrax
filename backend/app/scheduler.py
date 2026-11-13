@@ -1565,6 +1565,7 @@ class MangaScheduler:
         source: str = "",
         guid: str = "",
         torrent_hash: str = "",
+        force_whole: bool = False,
     ) -> Dict[str, Any]:
         """Submit a release to Torbox and persist its handle (used by all entry points).
 
@@ -1574,11 +1575,19 @@ class MangaScheduler:
         """
         engine = "torbox"
         wanted = [float(v) for v in (missing_volumes or [])]
+        if force_whole:
+            # Explicit admin/user override: submit the whole torrent even though the
+            # strict selection would skip (nothing parsed as missing). The per-release
+            # flag makes the later fetch plan fall back to whole-torrent selection.
+            try:
+                self.db.set_release_force_whole(release_id, True)
+            except Exception as exc:  # pragma: no cover - flag is best effort
+                logger.debug("Could not persist force-whole flag for #%s: %s", release_id, exc)
         # Strict exact-volume selection: never submit a torrent when nothing is missing.
         strict_selection = as_bool(
             self.db.get_setting("torbox_strict_volume_selection", "true"), default=True,
         )
-        if strict_selection and not wanted:
+        if strict_selection and not wanted and not force_whole:
             message = (
                 f"Torbox submit skipped for '{title}': nothing missing (all volumes already owned); "
                 "no Torbox slot consumed."
@@ -2214,10 +2223,31 @@ class MangaScheduler:
         """
         title = str(release.get("title") or "")
         strict = as_bool(self.db.get_setting("torbox_strict_volume_selection", "true"), default=True)
+        forced_whole = bool(release.get("torbox_force_whole"))
+        if forced_whole:
+            # Explicit whole-torrent override: fetch every file individually (not a
+            # whole-torrent zip) so the user can pick volumes afterwards.
+            strict = False
         wanted = {float(value) for value in (wanted_volumes or [])}
         logger.debug(
             "Torbox selection for '%s': strict=%s wanted volumes %s", title, strict, sorted(wanted),
         )
+        if forced_whole and files:
+            max_bytes = self._torbox_max_download_bytes()
+            for item in files:
+                self._check_torbox_file_size(item, max_bytes)
+            return {
+                "action": "files",
+                "files": list(files),
+                "reason": f"forced whole torrent: {len(files)} file(s)",
+                "mapping": [],
+                "strict": False,
+                "wanted_volumes": sorted(wanted),
+                "selected_volumes": [],
+                "skipped_volumes": [],
+                "selected_count": len(files),
+                "total_files": len(files),
+            }
         if not strict:
             selection, reason = self._legacy_torbox_selection(files, wanted)
             return {

@@ -61,6 +61,10 @@ semantic versioning.
 - **Searchable manual series matches** in Settings (250 ms debounce, explicit no-match state).
 
 ### Changed
+- **Force a whole-torrent download:** when Torbox skips a release as "nothing missing", the
+  Download button arms a 4-second retry ("Download whole torrent"). The second click submits
+  the entire release and disables strict per-volume selection for it, so every file downloads
+  individually and volumes can be picked/tagged afterwards.
 - **AniList quota protection:** complete-series volume expansion no longer re-resolves releases
   that already have volumes, failed lookups are throttled to one attempt per 24 h per release
   (explicit series refresh bypasses it), candidate detection no longer makes its own AniList

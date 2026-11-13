@@ -292,14 +292,26 @@
 </div>
 
 <script>
+let _dashboardForceArmedUntil = {};
 async function downloadRelease(relId) {
     const btn = document.querySelector('[data-dashboard-download="' + relId + '"]');
     const label = btn ? btn.querySelector('span') || btn : null;
+    const forceWhole = !!(_dashboardForceArmedUntil[relId] && Date.now() < _dashboardForceArmedUntil[relId]);
+    delete _dashboardForceArmedUntil[relId];
     if (btn) { btn.disabled = true; }
     if (label) { label.textContent = 'Sending…'; }
     try {
-        const res = await fetch(`/api/releases/${relId}/download`, { method: 'POST' });
+        const res = await fetch(`/api/releases/${relId}/download`, forceWhole
+            ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force: true }) }
+            : { method: 'POST' });
         const data = await res.json();
+        if (data.status === 'skipped' && !forceWhole) {
+            _dashboardForceArmedUntil[relId] = Date.now() + 4000;
+            if (btn) btn.disabled = false;
+            if (label) label.textContent = 'Force download';
+            showToast((data.message || 'Nothing missing') + ' Click again within 4 seconds to force the whole torrent.', 'warning');
+            return;
+        }
         if (res.status === 202 || data.status === 'pending_approval' || data.status === 'already_pending') {
             if (label) { label.textContent = 'Awaiting approval'; }
             showToast(data.message || 'Request sent — waiting for an admin to approve it.', 'info');

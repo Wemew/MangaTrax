@@ -499,6 +499,74 @@ def test_anilist_negative_volume_cache(ctx):
     assert fetch.call_count == 2, fetch.call_count  # one normal + one forced; cached miss avoided
 
 
+def test_torbox_force_whole_override(ctx, red):
+    ctx.db.set_setting("torbox_strict_volume_selection", "true")
+    release_id = _release(ctx, "force-1", "Force Me v01", "Force Me", status="REQUESTED")
+    with ctx.db.get_connection() as conn:
+        conn.execute("UPDATE releases SET volumes_json = '[]', volumes_json = '[]' WHERE id = ?;", (release_id,))
+        conn.commit()
+
+    submitted = {}
+    class StubTorbox:
+        name = "torbox"
+        def submit(self, release, savepath, wanted_volumes=None):
+            submitted["wanted"] = list(wanted_volumes or [])
+            submitted["title"] = release.get("title")
+            return {"handle": {"torrent_id": 777, "hash": "h", "savepath": savepath,
+                               "wanted_volumes": list(wanted_volumes or [])}, "state": "ready"}
+
+    with patch.object(ctx.scheduler, "get_downloads_dir", return_value=ctx.temp_dir), \
+         patch("app.scheduler.build_downloader", return_value=StubTorbox()):
+        plain = ctx.scheduler.submit_torbox_download(
+            release_id, "Force Me v01", "magnet:?xt=urn:btih:deadbeef", missing_volumes=[],
+        )
+        forced = ctx.scheduler.submit_torbox_download(
+            release_id, "Force Me v01", "magnet:?xt=urn:btih:deadbeef", missing_volumes=[],
+            force_whole=True,
+        )
+    assert plain.get("skipped") is True, plain
+    assert forced.get("success") and not forced.get("skipped"), forced
+    assert submitted["wanted"] == [], submitted
+    assert int(ctx.db.get_release_by_id(release_id)["torbox_force_whole"]) == 1
+
+    # The fetch plan ignores strict selection for this release.
+    files = [
+        {"name": "Force Me v01.cbz", "size": 10},
+        {"name": "Force Me v02.cbz", "size": 10},
+    ]
+    plan = ctx.scheduler._plan_torbox_selection(
+        ctx.db.get_release_by_id(release_id), files, [], total_size=0,
+    )
+    assert plan.get("action") == "files", plan
+    assert len(plan.get("files") or []) == len(files), plan
+    assert "forced whole torrent" in (plan.get("reason") or ""), plan
+
+    # The endpoint forwards force=true and advertises the retry on a plain skip.
+    with patch.object(main_app, "_current_user_row", return_value=red), \
+         patch.object(main_app, "resolve_downloader_engine", return_value="torbox"), \
+         patch.object(main_app.scheduler, "submit_torbox_download", return_value={
+             "success": True, "skipped": True, "message": "nothing missing"}) as submit:
+        plain_res = ctx.client.post(f"/api/releases/{release_id}/download")
+    assert plain_res.status_code == 200 and plain_res.json()["status"] == "skipped"
+    assert plain_res.json()["force_available"] is True, plain_res.text
+
+    with patch.object(main_app, "_current_user_row", return_value=red), \
+         patch.object(main_app, "resolve_downloader_engine", return_value="torbox"), \
+         patch.object(main_app.scheduler, "submit_torbox_download", return_value={
+             "success": True, "skipped": False, "engine": "torbox"}) as submit:
+        forced_res = ctx.client.post(
+            f"/api/releases/{release_id}/download", json_data={"force": True},
+        )
+    assert forced_res.status_code == 200, forced_res.text
+    assert submit.call_args.kwargs.get("force_whole") is True, submit.call_args
+
+    templates = os.path.join(BACKEND_DIR, "app", "templates")
+    for name in ("releases.html", "prioritized.html", "index.html"):
+        source = open(os.path.join(templates, name), encoding="utf-8").read()
+        assert "force: true" in source, name
+        assert "within 4 seconds" in source, name
+
+
 def test_unresolved_series_queue_and_manual_link(ctx, red):
     with ctx.db.get_connection() as conn:
         cur = conn.execute(
@@ -669,6 +737,7 @@ def main():
         test_staging_dir_scoping(ctx, red, blue)
         test_per_user_routing(ctx, blue)
         test_complete_expansion_stops_requerying(ctx)
+        test_torbox_force_whole_override(ctx, red)
         test_unresolved_series_queue_and_manual_link(ctx, red)
         test_anilist_negative_volume_cache(ctx)
         test_staging_groups_split_by_owner(ctx)

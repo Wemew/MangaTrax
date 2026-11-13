@@ -4131,8 +4131,15 @@ async def api_release_download_state(release_id: int):
 
 
 @app.post("/api/releases/{release_id}/download")
-async def api_release_download(release_id: int):
-    """Manually send a release to the configured download engine (qBittorrent or Torbox)."""
+async def api_release_download(release_id: int, payload: Optional[Dict[str, Any]] = None):
+    """Manually send a release to the configured download engine (qBittorrent or Torbox).
+
+    ``force=true`` (second click after a "nothing missing" skip) submits the whole
+    release and disables strict per-volume selection for it, so the user can pick
+    volumes after the download.
+    """
+    body = payload or {}
+    force_whole = body.get("force") is True
     target = db.get_release_by_id(release_id)
     if not target:
         raise HTTPException(status_code=404, detail="Release not found")
@@ -4203,19 +4210,25 @@ async def api_release_download(release_id: int):
             str(download_url or ""),
             link=str(target.get("link") or ""),
             missing_volumes=[float(v) for v in (missing or [])],
-            source="manual",
+            source="manual-force" if force_whole else "manual",
             guid=str(target.get("guid") or ""),
             torrent_hash=str(target.get("torrent_hash") or ""),
+            force_whole=force_whole,
         )
         if result.get("success"):
             if result.get("skipped"):
                 return JSONResponse({
                     "status": "skipped",
                     "engine": "torbox",
+                    "force_available": not force_whole,
                     "message": result.get("message") or "Nothing missing; Torbox submit skipped",
                     "state": release_download_state(db.get_release_by_id(release_id)),
                 })
-            db.log_activity("MANUAL_DOWNLOAD", f"Sent to Torbox: '{target['title']}'", "Engine: torbox")
+            db.log_activity(
+                "MANUAL_DOWNLOAD",
+                f"Sent to Torbox: '{target['title']}'" + (" (forced whole torrent)" if force_whole else ""),
+                "Engine: torbox",
+            )
             await asyncio.to_thread(scheduler.process_downloads_to_staging, None)
             return JSONResponse({
                 "status": "success",
@@ -4247,7 +4260,8 @@ async def api_release_download(release_id: int):
         )
         db.log_activity("MANUAL_DOWNLOAD", f"Sent to downloader: '{target['title']}'", f"URL: {download_url[:60]}...")
 
-        if torrent_h and target.get("is_bundle") and missing and len(missing) < len(vols):
+        if (not force_whole and torrent_h and target.get("is_bundle")
+                and missing and len(missing) < len(vols)):
             sel_res = qbit.apply_selective_volume_download(torrent_h, [float(v) for v in missing])
             if sel_res.get("status") == "filtered":
                 db.log_activity(

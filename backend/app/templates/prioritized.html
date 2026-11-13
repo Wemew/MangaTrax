@@ -608,12 +608,23 @@ function _priorityPoll(releaseId) {
     _priorityReleaseTimers[releaseId] = setTimeout(poll, 1500);
 }
 
+let _torboxForceArmedUntil = {};
 async function downloadRelease(relId, button) {
     const btn = button || document.querySelector(`[data-release-id="${relId}"] .download-release-btn`);
+    const forceWhole = !!(_torboxForceArmedUntil[relId] && Date.now() < _torboxForceArmedUntil[relId]);
+    delete _torboxForceArmedUntil[relId];
     if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
     try {
-        const res = await fetch(`/api/releases/${relId}/download`, { method: 'POST' });
+        const res = await fetch(`/api/releases/${relId}/download`, forceWhole
+            ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force: true }) }
+            : { method: 'POST' });
         const data = await res.json();
+        if (data.status === 'skipped' && !forceWhole) {
+            _torboxForceArmedUntil[relId] = Date.now() + 4000;
+            if (btn) { btn.disabled = false; btn.textContent = 'Download whole torrent'; }
+            showToast((data.message || 'Nothing missing') + ' Click the button again within 4 seconds to force the whole torrent.', 'warning');
+            return;
+        }
         if (res.status === 202 || data.status === 'pending_approval' || data.status === 'already_pending') {
             if (btn) { btn.disabled = true; btn.textContent = 'Awaiting approval'; }
             showToast(data.message || 'Request sent — waiting for an admin to approve it.', 'info');

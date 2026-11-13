@@ -554,6 +554,10 @@ class MangaDatabase:
             # on every 5-minute background pass.
             if "complete_expand_attempted_at" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN complete_expand_attempted_at TEXT DEFAULT '';")
+            # Explicit "download the whole torrent anyway" override (second Download
+            # click after a strict-volume skip); bypasses per-volume selection.
+            if "torbox_force_whole" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN torbox_force_whole INTEGER DEFAULT 0;")
             # Downloaded-file tracking (task-30): files fetched by an engine, when they
             # arrived, and when routing moved them out of the raw downloads folder.
             if "download_files_json" not in r_cols:
@@ -2520,6 +2524,15 @@ class MangaDatabase:
         return [dict(row) for row in rows]
 
     # --- Request approvals ---
+
+    def set_release_force_whole(self, release_id: int, force_whole: bool) -> None:
+        """Persist the whole-torrent override for one release (Torbox selection)."""
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE releases SET torbox_force_whole = ? WHERE id = ?;",
+                (1 if force_whole else 0, int(release_id)),
+            )
+            conn.commit()
 
     def set_release_request_user(self, release_id: int, user_id: Optional[int]) -> None:
         """Remember whose staging folder an approved download must land in."""
