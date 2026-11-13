@@ -10,46 +10,30 @@ from app.parser import extract_manga_bundle_and_volumes, is_chapter_only, is_lig
 logger = logging.getLogger("mangatrax.providers.rss")
 
 #: Source pages (jnovels and similar) put the actual download behind an anchor like
-#: ``<a href="https://any-host.example/xxxx">VOLUME 23</a>``. The host is arbitrary,
-#: so only the anchor text identifies it; keep that href for a per-release button.
+#: ``<a href="https://charexempire.com/xxxx">VOLUME 23</a>``. Keep that link so the
+#: row can show a direct button instead of requiring a trip through the article.
 _SOURCE_VOLUME_ANCHOR_RE = re.compile(
-    r'<a\b[^>]*href=["\'](?P<href>[^"\']+)["\'][^>]*>'
-    r'\s*(?:<[^>]+>\s*)*(?:volume|vol\.?)\s*\d+',
+    r'<a\b[^>]*href=["\'](?P<href>https?://[^"\']+)["\'][^>]*>\s*(?:volume|vol\.?)\s*\d+',
     re.IGNORECASE | re.DOTALL,
 )
-_SOURCE_DOWNLOAD_ANCHOR_RE = re.compile(
-    r'<a\b[^>]*href=["\'](?P<href>[^"\']+)["\'][^>]*>'
-    r'\s*(?:<[^>]+>\s*)*(?:download|get)\b',
-    re.IGNORECASE | re.DOTALL,
-)
+_SOURCE_HOST_FALLBACK_RE = re.compile(r'https?://charexempire\.com/[^\s"\'<>]+', re.IGNORECASE)
 
 
-def extract_source_link(summary: str, base_url: str = "") -> str:
+def extract_source_link(summary: str) -> str:
     """Extract a per-post direct download link (e.g. jnovels' VOLUME anchor).
 
-    The target host is arbitrary: the first anchor whose text starts with
-    ``VOLUME n``/``VOL n`` wins, then a ``DOWNLOAD``/``GET`` anchor. Relative hrefs
-    are resolved against *base_url*; non-http(s) targets are ignored. Empty string
-    means the post has no recognisable direct link, so ordinary RSS feeds are
-    unaffected.
+    Returns an empty string when the post has no such anchor, so ordinary RSS feeds
+    are unaffected. The first matching anchor wins; a charexempire link is used as a
+    fallback for anchors whose text was altered.
     """
-    import urllib.parse
-
     html = str(summary or "")
     if not html:
         return ""
-    href = ""
-    for pattern in (_SOURCE_VOLUME_ANCHOR_RE, _SOURCE_DOWNLOAD_ANCHOR_RE):
-        match = pattern.search(html)
-        if match:
-            href = str(match.group("href") or "").strip()
-            break
-    if not href:
-        return ""
-    resolved = urllib.parse.urljoin(str(base_url or ""), href)
-    scheme = urllib.parse.urlsplit(resolved).scheme.lower()
-    return resolved if scheme in ("http", "https") else ""
-
+    match = _SOURCE_VOLUME_ANCHOR_RE.search(html)
+    if match:
+        return match.group("href").strip()
+    fallback = _SOURCE_HOST_FALLBACK_RE.search(html)
+    return fallback.group(0).strip() if fallback else ""
 
 FEED_FETCH_TIMEOUT_SECONDS = 15.0
 
@@ -233,7 +217,7 @@ class RSSFeedProvider(BaseFeedProvider):
                 description=clean_desc,
                 guid=entry.get("id") or entry.get("guid") or web_post_link,
                 source_feed_name=self.name,
-                source_link=extract_source_link(summary, web_post_link),
+                source_link=extract_source_link(summary),
                 raw_data={
                     "confidence": parsed["confidence"],
                     "post_size": post_size,

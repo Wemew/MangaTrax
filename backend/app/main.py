@@ -1706,7 +1706,7 @@ async def api_releases_grouped(status: Optional[str] = None):
     groups = db.get_releases_grouped_by_series(status=status)
     return JSONResponse({"status": "success", "count": len(groups), "series_groups": groups})
 
-@app.post("/api/maintenance/refresh-tags", dependencies=[Depends(require_admin)])
+@app.post("/api/maintenance/refresh-tags")
 async def api_refresh_provider_tags():
     """Backfill AniList tags onto existing releases/series (persisted task)."""
     info = background_tasks.run_in_background(
@@ -1715,67 +1715,6 @@ async def api_refresh_provider_tags():
             progress=reporter.report, cancel_check=lambda: reporter.cancelled,
         ),
         actor=auth_module.get_current_actor(), scope="tags", cancellable=True,
-    )
-    return JSONResponse({"status": "started", **info})
-
-
-def _fetch_article_source_link(url: str) -> str:
-    """Fetch one release article and extract its direct source link (SSRF-guarded)."""
-    import urllib.request
-
-    from app.providers.rss import extract_source_link
-
-    security.validate_outbound_url(url)
-    request = urllib.request.Request(
-        url, headers={
-            "User-Agent": "MangaTrax/1.0 (source-link backfill; +https://github.com/Wemew/MangaTrax)",
-            "Accept": "text/html,application/xhtml+xml",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=10) as response:
-        if getattr(response, "status", 200) != 200:
-            return ""
-        raw = response.read(2_000_000)
-    return extract_source_link(raw.decode("utf-8", "replace"), url)
-
-
-@app.post("/api/maintenance/backfill-source-links", dependencies=[Depends(require_admin)])
-async def api_backfill_source_links(payload: Optional[Dict[str, Any]] = None):
-    """Fetch cached release articles and fill their direct source links.
-
-    Only rows with an empty ``source_link`` and an HTTP article link (not Nyaa view
-    pages) are scanned, newest state preserved; the task reports checked/updated.
-    """
-    body = payload or {}
-    try:
-        limit = max(1, min(int(body.get("limit") or 300), 2000))
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="limit must be an integer")
-    actor = auth_module.get_current_actor()
-
-    def _worker(reporter):
-        rows = db.list_releases_missing_source_link(limit)
-        total = len(rows)
-        updated = 0
-        failed = 0
-        for index, row in enumerate(rows, 1):
-            if reporter.cancelled:
-                break
-            reporter.report(index - 1, total, f"Checking '{row.get('title') or ''}'…")
-            try:
-                link = _fetch_article_source_link(str(row.get("link") or ""))
-                if link and db.set_release_source_link(int(row["id"]), link):
-                    updated += 1
-            except Exception as exc:
-                failed += 1
-                logger.debug("Source-link backfill failed for #%s: %s", row.get("id"), exc)
-            time.sleep(0.15)
-        reporter.report(total, total, f"Source links: {updated} filled, {failed} failed", progress_pct=100.0, force=True)
-        return {"checked": total, "updated": updated, "failed": failed}
-
-    info = background_tasks.run_in_background(
-        db, "maintenance:source-links", "Backfill release source links",
-        _worker, actor=actor, scope="source-links", cancellable=True,
     )
     return JSONResponse({"status": "started", **info})
 
