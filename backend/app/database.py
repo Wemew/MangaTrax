@@ -2627,6 +2627,35 @@ class MangaDatabase:
 
     # --- Request approvals ---
 
+    def list_releases_missing_source_link(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Cached releases whose article link may still contain a direct source link."""
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, title, link FROM releases
+                WHERE (source_link IS NULL OR trim(source_link) = '')
+                  AND link IS NOT NULL AND link LIKE 'http%'
+                  AND lower(link) NOT LIKE '%nyaa.si%'
+                ORDER BY id ASC
+                LIMIT ?;
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_release_source_link(self, release_id: int, source_link: str) -> bool:
+        clean = str(source_link or "").strip()
+        if not clean:
+            return False
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE releases SET source_link = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (clean, int(release_id)),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
     def set_release_force_whole(self, release_id: int, force_whole: bool) -> None:
         """Persist the whole-torrent override for one release (Torbox selection)."""
         with self.get_connection() as conn:

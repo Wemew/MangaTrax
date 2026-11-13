@@ -499,7 +499,7 @@ def test_anilist_negative_volume_cache(ctx):
     assert fetch.call_count == 2, fetch.call_count  # one normal + one forced; cached miss avoided
 
 
-def test_source_link_extraction_persistence_and_buttons(ctx):
+def test_source_link_extraction_persistence_and_buttons(ctx, red):
     from app.providers.rss import extract_source_link
 
     summary = (
@@ -507,11 +507,19 @@ def test_source_link_extraction_persistence_and_buttons(ctx):
         '<a href="https://charexempire.com/4aVx" rel="nofollow">VOLUME 23</a>'
     )
     assert extract_source_link(summary) == "https://charexempire.com/4aVx"
-    assert extract_source_link('<a href="https://example.com/x">Other</a>') == ""
-    # Fallback when the anchor text was altered but the host is known.
+    # Any host is accepted; only the anchor text identifies the direct link.
     assert extract_source_link(
-        '<a href="https://charexempire.com/abcd">Download</a>'
-    ) == "https://charexempire.com/abcd"
+        '<a href="https://files.example.net/abc123">VOLUME 7</a>'
+    ) == "https://files.example.net/abc123"
+    # Relative targets resolve against the article URL.
+    assert extract_source_link(
+        '<a href="/direct/vol-3.epub">Volume 3</a>', "https://jnovels.com/post/"
+    ) == "https://jnovels.com/direct/vol-3.epub"
+    # "Download"/"Get" anchors are the fallback when the volume text was altered.
+    assert extract_source_link(
+        '<a href="https://mirror.example.org/get/42">Download</a>'
+    ) == "https://mirror.example.org/get/42"
+    assert extract_source_link('<a href="javascript:void(0)">VOLUME 2</a>') == ""
 
     ctx.db.upsert_release({
         "guid": "src-1", "title": "Grimgar Volume 23 Epub", "link": "https://jnovels.com/post/",
@@ -528,6 +536,37 @@ def test_source_link_extraction_persistence_and_buttons(ctx):
     with ctx.db.get_connection() as conn:
         kept = dict(conn.execute("SELECT * FROM releases WHERE guid = 'src-1';").fetchone())
     assert kept["source_link"] == "https://charexempire.com/4aVx", kept
+
+    # The backfill scan lists only empty-source HTTP article rows (Nyaa excluded).
+    candidates = ctx.db.list_releases_missing_source_link(50)
+    ids = {row["id"] for row in candidates}
+    assert int(kept["id"]) not in ids, ids
+    with ctx.db.get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO releases (guid, title, link, download_url, status) VALUES (?,?,?,?,?)",
+            ("src-2", "Article Row", "https://jnovels.com/another-post/", "https://jnovels.com/another-post/", "NEW"),
+        )
+        pending_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO releases (guid, title, link, download_url, status) VALUES (?,?,?,?,?)",
+            ("src-3", "Nyaa Row", "https://nyaa.si/view/1", "https://nyaa.si/download/1.torrent", "NEW"),
+        )
+        conn.commit()
+    candidates = ctx.db.list_releases_missing_source_link(50)
+    assert pending_id in {row["id"] for row in candidates}
+    assert not any("nyaa.si" in (row["link"] or "") for row in candidates)
+    assert ctx.db.set_release_source_link(pending_id, "https://mirror.example.org/get/9") is True
+    assert pending_id not in {row["id"] for row in ctx.db.list_releases_missing_source_link(50)}
+
+    # Endpoint wiring: admin-only task start with the requested limit.
+    with patch.object(main_app, "_current_user_row", return_value=red), \
+         patch.object(main_app.background_tasks, "run_in_background", return_value={"task_id": 7}) as started:
+        res = ctx.client.post("/api/maintenance/backfill-source-links", json_data={"limit": 25})
+    assert res.status_code == 200 and res.json()["status"] == "started", res.text
+    assert started.called
+    settings_html = open(os.path.join(BACKEND_DIR, "app", "templates", "settings.html"), encoding="utf-8").read()
+    assert "backfillSourceLinks" in settings_html
+    assert "/api/maintenance/backfill-source-links" in settings_html
 
     templates = os.path.join(BACKEND_DIR, "app", "templates")
     for relative in (
@@ -897,7 +936,7 @@ def main():
         test_staging_dir_scoping(ctx, red, blue)
         test_per_user_routing(ctx, blue)
         test_complete_expansion_stops_requerying(ctx)
-        test_source_link_extraction_persistence_and_buttons(ctx)
+        test_source_link_extraction_persistence_and_buttons(ctx, red)
         test_manual_tag_omnibus_and_later_volume_flag(ctx, red)
         test_torbox_force_whole_override(ctx, red)
         test_unresolved_series_queue_and_manual_link(ctx, red)
