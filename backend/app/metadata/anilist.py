@@ -185,9 +185,15 @@ class AniListMetadataService:
     Provides canonical manga titles, official cover art, total volume counts, and descriptions.
     Uses SQLite database cache to minimize external queries and handle network boundaries gracefully.
     """
+    #: AniList titles without a volume count are remembered this long so background
+    #: passes do not re-query the same series every few minutes (negative cache).
+    NO_VOLUME_TTL_SECONDS = 6 * 60 * 60
+
     def __init__(self, db=None, timeout: float = 4.0):
         self.db = db
         self.timeout = timeout
+        # cache_key -> (fetched_at, metadata) for provider entries without volumes.
+        self._no_volume_results: Dict[str, Any] = {}
 
     def resolve_manga_series(self, raw_series_name: str, force_refresh: bool = False) -> Dict[str, Any]:
         """
@@ -268,6 +274,14 @@ class AniListMetadataService:
             except Exception as e:
                 logger.debug(f"Cache lookup failed for '{cache_key}': {e}")
 
+        # 1b. Negative cache: an AniList entry that carries no volume count never
+        # satisfies the cache-hit condition above, so without this it would be
+        # re-queried on every background pass.
+        cached_no_volumes = self._no_volume_results.get(cache_key)
+        if (cached_no_volumes and not force_refresh
+                and (time.time() - cached_no_volumes[0]) < self.NO_VOLUME_TTL_SECONDS):
+            return dict(cached_no_volumes[1])
+
         # 2. Query AniList
         metadata = self._fetch_from_anilist(cleaned_term)
 
@@ -295,6 +309,11 @@ class AniListMetadataService:
             if cached_snapshot and cached_snapshot.get("source") not in ("fallback", "cleaned"):
                 logger.info("Forced metadata refresh for '%s' unavailable; keeping cached values.", cache_key)
                 return cached_snapshot
+
+        if metadata and metadata.get("source") == "anilist" and not metadata.get("total_volumes"):
+            self._no_volume_results[cache_key] = (time.time(), dict(metadata))
+        elif metadata and metadata.get("total_volumes"):
+            self._no_volume_results.pop(cache_key, None)
 
         if not metadata:
             # Fallback preserving raw_series_name and its delimiters

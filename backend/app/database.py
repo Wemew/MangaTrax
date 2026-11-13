@@ -549,6 +549,11 @@ class MangaDatabase:
             # task-70: persisted light-novel classification (legacy rows included).
             if "is_light_novel" not in r_cols:
                 cur.execute("ALTER TABLE releases ADD COLUMN is_light_novel INTEGER DEFAULT 0;")
+            # Complete-series volume expansion throttle: last AniList/MangaUpdates
+            # attempt per release, so a title without a volume count is not re-queried
+            # on every 5-minute background pass.
+            if "complete_expand_attempted_at" not in r_cols:
+                cur.execute("ALTER TABLE releases ADD COLUMN complete_expand_attempted_at TEXT DEFAULT '';")
             # Downloaded-file tracking (task-30): files fetched by an engine, when they
             # arrived, and when routing moved them out of the raw downloads folder.
             if "download_files_json" not in r_cols:

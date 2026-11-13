@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import re
 import json
 import shutil
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Set
 
 from app.database import (
@@ -60,6 +60,10 @@ logger = logging.getLogger("mangatrax.scheduler")
 #: diagnostic: it must answer the UI (and any reverse proxy) instead of scanning an
 #: unbounded release table until the proxy turns the response into an HTML error page.
 ATTRIBUTION_TIME_BUDGET_SECONDS = 8.0
+
+#: A complete-series volume lookup that found no count is retried after this delay
+#: (or immediately from an explicit series refresh).
+COMPLETE_EXPAND_RETRY_SECONDS = 24 * 60 * 60
 
 #: Tokens that, when they are the ONLY thing following the stored series name in a
 #: release title, cannot change the attribution (volume/format noise). Anything else
@@ -4244,7 +4248,7 @@ class MangaScheduler:
                 logger.debug("Could not persist provider tags for release %s: %s", rel_id, exc)
         return (is_new, status, missing_vols, rel_id, series_key)
 
-    def detect_series_titles(self, series_name: str) -> List[str]:
+    def detect_series_titles(self, series_name: str, allow_anilist: bool = True) -> List[str]:
         """
         Detects and extracts all distinct titles for a series (e.g. English canonical title,
         Romaji alias, parts separated by delimiters like | or /, and titles from DB releases).
@@ -4276,9 +4280,11 @@ class MangaScheduler:
         #    (task-40).  Only the requested name, its delimiter/parenthesis parts
         #    and the AniList entry's own aliases are searched.
 
-        # 4. Check AniList metadata cache or query AniList
+        # 4. Check AniList metadata cache or query AniList. Background expansion
+        # passes call with allow_anilist=False: they resolve each candidate later,
+        # and doing it here too doubled/tripled AniList traffic per release.
         initial_check = list(candidates) if candidates else [clean_name]
-        for term in initial_check[:3]:
+        for term in initial_check[:3] if allow_anilist else []:
             try:
                 meta = self.anilist.resolve_manga_series(term)
                 if meta:
@@ -5159,14 +5165,16 @@ class MangaScheduler:
                 )
                 if series_name:
                     cur.execute(f"""
-                        SELECT id, guid, title, series_name, volumes_json, missing_vols_json, status, download_url, link, cover_url
+                        SELECT id, guid, title, series_name, volumes_json, missing_vols_json, status, download_url, link, cover_url,
+                               complete_expand_attempted_at
                         FROM releases
                         WHERE {complete_clause}
                           AND lower(series_name) = lower(?);
                     """, (str(series_name).strip(),))
                 else:
                     cur.execute(f"""
-                        SELECT id, guid, title, series_name, volumes_json, missing_vols_json, status, download_url, link, cover_url
+                        SELECT id, guid, title, series_name, volumes_json, missing_vols_json, status, download_url, link, cover_url,
+                               complete_expand_attempted_at
                         FROM releases
                         WHERE {complete_clause};
                     """)
@@ -5191,7 +5199,23 @@ class MangaScheduler:
                     m_list = json.loads(m_raw)
                 except Exception:
                     m_list = []
-            if not v_list or (v_list and len(m_list) == len(v_list)):
+            # Only releases without resolved volumes need a lookup. Once expanded
+            # (even when every volume is still missing) Calibre reconciliation owns
+            # the state; re-expanding would re-query AniList for the same series on
+            # every background pass.
+            if not v_list:
+                attempted_raw = str(r.get("complete_expand_attempted_at") or "").strip()
+                attempted_at = 0.0
+                if attempted_raw:
+                    try:
+                        attempted_at = datetime.strptime(
+                            attempted_raw[:19], "%Y-%m-%d %H:%M:%S"
+                        ).replace(tzinfo=timezone.utc).timestamp()
+                    except (TypeError, ValueError):
+                        attempted_at = 0.0
+                # Explicit series refreshes bypass the throttle; background passes do not.
+                if not series_name and attempted_at and (time.time() - attempted_at) < COMPLETE_EXPAND_RETRY_SECONDS:
+                    continue
                 unexpanded.append(r)
 
         if not unexpanded:
@@ -5214,13 +5238,21 @@ class MangaScheduler:
             s_name = (r.get("series_name") or "").strip()
 
             candidates = []
+            seen_candidate_norms = set()
+
+            def _add_candidate(value):
+                clean = str(value or "").strip()
+                norm = normalize_text(clean)
+                if not clean or not norm or norm in seen_candidate_norms:
+                    return
+                seen_candidate_norms.add(norm)
+                candidates.append(clean)
+
             if s_name:
-                candidates.append(s_name)
-                detected = self.detect_series_titles(s_name)
-                for d in detected:
-                    if d not in candidates:
-                        candidates.append(d)
-            candidates.append(title)
+                _add_candidate(s_name)
+                for detected in self.detect_series_titles(s_name, allow_anilist=False):
+                    _add_candidate(detected)
+            _add_candidate(title)
 
             tot = None
             resolved_meta = None
@@ -5255,6 +5287,16 @@ class MangaScheduler:
                                 break
                     except Exception:
                         pass
+
+            try:
+                with self.db.get_connection() as conn:
+                    conn.execute(
+                        "UPDATE releases SET complete_expand_attempted_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                        (rel_id,),
+                    )
+                    conn.commit()
+            except Exception as exc:  # pragma: no cover - throttle is best effort
+                logger.debug("Could not record complete-expansion attempt for #%s: %s", rel_id, exc)
 
             if tot and tot > 0:
                 vols = [float(v) for v in range(1, tot + 1)]

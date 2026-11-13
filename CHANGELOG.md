@@ -56,6 +56,10 @@ semantic versioning.
 - **Searchable manual series matches** in Settings (250 ms debounce, explicit no-match state).
 
 ### Changed
+- **AniList quota protection:** complete-series volume expansion no longer re-resolves releases
+  that already have volumes, failed lookups are throttled to one attempt per 24 h per release
+  (explicit series refresh bypasses it), candidate detection no longer makes its own AniList
+  calls during expansion, and entries without a volume count are negatively cached for 6 h.
 - **Admin recognition fixed for PocketID:** the OIDC client now requests the `groups` scope
   (PocketID only emits the claim when it is requested), so `MANGATRAX_ADMIN_GROUPS=admin`
   matches the IdP group name; the login log records the received groups and `GET /api/whoami`

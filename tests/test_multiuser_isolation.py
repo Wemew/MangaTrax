@@ -437,6 +437,68 @@ def test_admin_surface_source_guards(ctx):
     assert "{% if is_admin() %}" in release_row, "catalog mutation buttons must be admin-only"
 
 
+def test_complete_expansion_stops_requerying(ctx):
+    """Expanded complete releases and failed lookups must not hit AniList every pass."""
+    with ctx.db.get_connection() as conn:
+        conn.execute(
+            "INSERT INTO releases (guid, title, series_name, status, is_complete, "
+            "volumes_json, missing_vols_json) VALUES (?,?,?,?,?,?,?)",
+            ("complete-expanded", "Expanded Series (Complete)", "Expanded Series", "DISCOVERY", 1,
+             json.dumps([1.0, 2.0, 3.0]), json.dumps([1.0, 2.0, 3.0])),
+        )
+        conn.execute(
+            "INSERT INTO releases (guid, title, series_name, status, is_complete) VALUES (?,?,?,?,?)",
+            ("complete-unknown", "Unknown Series (Complete)", "Unknown Series", "DISCOVERY", 1),
+        )
+        conn.commit()
+
+    calls = []
+    def _identity(name, *args, **kwargs):
+        calls.append(name)
+        return {}  # provider has no volume count for this title
+
+    with patch.object(ctx.scheduler.anilist, "resolve_manga_series", side_effect=_identity), \
+         patch.object(ctx.scheduler.mangaupdates, "get_series_info", return_value={}):
+        first = ctx.scheduler.expand_unresolved_complete_releases()
+    assert first == 0
+    assert calls, "the unknown complete release should be tried once"
+    seen_norms = [str(name).strip().lower() for name in calls]
+    assert len(seen_norms) == len(set(seen_norms)), calls  # no duplicate candidate storm in one pass
+    assert len(calls) <= 2, calls  # series name + full title, deduplicated
+    after_first = len(calls)
+
+    with patch.object(ctx.scheduler.anilist, "resolve_manga_series", side_effect=_identity), \
+         patch.object(ctx.scheduler.mangaupdates, "get_series_info", return_value={}):
+        second = ctx.scheduler.expand_unresolved_complete_releases()
+        third = ctx.scheduler.expand_unresolved_complete_releases()
+    assert second == 0 and third == 0
+    assert len(calls) == after_first, "throttled passes must not re-query AniList"
+
+    with patch.object(ctx.scheduler.anilist, "resolve_manga_series", side_effect=_identity), \
+         patch.object(ctx.scheduler.mangaupdates, "get_series_info", return_value={}):
+        forced = ctx.scheduler.expand_unresolved_complete_releases(series_name="Unknown Series")
+    assert forced == 0
+    assert len(calls) > after_first, "an explicit series refresh bypasses the throttle"
+
+
+def test_anilist_negative_volume_cache(ctx):
+    from app.metadata.anilist import AniListMetadataService
+    service = AniListMetadataService(db=ctx.db)
+    meta = {
+        "canonical_title": "No Volume Series", "romaji_title": "", "cover_url": "",
+        "total_volumes": None, "status": "RELEASING", "synopsis": "",
+        "source": "anilist", "anilist_id": 424242, "synonyms": [], "genres": [], "tags": [],
+        "tags_sorted": [], "matched_term": "no volume series",
+    }
+    with patch.object(service, "_fetch_from_anilist", return_value=meta) as fetch:
+        first = service.resolve_manga_series("No Volume Series")
+        second = service.resolve_manga_series("No Volume Series")
+        forced = service.resolve_manga_series("No Volume Series", force_refresh=True)
+    assert first["anilist_id"] == 424242 and second["anilist_id"] == 424242
+    assert forced["anilist_id"] == 424242
+    assert fetch.call_count == 2, fetch.call_count  # one normal + one forced; cached miss avoided
+
+
 def test_staging_groups_split_by_owner(ctx):
     import zipfile
     from app import staging_groups as staging_groups_module
@@ -548,6 +610,8 @@ def main():
         test_admin_surface_source_guards(ctx)
         test_staging_dir_scoping(ctx, red, blue)
         test_per_user_routing(ctx, blue)
+        test_complete_expansion_stops_requerying(ctx)
+        test_anilist_negative_volume_cache(ctx)
         test_staging_groups_split_by_owner(ctx)
         test_admin_owner_bucket_merges_own_folder(ctx, red)
         test_retag_is_scoped_to_owner(ctx)
