@@ -499,6 +499,47 @@ def test_anilist_negative_volume_cache(ctx):
     assert fetch.call_count == 2, fetch.call_count  # one normal + one forced; cached miss avoided
 
 
+def test_source_link_extraction_persistence_and_buttons(ctx):
+    from app.providers.rss import extract_source_link
+
+    summary = (
+        '<p>You can now download the volume</p>'
+        '<a href="https://charexempire.com/4aVx" rel="nofollow">VOLUME 23</a>'
+    )
+    assert extract_source_link(summary) == "https://charexempire.com/4aVx"
+    assert extract_source_link('<a href="https://example.com/x">Other</a>') == ""
+    # Fallback when the anchor text was altered but the host is known.
+    assert extract_source_link(
+        '<a href="https://charexempire.com/abcd">Download</a>'
+    ) == "https://charexempire.com/abcd"
+
+    ctx.db.upsert_release({
+        "guid": "src-1", "title": "Grimgar Volume 23 Epub", "link": "https://jnovels.com/post/",
+        "download_url": "https://jnovels.com/post/", "source_link": "https://charexempire.com/4aVx",
+    })
+    with ctx.db.get_connection() as conn:
+        row = dict(conn.execute("SELECT * FROM releases WHERE guid = 'src-1';").fetchone())
+    assert row["source_link"] == "https://charexempire.com/4aVx", row
+    # A later feed poll without the link must not erase it.
+    ctx.db.upsert_release({
+        "guid": "src-1", "title": "Grimgar Volume 23 Epub", "link": "https://jnovels.com/post/",
+        "download_url": "https://jnovels.com/post/", "source_link": "",
+    })
+    with ctx.db.get_connection() as conn:
+        kept = dict(conn.execute("SELECT * FROM releases WHERE guid = 'src-1';").fetchone())
+    assert kept["source_link"] == "https://charexempire.com/4aVx", kept
+
+    templates = os.path.join(BACKEND_DIR, "app", "templates")
+    for relative in (
+        os.path.join("partials", "flat_release_row_chunk.html"),
+        os.path.join("partials", "series_card_chunk.html"),
+        "index.html",
+    ):
+        source = open(os.path.join(templates, relative), encoding="utf-8").read()
+        assert "r.source_link" in source, relative
+        assert "safe_url" in source, relative
+
+
 def test_manual_tag_omnibus_and_later_volume_flag(ctx, red):
     import zipfile
     from app.tagger import cbz_tagger
@@ -856,6 +897,7 @@ def main():
         test_staging_dir_scoping(ctx, red, blue)
         test_per_user_routing(ctx, blue)
         test_complete_expansion_stops_requerying(ctx)
+        test_source_link_extraction_persistence_and_buttons(ctx)
         test_manual_tag_omnibus_and_later_volume_flag(ctx, red)
         test_torbox_force_whole_override(ctx, red)
         test_unresolved_series_queue_and_manual_link(ctx, red)

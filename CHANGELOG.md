@@ -61,6 +61,10 @@ semantic versioning.
 - **Searchable manual series matches** in Settings (250 ms debounce, explicit no-match state).
 
 ### Changed
+- **Per-release "Source" button:** RSS posts that hide the real download behind an anchor such as
+  jnovels' "VOLUME 23" link now store that href (`releases.source_link`) and expose a one-click
+  Source button on Releases, Library cards and the dashboard, opening the link in a new tab.
+  Existing rows are backfilled on the next feed poll; feeds without such an anchor are unchanged.
 - **Omnibus tagging:** the Preview & Manual Tag modal gained an Omnibus toggle next to Volume.
   The ComicInfo Title ends in "Omnibus" instead of a `vNN` marker, the omnibus file is not flagged
   for its missing volume marker, and a later volume for the same series is flagged for manual
